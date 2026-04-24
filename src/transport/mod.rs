@@ -1,24 +1,33 @@
-//! HTTP transport for Bitbucket API calls.
+//! HTTP transport for Atlassian product API calls.
 //!
-//! Ports `src/utils/transport.util.ts` with full response-contract parity:
+//! Vendor-neutral. The base URL, path normalisation, and non-2xx error
+//! envelope parsing are all delegated to the [`Vendor`] trait
+//! ([`crate::vendor`]). Everything else (auth header, request building,
+//! 10 MB response cap, body classification, raw-response persistence) is
+//! shared across vendors.
 //!
-//! - Basic auth header built from resolved [`Credentials`](crate::auth::Credentials).
-//! - Configurable request timeout via `ATLASSIAN_REQUEST_TIMEOUT`, defaulting
-//!   to [`NETWORK_TIMEOUTS::DEFAULT_REQUEST`](crate::constants::network_timeouts).
-//! - 10 MB response size cap from the advertised `Content-Length` header
-//!   (CWE-770 mitigation).
-//! - Response classifier matching TS behaviour:
-//!   - `204` → empty object, no raw path
-//!   - `text/plain` → raw text pass-through (diffs), no raw path
-//!   - empty body → empty object, no raw path
-//!   - JSON parse success → parsed value + raw response persisted to disk
-//!   - JSON parse failure → raw text, no raw path
-//! - Non-ok responses: Bitbucket error body parsed via
-//!   [`bitbucket_error`](self::bitbucket_error) and mapped to the typed
-//!   [`McpError`](crate::error::McpError) factories.
+//! Response classifier (matches the TS reference for both Bitbucket and
+//! Jira via [`fetch`]):
+//! - `204` → empty object, no raw path
+//! - `text/plain` → raw text pass-through (e.g. Bitbucket diffs), no raw
+//!   path
+//! - empty body → empty object, no raw path
+//! - JSON parse success → parsed value + raw response persisted to disk
+//! - JSON parse failure → raw text, no raw path
+//!
+//! ## Back-compat shims
+//!
+//! [`fetch_bitbucket`] and [`fetch_bitbucket_with_base`] are preserved as
+//! thin shims that construct a [`BitbucketVendor`] and call [`fetch`].
+//! New code should call [`fetch`] directly with the vendor it needs.
 
-pub mod bitbucket_error;
 pub mod raw_response;
+
+/// Re-export of the Bitbucket error parser at its old path. Kept so
+/// downstream tests (`tests/bitbucket_error_tests.rs`) and any external
+/// consumers continue to compile after the parser moved into
+/// [`crate::vendor::bitbucket::error`].
+pub use crate::vendor::bitbucket::error as bitbucket_error;
 
 use std::time::Duration;
 
@@ -33,10 +42,10 @@ use crate::constants::{data_limits::MAX_RESPONSE_SIZE, network_timeouts::DEFAULT
 use crate::error::{
     McpError, OriginalError, api_error, auth_invalid, auth_missing_default, unexpected,
 };
+use crate::vendor::Vendor;
+use crate::vendor::bitbucket::BitbucketVendor;
 
-const BASE_URL: &str = "https://api.bitbucket.org";
-
-/// HTTP verb set accepted by the generic Bitbucket client. Mirrors the TS
+/// HTTP verb set accepted by the generic API client. Mirrors the TS
 /// `RequestOptions.method` union.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HttpMethod {
@@ -69,7 +78,7 @@ impl HttpMethod {
     }
 }
 
-/// Request options for a single Bitbucket call. Matches TS `RequestOptions`.
+/// Request options for a single API call. Matches TS `RequestOptions`.
 #[derive(Debug, Clone, Default)]
 pub struct RequestOptions {
     pub method: Option<HttpMethod>,
@@ -110,28 +119,25 @@ impl ResponseBody {
     }
 }
 
-/// Main entry point. Matches TS `fetchAtlassian`.
-pub async fn fetch_bitbucket(
+/// Vendor-neutral entry point. Resolves the vendor's base URL, builds the
+/// auth header, sends the request, and classifies the response. Non-2xx
+/// responses go through [`Vendor::classify_error`] for vendor-specific
+/// envelope parsing.
+///
+/// The `path` parameter is forwarded as-is; callers (typically the
+/// controller layer) are expected to have already applied
+/// [`Vendor::normalize_path`] so that path normalisation lives in one
+/// place. The transport itself only joins base + path.
+pub async fn fetch(
     client: &Client,
+    vendor: &dyn Vendor,
     credentials: &Credentials,
     config: &Config,
     path: &str,
     options: RequestOptions,
 ) -> Result<TransportResponse, McpError> {
-    fetch_bitbucket_with_base(BASE_URL, client, credentials, config, path, options).await
-}
-
-/// Variant that lets callers point the transport at a non-default base URL
-/// (e.g. Bitbucket Server on-prem, or a local wiremock in tests).
-pub async fn fetch_bitbucket_with_base(
-    base_url: &str,
-    client: &Client,
-    credentials: &Credentials,
-    config: &Config,
-    path: &str,
-    options: RequestOptions,
-) -> Result<TransportResponse, McpError> {
-    let url = normalize_url_with_base(base_url, path);
+    let base = vendor.base_url(config)?;
+    let url = normalize_url_with_base(&base, path);
     let method = options.method.unwrap_or(HttpMethod::Get);
 
     let auth_header = validate_auth(credentials)?;
@@ -140,7 +146,12 @@ pub async fn fetch_bitbucket_with_base(
     let request_body_for_log = options.body.clone();
     let req = build_request(client, method, &url, &auth_header, &options, timeout);
 
-    debug!(%url, method = method.as_str(), "dispatching Bitbucket request");
+    debug!(
+        %url,
+        method = method.as_str(),
+        vendor = vendor.name(),
+        "dispatching API request"
+    );
 
     let start = std::time::Instant::now();
     let response = req.send().await.map_err(|e| map_reqwest_error(&e, &url))?;
@@ -151,7 +162,7 @@ pub async fn fetch_bitbucket_with_base(
     let status = response.status();
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
-        return Err(bitbucket_error::classify(status, &body_text));
+        return Err(vendor.classify_error(status, &body_text));
     }
 
     let body = classify_body(response).await?;
@@ -173,6 +184,35 @@ pub async fn fetch_bitbucket_with_base(
         data: body,
         raw_response_path: raw_path,
     })
+}
+
+/// Bitbucket-specialised shim. Equivalent to calling [`fetch`] with a
+/// fresh [`BitbucketVendor`]. Preserved for back-compat; new code should
+/// call [`fetch`] with the vendor explicitly.
+pub async fn fetch_bitbucket(
+    client: &Client,
+    credentials: &Credentials,
+    config: &Config,
+    path: &str,
+    options: RequestOptions,
+) -> Result<TransportResponse, McpError> {
+    let vendor = BitbucketVendor::new();
+    fetch(client, &vendor, credentials, config, path, options).await
+}
+
+/// Bitbucket-specialised shim that overrides the base URL (e.g. to point at
+/// a wiremock in tests). Equivalent to calling [`fetch`] with
+/// [`BitbucketVendor::with_base_url`].
+pub async fn fetch_bitbucket_with_base(
+    base_url: &str,
+    client: &Client,
+    credentials: &Credentials,
+    config: &Config,
+    path: &str,
+    options: RequestOptions,
+) -> Result<TransportResponse, McpError> {
+    let vendor = BitbucketVendor::with_base_url(base_url);
+    fetch(client, &vendor, credentials, config, path, options).await
 }
 
 /// Construct a shared reqwest client with sensible defaults. Callers should
@@ -307,14 +347,14 @@ async fn classify_body(response: reqwest::Response) -> Result<ResponseBody, McpE
 fn map_reqwest_error(err: &reqwest::Error, url: &str) -> McpError {
     if err.is_timeout() {
         return api_error(
-            format!("Request timeout: Bitbucket API did not respond in time at {url}"),
+            format!("Request timeout: API did not respond in time at {url}"),
             Some(408),
             Some(OriginalError::String(err.to_string())),
         );
     }
     if err.is_connect() {
         return api_error(
-            format!("Network error connecting to Bitbucket API: {err}"),
+            format!("Network error connecting to API: {err}"),
             Some(503),
             Some(OriginalError::String(err.to_string())),
         );
@@ -323,7 +363,7 @@ fn map_reqwest_error(err: &reqwest::Error, url: &str) -> McpError {
 }
 
 /// Exposed for callers that just want a well-formed auth header (e.g. tests
-/// and diagnostics). Prefer [`fetch_bitbucket`] for real traffic.
+/// and diagnostics). Prefer [`fetch`] for real traffic.
 pub fn require_credentials(config: &Config) -> Result<Credentials, McpError> {
     Credentials::resolve(config).ok_or_else(auth_missing_default)
 }

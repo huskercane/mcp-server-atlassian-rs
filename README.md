@@ -1,6 +1,6 @@
 # mcp-server-atlassian-bitbucket (Rust port)
 
-Rust implementation of [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket) — an MCP server that connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to Bitbucket Cloud. Same six tools, same six CLI commands, same wire protocol as the TypeScript reference.
+Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud and Jira Cloud** through a single binary. Ports both [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket) and [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian-bitbucket`.
 
@@ -9,7 +9,8 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree.
 - Cold-start in milliseconds instead of hundreds.
-- Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS package in an MCP client config.
+- One binary serves both Bitbucket and Jira — instead of running two Node processes side-by-side, you get one MCP server exposing all 11 tools (six `bb_*`, five `jira_*`).
+- Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Build from source
 
@@ -30,22 +31,42 @@ cargo deny check                             # license + advisory check
 
 ## Credentials
 
-Create an Atlassian API token with Bitbucket scopes (recommended) or, as a legacy fallback, a Bitbucket App Password. The TS README has step-by-step screenshots: see [Get Your Bitbucket Credentials](https://github.com/aashari/mcp-server-atlassian-bitbucket#1-get-your-bitbucket-credentials).
+Create an Atlassian API token with the scopes you need (Bitbucket and/or Jira). The TS README has step-by-step screenshots: see [Get Your Bitbucket Credentials](https://github.com/aashari/mcp-server-atlassian-bitbucket#1-get-your-bitbucket-credentials).
 
 ### Environment variables
 
-| Variable | Purpose |
-|---|---|
-| `ATLASSIAN_USER_EMAIL` | Atlassian account email (recommended auth) |
-| `ATLASSIAN_API_TOKEN` | Scoped API token starting with `ATATT` |
-| `ATLASSIAN_BITBUCKET_USERNAME` | Legacy fallback: Bitbucket username |
-| `ATLASSIAN_BITBUCKET_APP_PASSWORD` | Legacy fallback: App Password |
-| `BITBUCKET_DEFAULT_WORKSPACE` | Default workspace slug used when a tool/CLI call omits it |
-| `TRANSPORT_MODE` | `stdio` (default) or `http` |
-| `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) |
-| `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) |
+| Variable | Purpose | Vendor scope |
+|---|---|---|
+| `ATLASSIAN_USER_EMAIL` | Atlassian account email (recommended auth) | both |
+| `ATLASSIAN_API_TOKEN` | Scoped API token starting with `ATATT` | both |
+| `ATLASSIAN_BITBUCKET_USERNAME` | Legacy fallback: Bitbucket username | bb only |
+| `ATLASSIAN_BITBUCKET_APP_PASSWORD` | Legacy fallback: App Password | bb only |
+| `BITBUCKET_DEFAULT_WORKSPACE` | Default workspace slug used when a tool/CLI call omits it | bb only |
+| `ATLASSIAN_SITE_NAME` | Jira site shortname (e.g. `mycompany` for `mycompany.atlassian.net`). **Required** before invoking any `jira_*` tool; only checked at tool-call time, so a Bitbucket-only setup boots without it. | jira only |
+| `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
+| `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
+| `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Bitbucket tokens can also be written to `~/.mcp/configs.json` — see the [TS README's config-file section](https://github.com/aashari/mcp-server-atlassian-bitbucket#alternative-configuration-file). The Rust port reads the same file with the same alias keys.
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`) so Bitbucket-only and Jira-only keys stay isolated:
+
+```json
+{
+  "bitbucket": {
+    "environments": {
+      "ATLASSIAN_USER_EMAIL": "you@company.com",
+      "ATLASSIAN_API_TOKEN": "ATATT...",
+      "BITBUCKET_DEFAULT_WORKSPACE": "acme"
+    }
+  },
+  "jira": {
+    "environments": {
+      "ATLASSIAN_SITE_NAME": "mycompany"
+    }
+  }
+}
+```
+
+Shared keys (e.g. `ATLASSIAN_API_TOKEN`) can live in either section — when the same key appears in both with the **same value** it's resolved unambiguously; if the values disagree, you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 ## MCP client configuration
 
@@ -75,7 +96,9 @@ Point the client at the binary. Stdio is the default transport. If your client u
 
 ## Available tools
 
-Identical to the TS version:
+Eleven tools across two vendor families. Tool names match the TS references one-to-one.
+
+### Bitbucket (`bb_*`)
 
 | Tool | Annotations | Use |
 |---|---|---|
@@ -86,32 +109,61 @@ Identical to the TS version:
 | `bb_delete` | destructive, idempotent | DELETE any endpoint |
 | `bb_clone` | mutating | Clone a repository over SSH (falling back to HTTPS) |
 
-All API tools support `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The `/2.0` prefix is added automatically.
+The `/2.0` API prefix is prepended automatically.
+
+### Jira (`jira_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `jira_get` | read-only, idempotent | GET any Jira API endpoint |
+| `jira_post` | mutating | POST to any endpoint (e.g. create issue, comment) |
+| `jira_put` | mutating, idempotent | PUT to any endpoint |
+| `jira_patch` | mutating | PATCH any endpoint (partial issue update) |
+| `jira_delete` | destructive, idempotent | DELETE any endpoint |
+
+Jira paths pass through verbatim — supply the full `/rest/api/3/...` path. Requires `ATLASSIAN_SITE_NAME` to be set; missing site name surfaces as an authentication error at call time.
+
+### Shared inputs
+
+All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative).
 
 ## CLI usage
 
-Same subcommand surface as the TS binary:
+Two subcommand groups — one per vendor — keep the verbs unambiguous:
 
 ```bash
-# List workspaces
-./mcp-atlassian-bitbucket get --path "/workspaces"
+# Bitbucket
+./mcp-atlassian-bitbucket bb get --path "/workspaces"
 
-# List repos in a workspace, trimmed with a JMESPath filter
-./mcp-atlassian-bitbucket get \
+./mcp-atlassian-bitbucket bb get \
     --path "/repositories/acme" \
     --query-params '{"pagelen":"10"}' \
     --jq 'values[].{slug:slug,language:language}'
 
-# Create a pull request
-./mcp-atlassian-bitbucket post \
+./mcp-atlassian-bitbucket bb post \
     --path "/repositories/acme/website/pullrequests" \
     --body '{"title":"Fix login","source":{"branch":{"name":"fix-login"}},"destination":{"branch":{"name":"main"}}}'
 
-# Clone a repo (SSH preferred, HTTPS fallback)
-./mcp-atlassian-bitbucket clone --repo-slug website --target-path ~/work
+./mcp-atlassian-bitbucket bb clone --repo-slug website --target-path ~/work
+
+# Jira
+./mcp-atlassian-bitbucket jira get --path "/rest/api/3/myself"
+
+./mcp-atlassian-bitbucket jira get \
+    --path "/rest/api/3/search/jql" \
+    --query-params '{"jql":"project=PROJ AND status=\"In Progress\"","maxResults":"10"}' \
+    --jq 'issues[*].{key:key,summary:fields.summary}'
+
+./mcp-atlassian-bitbucket jira post \
+    --path "/rest/api/3/issue" \
+    --body '{"fields":{"project":{"key":"PROJ"},"summary":"New task","issuetype":{"name":"Task"}}}'
 ```
 
-`--help` on any subcommand lists flags and expected input shapes.
+Every verb accepts `--output-format toon|json` (default `toon`, parity with the TS Jira CLI). `--help` on any subcommand lists flags and expected input shapes.
+
+### Deprecated top-level Bitbucket verbs
+
+The original CLI exposed Bitbucket verbs without the `bb` prefix (`./mcp-atlassian-bitbucket get …`). Those are kept as hidden aliases for one release and emit a stderr deprecation notice when invoked. Migrate scripts to the explicit `bb` form before the next major release.
 
 ## Transports
 
@@ -126,17 +178,19 @@ Same subcommand surface as the TS binary:
 
 Both transports respond cleanly to `SIGINT` / `SIGTERM`: in-flight HTTP sessions drain, stdio flushes its transport, then the process exits 0.
 
-## Compatibility with the TS reference
+## Compatibility with the TS references
 
-Byte-for-byte parity is preserved on everything an MCP client or a CLI consumer can observe:
+Byte-for-byte parity is preserved across **both** TS servers on everything an MCP client or a CLI consumer can observe:
 - Tool names, descriptions, input schemas, and annotations.
-- Output formats (TOON default; JSON fallback) and error envelope shape.
+- Output formats (TOON default; JSON fallback) and error envelope shape (Bitbucket's four shapes plus Jira's `errorMessages`/`errors` envelope, OAuth-style, and flat `message`).
 - Truncation rules (40,000-char threshold, trailing-newline cut, raw-response save path).
-- Config cascade (`os env > .env > ~/.mcp/configs.json`) and all four alias keys.
+- Config cascade (`os env > .env > ~/.mcp/configs.json`) and all alias keys for both vendors.
 - HTTP transport behavior (Origin check, CORS mirror, 1 MB body cap, reaper cadence).
-- CLI subcommands, flags, and short forms.
+- Path normalisation: Bitbucket auto-prepends `/2.0`; Jira passes through verbatim.
 
-Internally, configuration loading is read-only rather than mutating `std::env` (which is `unsafe` in Rust 2024 editions under threading). The observable behavior — which value wins for a given key — is identical.
+The `--output-format` flag, which the TS Bitbucket CLI lacked, is now available on every verb on both vendor groups (parity with the TS Jira CLI).
+
+Internally, configuration loading is read-only rather than mutating `std::env` (which is `unsafe` in Rust 2024 editions under threading). The observable behavior — which value wins for a given key — is identical, with the addition that vendor-scoped global-config sections no longer leak across products.
 
 ## License
 

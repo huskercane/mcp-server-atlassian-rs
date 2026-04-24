@@ -33,7 +33,7 @@ use tracing::{info, warn};
 use crate::constants::VERSION;
 use crate::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL, ReapingSessionManager};
 use crate::server::shutdown;
-use crate::tools::BitbucketServer;
+use crate::tools::AtlassianServer;
 
 const BODY_LIMIT_BYTES: usize = 1_000_000;
 const DEFAULT_PORT: u16 = 3000;
@@ -56,7 +56,7 @@ pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let cancel = CancellationToken::new();
     let app = build_app_with_cancel(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL, cancel.clone());
 
-    info!(%bound, "Bitbucket MCP server listening on streamable-HTTP transport");
+    info!(%bound, "Atlassian MCP server listening on streamable-HTTP transport");
     let shutdown_cancel = cancel;
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -80,8 +80,8 @@ pub fn build_app_with_cancel(
 
     let streamable = StreamableHttpService::new(
         || {
-            BitbucketServer::new()
-                .map_err(|e| std::io::Error::other(format!("BitbucketServer::new: {e}")))
+            AtlassianServer::new()
+                .map_err(|e| std::io::Error::other(format!("AtlassianServer::new: {e}")))
         },
         Arc::clone(&manager),
         StreamableHttpServerConfig::default().with_cancellation_token(cancel),
@@ -131,7 +131,7 @@ async fn health() -> impl IntoResponse {
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         )],
-        format!("Bitbucket MCP Server v{VERSION} is running"),
+        format!("Atlassian MCP Server v{VERSION} is running"),
     )
 }
 

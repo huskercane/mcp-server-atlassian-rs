@@ -2,8 +2,8 @@
 //!
 //! Each test binds its own `127.0.0.1:0` listener so they can run in parallel
 //! without port collisions. The server factory inside `build_app` uses the
-//! default `BitbucketServer::new()`, which is infallible in the absence of
-//! credentials because the MCP initialize handshake does not hit Bitbucket.
+//! default `AtlassianServer::new()`, which is infallible in the absence of
+//! credentials because the MCP initialize handshake does not hit any vendor.
 
 use std::time::Duration;
 
@@ -68,7 +68,7 @@ async fn health_endpoint_returns_plaintext_version_banner() {
     );
     let body = resp.text().await.expect("body");
     assert!(
-        body.starts_with("Bitbucket MCP Server v"),
+        body.starts_with("Atlassian MCP Server v"),
         "unexpected banner: {body}"
     );
     assert!(body.ends_with(" is running"), "unexpected banner: {body}");

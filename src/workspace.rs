@@ -7,7 +7,7 @@
 //!    first `values[].workspace.slug`.
 //! 3. `None` when the user has no accessible workspaces or the call fails.
 //!
-//! The memo caches across all `BitbucketServer` instances in a process;
+//! The memo caches across all `AtlassianServer` instances in a process;
 //! callers wanting fresh lookups can invoke [`reset_cache`] (tests).
 
 use std::sync::RwLock;
@@ -17,10 +17,9 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::auth::Credentials;
+use crate::config::VENDOR_BITBUCKET;
 use crate::error::auth_missing_default;
-use crate::transport::{
-    RequestOptions, ResponseBody, TransportResponse, fetch_bitbucket_with_base,
-};
+use crate::transport::{RequestOptions, ResponseBody, TransportResponse, fetch};
 
 static DEFAULT_WORKSPACE: OnceLock<RwLock<Option<String>>> = OnceLock::new();
 
@@ -47,7 +46,9 @@ pub async fn resolve_default_workspace(
         return Some(cached.clone());
     }
 
-    if let Some(slug) = ctx.config.get("BITBUCKET_DEFAULT_WORKSPACE")
+    if let Some(slug) = ctx
+        .config
+        .get_for(VENDOR_BITBUCKET, "BITBUCKET_DEFAULT_WORKSPACE")
         && !slug.is_empty()
     {
         debug!(slug = %slug, "workspace: resolved from env");
@@ -82,9 +83,9 @@ async fn fetch_first_workspace(
     ctx: &crate::controllers::api::HandleContext<'_>,
 ) -> Result<Option<String>, crate::error::McpError> {
     let creds = Credentials::resolve(ctx.config).ok_or_else(auth_missing_default)?;
-    let response: TransportResponse = fetch_bitbucket_with_base(
-        ctx.base_url,
+    let response: TransportResponse = fetch(
         ctx.client,
+        ctx.vendor,
         &creds,
         ctx.config,
         "/2.0/user/permissions/workspaces?pagelen=10",

@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use mcp_server_atlassian_bitbucket::config::Config;
 use mcp_server_atlassian_bitbucket::controllers::api::HandleContext;
 use mcp_server_atlassian_bitbucket::transport::build_client;
+use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian_bitbucket::workspace::{reset_cache, resolve_default_workspace};
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -31,8 +32,8 @@ async fn env_override_short_circuits_api_call() {
     env.insert("BITBUCKET_DEFAULT_WORKSPACE".into(), "acme".into());
     let config = Config::from_map(env);
     let client = build_client().unwrap();
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
 
     let slug = resolve_default_workspace(&ctx).await;
     assert_eq!(slug.as_deref(), Some("acme"));
@@ -56,8 +57,8 @@ async fn api_fallback_returns_first_workspace() {
 
     let config = Config::from_map(creds_only());
     let client = build_client().unwrap();
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
 
     let slug = resolve_default_workspace(&ctx).await;
     assert_eq!(slug.as_deref(), Some("first-team"));
@@ -76,8 +77,8 @@ async fn empty_api_response_resolves_to_none() {
 
     let config = Config::from_map(creds_only());
     let client = build_client().unwrap();
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
 
     let slug = resolve_default_workspace(&ctx).await;
     assert_eq!(slug, None);
@@ -99,8 +100,8 @@ async fn cache_prevents_second_api_call() {
 
     let config = Config::from_map(creds_only());
     let client = build_client().unwrap();
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
 
     let first = resolve_default_workspace(&ctx).await;
     let second = resolve_default_workspace(&ctx).await;

@@ -8,6 +8,7 @@ use mcp_server_atlassian_bitbucket::controllers::api::{HandleContext, handle_req
 use mcp_server_atlassian_bitbucket::format::OutputFormat;
 use mcp_server_atlassian_bitbucket::tools::args::QueryParams;
 use mcp_server_atlassian_bitbucket::transport::{HttpMethod, build_client};
+use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -23,9 +24,9 @@ fn creds() -> HashMap<String, String> {
 fn ctx<'a>(
     client: &'a reqwest::Client,
     config: &'a Config,
-    base: &'a str,
+    vendor: &'a BitbucketVendor,
 ) -> HandleContext<'a> {
-    HandleContext::new(client, config, base)
+    HandleContext::new(client, config, vendor)
 }
 
 #[test]
@@ -53,12 +54,13 @@ async fn get_pipeline_normalizes_path_and_appends_query() {
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
     let mut qp = QueryParams::new();
     qp.insert("pagelen".into(), "25".into());
     qp.insert("page".into(), "2".into());
 
     let resp = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Get,
         "/workspaces",
         Some(&qp),
@@ -92,8 +94,9 @@ async fn jq_filter_is_applied_to_response() {
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
     let resp = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Get,
         "/repositories/foo",
         None,
@@ -129,8 +132,9 @@ async fn post_body_is_forwarded() {
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
     let resp = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Post,
         "/repositories/foo/pullrequests",
         None,
@@ -162,8 +166,9 @@ async fn delete_returns_empty_body_content() {
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
     let resp = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Delete,
         "/repositories/foo/refs/branches/old",
         None,
@@ -184,9 +189,10 @@ async fn missing_credentials_produces_auth_missing_error() {
     let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(HashMap::new());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
 
     let err = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Get,
         "/workspaces",
         None,
@@ -219,8 +225,9 @@ async fn text_plain_body_passes_through_unchanged() {
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
+    let vendor = BitbucketVendor::with_base_url(server.uri());
     let resp = handle_request(
-        &ctx(&client, &config, &server.uri()),
+        &ctx(&client, &config, &vendor),
         HttpMethod::Get,
         "/repositories/foo/diff/abc",
         None,

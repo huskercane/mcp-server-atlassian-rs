@@ -1,22 +1,25 @@
-//! Tool-schema sanity: round-trip the `BitbucketServer`'s advertised info,
+//! Tool-schema sanity: round-trip the `AtlassianServer`'s advertised info,
 //! and verify the `args` types serialise with camelCase keys (TS parity).
 
 use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::tools::BitbucketServer;
+use mcp_server_atlassian_bitbucket::tools::AtlassianServer;
 use mcp_server_atlassian_bitbucket::tools::args::{
     OutputFormatArg, QueryParams, ReadArgs, WriteArgs,
 };
 use mcp_server_atlassian_bitbucket::transport::build_client;
+use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
+use mcp_server_atlassian_bitbucket::vendor::jira::JiraVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
 fn server_info_reports_expected_identity() {
-    let server = BitbucketServer::with_components(
+    let server = AtlassianServer::with_components(
         Config::from_map(HashMap::new()),
         build_client().unwrap(),
-        "https://api.bitbucket.org",
+        BitbucketVendor::new(),
+        JiraVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

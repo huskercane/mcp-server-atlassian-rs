@@ -1,155 +1,89 @@
 #![allow(clippy::doc_markdown)]
 
-//! `get` / `post` / `put` / `patch` / `delete` CLI subcommands. These shell
-//! out to the same controller pipeline the MCP tools use, so behaviour is
-//! identical modulo presentation (stdout print vs wrapped tool response).
+//! Shared CLI option types and JSON-parse helpers used by both the
+//! [`bb`](crate::cli::bb) and [`jira`](crate::cli::jira) subcommand groups.
+//!
+//! The actual subcommand enums and dispatchers live in their respective
+//! per-vendor modules.
 
-use clap::Subcommand;
+use clap::ValueEnum;
 use serde_json::Value;
 
-use crate::controllers::api::{
-    ControllerResponse, HandleContext, handle_request,
-};
-use crate::controllers::handle_clone;
 use crate::error::McpError;
 use crate::format::OutputFormat;
-use crate::tools::args::{CloneArgs, QueryParams};
-use crate::transport::{HttpMethod, build_client};
+use crate::tools::args::QueryParams;
 
-/// The subcommands exposed by the binary when argv is non-empty.
-#[derive(Debug, Subcommand)]
-pub enum ApiCommand {
-    /// GET any Bitbucket endpoint. Returns filtered output to stdout.
-    Get(ReadOpts),
-    /// POST to any Bitbucket endpoint.
-    Post(WriteOpts),
-    /// PUT to any Bitbucket endpoint.
-    Put(WriteOpts),
-    /// PATCH any Bitbucket endpoint.
-    Patch(WriteOpts),
-    /// DELETE any Bitbucket endpoint. Returns response body (if any).
-    Delete(ReadOpts),
-    /// Clone a Bitbucket repository to your local filesystem using SSH
-    /// (preferred) or HTTPS.
-    Clone(CloneOpts),
+/// CLI-side mirror of [`OutputFormat`] with a [`ValueEnum`] derive so clap
+/// can parse `--output-format toon|json` without coupling the vendor-neutral
+/// format module to clap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+#[value(rename_all = "lower")]
+pub enum OutputFormatFlag {
+    /// Token-efficient tabular format (default; 30–60% fewer tokens than JSON).
+    #[default]
+    Toon,
+    /// Pretty-printed JSON.
+    Json,
 }
 
-#[derive(Debug, Clone, clap::Args)]
-pub struct CloneOpts {
-    /// Repository slug to clone.
-    #[arg(short = 'r', long = "repo-slug")]
-    repo_slug: String,
-
-    /// Directory path where the repository will be cloned (absolute path
-    /// recommended).
-    #[arg(short = 't', long = "target-path")]
-    target_path: String,
-
-    /// Workspace slug containing the repository. Uses default workspace if
-    /// not provided.
-    #[arg(short = 'w', long = "workspace-slug")]
-    workspace_slug: Option<String>,
+impl From<OutputFormatFlag> for OutputFormat {
+    fn from(flag: OutputFormatFlag) -> Self {
+        match flag {
+            OutputFormatFlag::Toon => Self::Toon,
+            OutputFormatFlag::Json => Self::Json,
+        }
+    }
 }
 
+/// Args shared by all read-shaped verbs (GET, DELETE) on both vendors.
 #[derive(Debug, Clone, clap::Args)]
 pub struct ReadOpts {
-    /// API endpoint path (e.g., "/workspaces", "/repositories/{workspace}/{repo}").
+    /// API endpoint path. For Bitbucket, omit the `/2.0` prefix (added
+    /// automatically). For Jira, supply the full path including the API
+    /// version, e.g. `/rest/api/3/myself`.
     #[arg(short = 'p', long = "path")]
-    path: String,
+    pub path: String,
 
-    /// Query parameters as JSON string (e.g., '{"pagelen": "25"}').
+    /// Query parameters as a JSON object string, e.g. `'{"pagelen":"25"}'`
+    /// (Bitbucket) or `'{"jql":"project=PROJ"}'` (Jira).
     #[arg(short = 'q', long = "query-params")]
-    query_params: Option<String>,
+    pub query_params: Option<String>,
 
-    /// JMESPath expression to filter/transform the response.
+    /// JMESPath expression to filter or transform the response. Reduces
+    /// token cost when only a subset of fields is needed.
     #[arg(long = "jq")]
-    jq: Option<String>,
+    pub jq: Option<String>,
+
+    /// Output format. Defaults to `toon` (token-efficient tabular). Use
+    /// `json` for pretty-printed JSON.
+    #[arg(long = "output-format", value_enum, default_value_t)]
+    pub output_format: OutputFormatFlag,
 }
 
+/// Args shared by all write-shaped verbs (POST, PUT, PATCH) on both vendors.
 #[derive(Debug, Clone, clap::Args)]
 pub struct WriteOpts {
-    /// API endpoint path (e.g., "/repositories/{workspace}/{repo}/pullrequests").
+    /// API endpoint path. See [`ReadOpts::path`] for vendor-specific
+    /// conventions.
     #[arg(short = 'p', long = "path")]
-    path: String,
+    pub path: String,
 
-    /// Request body as JSON string.
+    /// Request body as a JSON object string. Top-level value must be an
+    /// object (arrays and primitives are rejected).
     #[arg(short = 'b', long = "body")]
-    body: String,
+    pub body: String,
 
-    /// Query parameters as JSON string.
+    /// Query parameters as a JSON object string.
     #[arg(short = 'q', long = "query-params")]
-    query_params: Option<String>,
+    pub query_params: Option<String>,
 
-    /// JMESPath expression to filter/transform the response.
+    /// JMESPath expression to filter or transform the response.
     #[arg(long = "jq")]
-    jq: Option<String>,
-}
+    pub jq: Option<String>,
 
-pub async fn dispatch(command: ApiCommand) -> Result<(), McpError> {
-    let config = crate::config::load();
-    let client = build_client()?;
-    let base = "https://api.bitbucket.org";
-    let ctx = HandleContext::new(&client, &config, base);
-
-    let response = match command {
-        ApiCommand::Get(opts) => call_read(&ctx, HttpMethod::Get, opts).await?,
-        ApiCommand::Delete(opts) => call_read(&ctx, HttpMethod::Delete, opts).await?,
-        ApiCommand::Post(opts) => call_write(&ctx, HttpMethod::Post, opts).await?,
-        ApiCommand::Put(opts) => call_write(&ctx, HttpMethod::Put, opts).await?,
-        ApiCommand::Patch(opts) => call_write(&ctx, HttpMethod::Patch, opts).await?,
-        ApiCommand::Clone(opts) => call_clone(&ctx, opts).await?,
-    };
-    println!("{}", response.content);
-    Ok(())
-}
-
-async fn call_clone(
-    ctx: &HandleContext<'_>,
-    opts: CloneOpts,
-) -> Result<ControllerResponse, McpError> {
-    let args = CloneArgs {
-        workspace_slug: opts.workspace_slug,
-        repo_slug: opts.repo_slug,
-        target_path: opts.target_path,
-    };
-    handle_clone(ctx, &args).await
-}
-
-async fn call_read(
-    ctx: &HandleContext<'_>,
-    method: HttpMethod,
-    opts: ReadOpts,
-) -> Result<ControllerResponse, McpError> {
-    let query_params = parse_query_params(opts.query_params.as_deref())?;
-    handle_request(
-        ctx,
-        method,
-        &opts.path,
-        query_params.as_ref(),
-        None,
-        opts.jq.as_deref(),
-        OutputFormat::Toon,
-    )
-    .await
-}
-
-async fn call_write(
-    ctx: &HandleContext<'_>,
-    method: HttpMethod,
-    opts: WriteOpts,
-) -> Result<ControllerResponse, McpError> {
-    let body = parse_object(&opts.body, "body")?;
-    let query_params = parse_query_params(opts.query_params.as_deref())?;
-    handle_request(
-        ctx,
-        method,
-        &opts.path,
-        query_params.as_ref(),
-        Some(body),
-        opts.jq.as_deref(),
-        OutputFormat::Toon,
-    )
-    .await
+    /// Output format. Defaults to `toon`.
+    #[arg(long = "output-format", value_enum, default_value_t)]
+    pub output_format: OutputFormatFlag,
 }
 
 /// Parse a JSON string that must decode to an object. Matches TS `parseJson`:

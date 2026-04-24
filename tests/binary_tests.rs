@@ -131,7 +131,7 @@ async fn http_transport_binds_and_serves_health() {
         .await
         .expect("body");
     assert!(
-        body.contains("Bitbucket MCP Server"),
+        body.contains("Atlassian MCP Server"),
         "unexpected banner: {body}"
     );
 

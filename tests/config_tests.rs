@@ -5,7 +5,8 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use mcp_server_atlassian_bitbucket::config::{
-    Config, candidate_keys, extract_environments_for,
+    Config, VENDOR_BITBUCKET, VENDOR_JIRA, candidate_keys, extract_all_vendor_sections,
+    extract_environments_for,
 };
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -206,6 +207,210 @@ fn missing_sources_do_not_error() {
     let proc_env: HashMap<String, String> = HashMap::new();
     let cfg = Config::load_from_sources(None, None, &proc_env);
     assert!(cfg.is_empty());
+}
+
+// ---- typed getters ----
+
+// ---- vendor-scoped lookup (get_for + get unambiguity rule) ----
+
+#[test]
+fn single_bitbucket_section_visible_via_get() {
+    // A user with only a `bitbucket` section in global config should see
+    // its values through the vendor-neutral `get` API. Nothing changes for
+    // existing single-vendor users.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": {
+                "environments": {
+                    "ATLASSIAN_API_TOKEN": "abc",
+                    "BITBUCKET_DEFAULT_WORKSPACE": "myws"
+                }
+            }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(cfg.get("ATLASSIAN_API_TOKEN"), Some("abc"));
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "BITBUCKET_DEFAULT_WORKSPACE"),
+        Some("myws")
+    );
+}
+
+#[test]
+fn agreeing_vendor_sections_are_unambiguous_for_get() {
+    // Common case: user copy-pastes shared credentials into both vendor
+    // sections. `get` should still return the (agreed) value rather than
+    // forcing every shared-key call site through `get_for`.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "shared" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "shared" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(cfg.get("ATLASSIAN_API_TOKEN"), Some("shared"));
+}
+
+#[test]
+fn conflicting_vendor_sections_force_get_for() {
+    // If the same key has different values across vendor sections, `get`
+    // refuses to guess and returns None. The caller must disambiguate via
+    // `get_for(vendor, key)`.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "bb-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "jira-token" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(cfg.get("ATLASSIAN_API_TOKEN"), None);
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "ATLASSIAN_API_TOKEN"),
+        Some("bb-token")
+    );
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "ATLASSIAN_API_TOKEN"),
+        Some("jira-token")
+    );
+}
+
+#[test]
+fn process_env_overrides_vendor_section_conflicts() {
+    // The shared overlay (process env / .env) takes priority over any
+    // vendor section, so a process-env override resolves an otherwise
+    // ambiguous key for both `get` and `get_for`.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "bb-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "jira-token" } }
+        }),
+    );
+    let mut proc_env = HashMap::new();
+    proc_env.insert("ATLASSIAN_API_TOKEN".into(), "from-process".into());
+
+    let cfg = Config::load_from_sources(Some(&global), None, &proc_env);
+
+    assert_eq!(cfg.get("ATLASSIAN_API_TOKEN"), Some("from-process"));
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "ATLASSIAN_API_TOKEN"),
+        Some("from-process")
+    );
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "ATLASSIAN_API_TOKEN"),
+        Some("from-process")
+    );
+}
+
+#[test]
+fn vendor_specific_keys_stay_isolated() {
+    // A key defined only in one vendor's section must not be visible to
+    // another vendor's `get_for` call. This is the load-bearing guarantee
+    // for keys like `BITBUCKET_DEFAULT_WORKSPACE` and `ATLASSIAN_SITE_NAME`.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": {
+                "environments": { "BITBUCKET_DEFAULT_WORKSPACE": "myws" }
+            },
+            "jira": {
+                "environments": { "ATLASSIAN_SITE_NAME": "mysite" }
+            }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "BITBUCKET_DEFAULT_WORKSPACE"),
+        Some("myws")
+    );
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "ATLASSIAN_SITE_NAME"),
+        Some("mysite")
+    );
+    // Cross-vendor lookups must miss.
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "BITBUCKET_DEFAULT_WORKSPACE"),
+        None
+    );
+    assert_eq!(cfg.get_for(VENDOR_BITBUCKET, "ATLASSIAN_SITE_NAME"), None);
+
+    // `get` still resolves them because each is unambiguous (only one
+    // vendor defines it). Call sites *should* still prefer `get_for`, but
+    // the rule does not punish unambiguous singletons.
+    assert_eq!(
+        cfg.get("BITBUCKET_DEFAULT_WORKSPACE"),
+        Some("myws")
+    );
+    assert_eq!(cfg.get("ATLASSIAN_SITE_NAME"), Some("mysite"));
+}
+
+#[test]
+fn get_for_falls_back_to_shared_but_not_to_other_vendors() {
+    // Shared overlay (process env) is the right place to put credentials
+    // when you only have one set; `get_for` honours that. A value that
+    // only exists in another vendor's section must not be reachable.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "BB_ONLY_KEY": "bb-value" } }
+        }),
+    );
+    let mut proc_env = HashMap::new();
+    proc_env.insert("ATLASSIAN_API_TOKEN".into(), "shared-token".into());
+
+    let cfg = Config::load_from_sources(Some(&global), None, &proc_env);
+
+    // Shared fallback works for every vendor.
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "ATLASSIAN_API_TOKEN"),
+        Some("shared-token")
+    );
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "ATLASSIAN_API_TOKEN"),
+        Some("shared-token")
+    );
+    // Bitbucket-only key is not reachable from Jira.
+    assert_eq!(cfg.get_for(VENDOR_JIRA, "BB_ONLY_KEY"), None);
+    assert_eq!(
+        cfg.get_for(VENDOR_BITBUCKET, "BB_ONLY_KEY"),
+        Some("bb-value")
+    );
+}
+
+#[test]
+fn extract_all_vendor_sections_canonicalises_aliases() {
+    // The richer extractor merges per-vendor aliases (with higher-priority
+    // alias winning per-key) and groups them under a canonical vendor name.
+    let doc = json!({
+        "bitbucket":          { "environments": { "K": "from-short", "ONLY_SHORT": "x" } },
+        "atlassian-bitbucket":{ "environments": { "K": "from-product", "ONLY_PRODUCT": "y" } },
+        "atlassian-jira":     { "environments": { "ATLASSIAN_SITE_NAME": "mysite" } }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+
+    let bb = map.get(VENDOR_BITBUCKET).unwrap();
+    assert_eq!(bb.get("K").map(String::as_str), Some("from-short"));
+    assert_eq!(bb.get("ONLY_SHORT").map(String::as_str), Some("x"));
+    assert_eq!(bb.get("ONLY_PRODUCT").map(String::as_str), Some("y"));
+
+    let jira = map.get(VENDOR_JIRA).unwrap();
+    assert_eq!(
+        jira.get("ATLASSIAN_SITE_NAME").map(String::as_str),
+        Some("mysite")
+    );
 }
 
 // ---- typed getters ----

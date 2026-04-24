@@ -6,14 +6,14 @@ use tracing::info;
 
 use crate::error::McpError;
 use crate::server::shutdown;
-use crate::tools::BitbucketServer;
+use crate::tools::AtlassianServer;
 
 /// Boot the server on the stdio transport, consuming the calling task until
 /// the peer disconnects or a shutdown signal is received. Matches TS
 /// `startServer('stdio')` + the SIGINT/SIGTERM handlers in
 /// `setupGracefulShutdown` (`src/index.ts:411-478`).
 pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let handler = BitbucketServer::new().map_err(boxed_err)?;
+    let handler = AtlassianServer::new().map_err(boxed_err)?;
     let transport = stdio();
     let service = handler.serve(transport).await?;
 

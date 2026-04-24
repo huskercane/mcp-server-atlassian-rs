@@ -15,6 +15,7 @@ use mcp_server_atlassian_bitbucket::controllers::api::HandleContext;
 use mcp_server_atlassian_bitbucket::controllers::handle_clone;
 use mcp_server_atlassian_bitbucket::tools::args::CloneArgs;
 use mcp_server_atlassian_bitbucket::transport::build_client;
+use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian_bitbucket::workspace::reset_cache;
 use serde_json::json;
 use serial_test::serial;
@@ -93,8 +94,8 @@ let server = MockServer::start().await;
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
     let resp = handle_clone(&ctx, &args).await.unwrap();
 
     restore_path(original_path);
@@ -138,8 +139,8 @@ let server = MockServer::start().await;
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
     let resp = handle_clone(&ctx, &args).await.unwrap();
 
     restore_path(original_path);
@@ -165,8 +166,8 @@ let server = MockServer::start().await;
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
     let err = handle_clone(&ctx, &args).await.unwrap_err();
     assert!(err.message.contains("Invalid repository slug"));
 }
@@ -200,8 +201,8 @@ let server = MockServer::start().await;
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
     let resp = handle_clone(&ctx, &args).await.unwrap();
     assert!(resp.content.contains("already exists"));
 }
@@ -236,8 +237,8 @@ let server = MockServer::start().await;
 
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
-    let base = server.uri();
-    let ctx = HandleContext::new(&client, &config, &base);
+    let vendor = BitbucketVendor::with_base_url(server.uri());
+    let ctx = HandleContext::new(&client, &config, &vendor);
     let err = handle_clone(&ctx, &args).await.unwrap_err();
 
     restore_path(original_path);

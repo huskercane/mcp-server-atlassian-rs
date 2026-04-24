@@ -1,15 +1,24 @@
 // Tool descriptions in `descriptions/*.md` are LLM-facing MCP payloads that we
-// surface verbatim from the TS reference implementation. Clippy's doc-markdown
+// surface verbatim from the TS reference implementations. Clippy's doc-markdown
 // lint is a poor fit here — it would rewrite the prompts we need to keep stable.
 #![allow(clippy::doc_markdown)]
 
-//! MCP tool registration for the five generic Bitbucket REST verbs.
+//! MCP tool registration for the Atlassian product surface.
 //!
-//! Ports `src/tools/atlassian.api.tool.ts`. Tool descriptions live in
-//! sibling markdown files under `descriptions/` and are pulled in via
-//! `include_str!` so the rmcp `#[tool]` macro picks them up through its
-//! doc-comment fallback. They are the exact LLM-facing strings from TS —
-//! part of the public contract because prompts and evals depend on them.
+//! [`AtlassianServer`] hosts two `#[tool_router]` impl blocks on the same
+//! handler type, then combines them in an inherent
+//! [`AtlassianServer::tool_router`] so [`#[tool_handler]`](rmcp::tool_handler)
+//! sees a single `ToolRouter` containing every tool:
+//!
+//! - **`bb_*`** (six tools — five generic verbs + `bb_clone`) — Bitbucket
+//!   Cloud, ported from `@aashari/mcp-server-atlassian-bitbucket`. Path
+//!   normalisation auto-prepends `/2.0`.
+//! - **`jira_*`** (five generic verbs) — Jira Cloud, ported from
+//!   `@aashari/mcp-server-atlassian-jira`. Paths are passed through
+//!   verbatim (callers supply `/rest/api/3/...`). The base URL is derived
+//!   per-request from `ATLASSIAN_SITE_NAME`; Bitbucket-only deployments
+//!   are unaffected — Jira tools surface a clear configuration error at
+//!   tool-call time only when the env var is missing.
 
 pub mod args;
 
@@ -30,61 +39,96 @@ use crate::controllers::handle_clone;
 use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
 use crate::transport::{HttpMethod, build_client};
+use crate::vendor::bitbucket::BitbucketVendor;
+use crate::vendor::jira::JiraVendor;
 use args::{CloneArgs, ReadArgs, WriteArgs};
 
-const DEFAULT_BASE_URL: &str = "https://api.bitbucket.org";
-
 #[derive(Clone)]
-pub struct BitbucketServer {
+pub struct AtlassianServer {
     state: Arc<ServerState>,
     // The `#[tool_handler]` macro references this field by name at expansion
     // time; the rustc reference tracker doesn't see that, so we silence the
     // dead-code lint explicitly.
     #[allow(dead_code)]
-    tool_router: ToolRouter<BitbucketServer>,
+    tool_router: ToolRouter<AtlassianServer>,
 }
 
 struct ServerState {
     client: Client,
     config: Config,
-    base_url: String,
+    bitbucket_vendor: BitbucketVendor,
+    jira_vendor: JiraVendor,
 }
 
-#[tool_router]
-impl BitbucketServer {
+impl AtlassianServer {
     /// Standard constructor. Loads config from the environment cascade and
-    /// builds a fresh HTTP client.
+    /// builds a fresh HTTP client. Both vendors are constructed eagerly,
+    /// but neither one resolves its base URL at this point — the
+    /// `JiraVendor` defers `ATLASSIAN_SITE_NAME` lookup to per-request
+    /// time, so a Bitbucket-only deployment boots without Jira config.
     pub fn new() -> Result<Self, crate::error::McpError> {
         let config = crate::config::load();
         let client = build_client()?;
-        Ok(Self::with_components(config, client, DEFAULT_BASE_URL))
+        Ok(Self::with_components(
+            config,
+            client,
+            BitbucketVendor::new(),
+            JiraVendor::new(),
+        ))
     }
 
     /// Build a server from caller-supplied components. Useful when tests or
-    /// embedders want to pre-configure the `Config` or point at a mock URL.
+    /// embedders want to pre-configure the `Config` or point either vendor
+    /// at a mock URL via `with_base_url`.
     pub fn with_components(
         config: Config,
         client: Client,
-        base_url: impl Into<String>,
+        bitbucket_vendor: BitbucketVendor,
+        jira_vendor: JiraVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
                 client,
                 config,
-                base_url: base_url.into(),
+                bitbucket_vendor,
+                jira_vendor,
             }),
             tool_router: Self::tool_router(),
         }
     }
 
-    fn ctx(&self) -> HandleContext<'_> {
+    /// Combined router that drives `#[tool_handler]`. Stitches together
+    /// the two vendor-scoped routers via the `Add` impl on
+    /// [`ToolRouter`](rmcp::handler::server::router::tool::ToolRouter).
+    /// Naming this method `tool_router` (the macro's default) lets
+    /// `#[tool_handler]` find it without a custom `router = …` attr.
+    fn tool_router() -> ToolRouter<Self> {
+        Self::bitbucket_router() + Self::jira_router()
+    }
+
+    fn bitbucket_ctx(&self) -> HandleContext<'_> {
         HandleContext::new(
             &self.state.client,
             &self.state.config,
-            &self.state.base_url,
+            &self.state.bitbucket_vendor,
         )
     }
 
+    fn jira_ctx(&self) -> HandleContext<'_> {
+        HandleContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.jira_vendor,
+        )
+    }
+}
+
+// ============================================================================
+// Bitbucket tools
+// ============================================================================
+
+#[tool_router(router = bitbucket_router)]
+impl AtlassianServer {
     #[doc = include_str!("descriptions/bb_get.md")]
     #[tool(
         annotations(
@@ -95,7 +139,7 @@ impl BitbucketServer {
         ),
     )]
     async fn bb_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
-        Ok(run_read(self, HttpMethod::Get, &args).await)
+        Ok(run_read_bb(self, HttpMethod::Get, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_post.md")]
@@ -108,7 +152,7 @@ impl BitbucketServer {
         ),
     )]
     async fn bb_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
-        Ok(run_write(self, HttpMethod::Post, &args).await)
+        Ok(run_write_bb(self, HttpMethod::Post, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_put.md")]
@@ -121,7 +165,7 @@ impl BitbucketServer {
         ),
     )]
     async fn bb_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
-        Ok(run_write(self, HttpMethod::Put, &args).await)
+        Ok(run_write_bb(self, HttpMethod::Put, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_patch.md")]
@@ -134,7 +178,7 @@ impl BitbucketServer {
         ),
     )]
     async fn bb_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
-        Ok(run_write(self, HttpMethod::Patch, &args).await)
+        Ok(run_write_bb(self, HttpMethod::Patch, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_delete.md")]
@@ -147,7 +191,7 @@ impl BitbucketServer {
         ),
     )]
     async fn bb_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
-        Ok(run_read(self, HttpMethod::Delete, &args).await)
+        Ok(run_read_bb(self, HttpMethod::Delete, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_clone.md")]
@@ -164,8 +208,80 @@ impl BitbucketServer {
     }
 }
 
+// ============================================================================
+// Jira tools
+// ============================================================================
+
+#[tool_router(router = jira_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/jira_get.md")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn jira_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_jira(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/jira_post.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn jira_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_jira(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/jira_put.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn jira_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_jira(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/jira_patch.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn jira_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_jira(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/jira_delete.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn jira_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_jira(self, HttpMethod::Delete, &args).await)
+    }
+}
+
 #[tool_handler]
-impl ServerHandler for BitbucketServer {
+impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
         let mut implementation = Implementation::default();
         PACKAGE_NAME.clone_into(&mut implementation.name);
@@ -181,8 +297,12 @@ impl ServerHandler for BitbucketServer {
 
 // ---- helpers ----
 
-async fn run_read(server: &BitbucketServer, method: HttpMethod, args: &ReadArgs) -> CallToolResult {
-    match handle_read(&server.ctx(), method, args).await {
+async fn run_read_bb(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match handle_read(&server.bitbucket_ctx(), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -191,8 +311,12 @@ async fn run_read(server: &BitbucketServer, method: HttpMethod, args: &ReadArgs)
     }
 }
 
-async fn run_write(server: &BitbucketServer, method: HttpMethod, args: &WriteArgs) -> CallToolResult {
-    match handle_write(&server.ctx(), method, args).await {
+async fn run_write_bb(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match handle_write(&server.bitbucket_ctx(), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -201,8 +325,36 @@ async fn run_write(server: &BitbucketServer, method: HttpMethod, args: &WriteArg
     }
 }
 
-async fn run_clone(server: &BitbucketServer, args: &CloneArgs) -> CallToolResult {
-    match handle_clone(&server.ctx(), args).await {
+async fn run_read_jira(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match handle_read(&server.jira_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_jira(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match handle_write(&server.jira_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
+    match handle_clone(&server.bitbucket_ctx(), args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])

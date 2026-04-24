@@ -19,4 +19,5 @@ pub mod server;
 pub mod shell;
 pub mod tools;
 pub mod transport;
+pub mod vendor;
 pub mod workspace;
