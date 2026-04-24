@@ -109,49 +109,93 @@ fn normalize_path_does_not_prepend_v2_like_bitbucket() {
     );
 }
 
-// ---- classify_error: status code mapping ----
+// ---- classify_error: status code mapping (TS Jira parity) ----
+//
+// Message prefixes mirror the TS Jira server's `transport.util.ts`. The
+// 403 case in particular is auth_invalid, not api_error — TS treats both
+// authentication failure and permission denial as auth/permission errors.
 
 #[test]
-fn classify_401_maps_to_auth_invalid() {
+fn classify_401_maps_to_auth_invalid_with_ts_prefix() {
     let body = r#"{"errorMessages":["Login required"],"errors":{}}"#;
     let err = classify(StatusCode::UNAUTHORIZED, body);
     assert_eq!(err.kind, ErrorKind::AuthInvalid);
+    // The auth_invalid factory itself sets status_code=Some(401); 401
+    // responses inherit that default verbatim.
     assert_eq!(err.status_code, Some(401));
+    assert!(
+        err.message.starts_with("Authentication failed. Jira API: "),
+        "got: {}",
+        err.message
+    );
     assert!(err.message.contains("Login required"));
-    assert!(err.message.contains("Authentication failed"));
 }
 
 #[test]
-fn classify_403_maps_to_api_error_with_403() {
+fn classify_403_maps_to_auth_invalid_per_ts_parity() {
+    // The previous Rust port mapped 403 to api_error; that broke parity.
+    // TS createAuthInvalidError is used for both 401 and 403 to signal
+    // "auth/permission failure" as a single category. We override the
+    // factory's default 401 status so the actual HTTP status is preserved
+    // for callers that branch on status_code.
     let body = r#"{"errorMessages":["You do not have permission."],"errors":{}}"#;
     let err = classify(StatusCode::FORBIDDEN, body);
-    assert_eq!(err.kind, ErrorKind::ApiError);
+    assert_eq!(err.kind, ErrorKind::AuthInvalid);
     assert_eq!(err.status_code, Some(403));
-    assert!(err.message.contains("Permission denied"));
+    assert!(
+        err.message.starts_with("Insufficient permissions. Jira API: "),
+        "got: {}",
+        err.message
+    );
+    assert!(err.message.contains("You do not have permission."));
 }
 
 #[test]
-fn classify_404_maps_to_api_error_with_404() {
+fn classify_404_uses_resource_not_found_prefix() {
     let body = r#"{"errorMessages":["Issue does not exist or you do not have permission to see it."],"errors":{}}"#;
     let err = classify(StatusCode::NOT_FOUND, body);
     assert_eq!(err.status_code, Some(404));
-    assert!(err.message.contains("Resource not found"));
+    assert!(
+        err.message.starts_with("Resource not found. Jira API: "),
+        "got: {}",
+        err.message
+    );
     assert!(err.message.contains("Issue does not exist"));
 }
 
 #[test]
-fn classify_429_maps_to_rate_limit_message() {
+fn classify_429_uses_rate_limit_prefix() {
     let err = classify(StatusCode::TOO_MANY_REQUESTS, r#"{"message":"slow down"}"#);
     assert_eq!(err.status_code, Some(429));
-    assert!(err.message.contains("Rate limit exceeded"));
+    assert!(
+        err.message.starts_with("Rate limit exceeded. Jira API: "),
+        "got: {}",
+        err.message
+    );
     assert!(err.message.contains("slow down"));
 }
 
 #[test]
-fn classify_5xx_maps_to_service_error() {
+fn classify_5xx_uses_jira_server_error_prefix() {
     let err = classify(StatusCode::SERVICE_UNAVAILABLE, "");
     assert_eq!(err.status_code, Some(503));
-    assert!(err.message.contains("Service error"));
+    assert!(
+        err.message.starts_with("Jira server error. Detail: "),
+        "got: {}",
+        err.message
+    );
+}
+
+#[test]
+fn classify_other_status_uses_request_failed_prefix() {
+    let err = classify(StatusCode::BAD_REQUEST, r#"{"message":"bad input"}"#);
+    assert_eq!(err.status_code, Some(400));
+    assert!(
+        err.message.starts_with("Jira API request failed. Detail: "),
+        "got: {}",
+        err.message
+    );
+    assert!(err.message.contains("bad input"));
 }
 
 // ---- parse_error_body: envelope shapes ----
@@ -168,34 +212,74 @@ fn parse_canonical_envelope_with_messages_only() {
 }
 
 #[test]
+fn parse_multiple_error_messages_join_with_semicolon() {
+    // TS joins errorMessages array with '; ' (within the part), not ' | '.
+    let body = r#"{"errorMessages":["First problem","Second problem"]}"#;
+    let parsed = parse_error_body(body);
+    assert_eq!(
+        parsed.message.as_deref(),
+        Some("First problem; Second problem")
+    );
+}
+
+#[test]
 fn parse_canonical_envelope_with_field_errors_only() {
-    // Field validation errors (most often 400 from POST /issue) live in
-    // the `errors` object keyed by field name. Concatenated as
-    // "field: message" so the user sees what's wrong.
     let body = r#"{"errorMessages":[],"errors":{"summary":"Summary is required.","priority":"Invalid priority."}}"#;
     let parsed = parse_error_body(body);
     let msg = parsed.message.expect("message present");
-    // BTreeMap ordering of `errors` keys is preserved by serde_json's
-    // default object iteration; we assert both substrings instead of an
-    // exact match to stay robust.
     assert!(msg.contains("summary: Summary is required."));
     assert!(msg.contains("priority: Invalid priority."));
+    // Within-part separator is "; ", not " | ".
+    assert!(msg.contains("; "));
+    assert!(!msg.contains(" | "));
 }
 
 #[test]
-fn parse_canonical_envelope_combines_messages_and_field_errors() {
+fn parse_canonical_envelope_combines_messages_and_field_errors_with_pipe_separator() {
+    // TS joins TOP-LEVEL parts with " | " — errorMessages and field
+    // errors are separate parts.
     let body = r#"{"errorMessages":["Some context"],"errors":{"summary":"Required."}}"#;
     let parsed = parse_error_body(body);
     let msg = parsed.message.expect("message present");
-    assert!(msg.contains("Some context"));
-    assert!(msg.contains("summary: Required."));
+    assert_eq!(msg, "Some context | summary: Required.");
 }
 
 #[test]
-fn parse_oauth_style_error() {
-    let body = r#"{"error":"invalid_token","error_description":"The access token is invalid"}"#;
+fn parse_array_style_errors_extracts_title_and_detail() {
+    // Legacy Atlassian shape: `errors` is an array, not an object. Each
+    // entry can carry `title` and `detail`; TS pushes them as separate
+    // parts to the join list.
+    let body = r#"{"errors":[{"status":400,"code":"INVALID_REQUEST_PARAMETER","title":"Invalid parameter","detail":"`jql` is required"}]}"#;
     let parsed = parse_error_body(body);
-    assert_eq!(parsed.message.as_deref(), Some("The access token is invalid"));
+    let msg = parsed.message.expect("message present");
+    assert_eq!(msg, "Invalid parameter | `jql` is required");
+}
+
+#[test]
+fn parse_warning_messages_get_warnings_prefix_and_join() {
+    // Warnings appear after error parts and get a "Warnings: " prefix.
+    let body = r#"{"errorMessages":["Real error"],"warningMessages":["heads up","also this"]}"#;
+    let parsed = parse_error_body(body);
+    let msg = parsed.message.expect("message present");
+    assert_eq!(msg, "Real error | Warnings: heads up; also this");
+}
+
+#[test]
+fn parse_all_envelope_shapes_combined() {
+    // The full TS aggregation: errorMessages -> field errors -> message
+    // -> array errors title -> array errors detail -> warnings. Note
+    // that the same `errors` key is checked as both object AND array;
+    // they are mutually exclusive at runtime so realistic payloads carry
+    // one shape, not both. This test exercises every recognised slot
+    // independently.
+    let body = r#"{
+        "errorMessages": ["msg1", "msg2"],
+        "message": "flat message",
+        "warningMessages": ["w1"]
+    }"#;
+    let parsed = parse_error_body(body);
+    let msg = parsed.message.expect("message present");
+    assert_eq!(msg, "msg1; msg2 | flat message | Warnings: w1");
 }
 
 #[test]
@@ -221,10 +305,9 @@ fn parse_empty_body_yields_default() {
 }
 
 #[test]
-fn parse_unrecognised_json_keeps_payload_as_original() {
-    // Some endpoints return shapes we don't model (e.g. arrays, unknown
-    // keys). Surface the parsed JSON as `original` so the LLM sees the
-    // raw payload even when we couldn't extract a message.
+fn parse_unrecognised_json_keeps_payload_as_original_with_no_message() {
+    // Shapes we don't model surface no message but keep the JSON as
+    // `original` so the LLM sees the raw payload via the error formatter.
     let body = r#"{"unknownField":"nope"}"#;
     let parsed = parse_error_body(body);
     assert!(parsed.message.is_none());

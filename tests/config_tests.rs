@@ -413,6 +413,53 @@ fn extract_all_vendor_sections_canonicalises_aliases() {
     );
 }
 
+#[test]
+fn ts_jira_package_aliases_resolve_to_jira_section() {
+    // Migration guarantee: a user who set up the TS Jira server keyed
+    // their global config under "@aashari/mcp-server-atlassian-jira" or
+    // its unscoped form. Both must continue to land in the canonical
+    // "jira" section after migration to the Rust crate.
+    let doc = json!({
+        "@aashari/mcp-server-atlassian-jira": {
+            "environments": { "ATLASSIAN_SITE_NAME": "from-scoped-key" }
+        }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let jira = map.get(VENDOR_JIRA).expect("jira section resolved");
+    assert_eq!(
+        jira.get("ATLASSIAN_SITE_NAME").map(String::as_str),
+        Some("from-scoped-key")
+    );
+
+    let doc = json!({
+        "mcp-server-atlassian-jira": {
+            "environments": { "ATLASSIAN_SITE_NAME": "from-unscoped-key" }
+        }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let jira = map.get(VENDOR_JIRA).expect("jira section resolved");
+    assert_eq!(
+        jira.get("ATLASSIAN_SITE_NAME").map(String::as_str),
+        Some("from-unscoped-key")
+    );
+}
+
+#[test]
+fn ts_bitbucket_package_aliases_resolve_to_bitbucket_section() {
+    // Symmetric guarantee for the TS Bitbucket server's package names.
+    let doc = json!({
+        "@aashari/mcp-server-atlassian-bitbucket": {
+            "environments": { "BITBUCKET_DEFAULT_WORKSPACE": "from-ts-bitbucket" }
+        }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let bb = map.get(VENDOR_BITBUCKET).expect("bitbucket section resolved");
+    assert_eq!(
+        bb.get("BITBUCKET_DEFAULT_WORKSPACE").map(String::as_str),
+        Some("from-ts-bitbucket")
+    );
+}
+
 // ---- typed getters ----
 
 #[test]

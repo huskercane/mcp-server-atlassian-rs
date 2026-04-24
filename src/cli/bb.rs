@@ -9,12 +9,13 @@
 use clap::Subcommand;
 
 use crate::cli::api::{ReadOpts, WriteOpts, parse_object, parse_query_params};
-use crate::controllers::api::{ControllerResponse, HandleContext, handle_request};
+use crate::controllers::api::{BitbucketContext, ControllerResponse, HandleContext, handle_request};
 use crate::controllers::handle_clone;
 use crate::error::McpError;
 use crate::tools::args::CloneArgs;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
+use crate::workspace::WorkspaceCache;
 
 /// Verbs exposed under `mcp-atlassian-bitbucket bb …`.
 #[derive(Debug, Subcommand)]
@@ -53,26 +54,39 @@ pub struct CloneOpts {
 
 /// Dispatch a `bb` subcommand. Constructs a Bitbucket vendor and prints
 /// the rendered response to stdout.
+///
+/// `clone` requires the Bitbucket-typed context (carries the workspace
+/// cache); the generic verbs use the vendor-neutral [`HandleContext`]
+/// since they go through `handle_request`.
 pub async fn dispatch(command: Command) -> Result<(), McpError> {
     let config = crate::config::load();
     let client = build_client()?;
     let vendor = BitbucketVendor::new();
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
 
     let response = match command {
-        Command::Get(opts) => call_read(&ctx, HttpMethod::Get, opts).await?,
-        Command::Delete(opts) => call_read(&ctx, HttpMethod::Delete, opts).await?,
-        Command::Post(opts) => call_write(&ctx, HttpMethod::Post, opts).await?,
-        Command::Put(opts) => call_write(&ctx, HttpMethod::Put, opts).await?,
-        Command::Patch(opts) => call_write(&ctx, HttpMethod::Patch, opts).await?,
-        Command::Clone(opts) => call_clone(&ctx, opts).await?,
+        Command::Clone(opts) => {
+            let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
+            call_clone(&ctx, opts).await?
+        }
+        other => {
+            let ctx = HandleContext::new(&client, &config, &vendor);
+            match other {
+                Command::Get(opts) => call_read(&ctx, HttpMethod::Get, opts).await?,
+                Command::Delete(opts) => call_read(&ctx, HttpMethod::Delete, opts).await?,
+                Command::Post(opts) => call_write(&ctx, HttpMethod::Post, opts).await?,
+                Command::Put(opts) => call_write(&ctx, HttpMethod::Put, opts).await?,
+                Command::Patch(opts) => call_write(&ctx, HttpMethod::Patch, opts).await?,
+                Command::Clone(_) => unreachable!("Clone handled in outer match"),
+            }
+        }
     };
     println!("{}", response.content);
     Ok(())
 }
 
 async fn call_clone(
-    ctx: &HandleContext<'_>,
+    ctx: &BitbucketContext<'_>,
     opts: CloneOpts,
 ) -> Result<ControllerResponse, McpError> {
     let args = CloneArgs {

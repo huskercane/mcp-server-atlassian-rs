@@ -176,6 +176,7 @@ pub async fn fetch(
             status.as_u16(),
             duration,
         )
+        .await
     } else {
         None
     };

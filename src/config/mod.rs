@@ -303,10 +303,11 @@ pub fn candidate_keys(package_name: &str) -> Vec<String> {
 
 /// Per-vendor alias lists in priority order (highest priority first).
 ///
-/// The Bitbucket vendor inherits the crate's package-name-derived aliases
-/// for back-compat with the original single-vendor TS port; the Jira vendor
-/// only uses its short and product aliases (a Jira section keyed by a
-/// package name would belong to a separate Jira-only crate, not this one).
+/// Both vendors include the upstream TS package names so existing
+/// `~/.mcp/configs.json` files migrating from the TS reference servers
+/// (`@aashari/mcp-server-atlassian-bitbucket`, `@aashari/mcp-server-atlassian-jira`)
+/// keep resolving without edits. The Bitbucket vendor additionally
+/// includes this crate's own `package_name`-derived aliases.
 fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
     let bitbucket_aliases = {
         let mut v = vec![
@@ -320,9 +321,19 @@ fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         if !v.iter().any(|a| a == &unscoped) {
             v.push(unscoped);
         }
+        // TS Bitbucket package names — kept so users migrating from the
+        // upstream Node servers don't need to rekey their global config.
+        v.push("@aashari/mcp-server-atlassian-bitbucket".to_string());
+        v.push("mcp-server-atlassian-bitbucket".to_string());
         v
     };
-    let jira_aliases = vec!["jira".to_string(), "atlassian-jira".to_string()];
+    let jira_aliases = vec![
+        "jira".to_string(),
+        "atlassian-jira".to_string(),
+        // TS Jira package names — same migration guarantee.
+        "@aashari/mcp-server-atlassian-jira".to_string(),
+        "mcp-server-atlassian-jira".to_string(),
+    ];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),

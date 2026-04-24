@@ -7,5 +7,5 @@
 pub mod api;
 pub mod clone;
 
-pub use api::{ControllerResponse, HandleContext, handle_request};
+pub use api::{BitbucketContext, ControllerResponse, HandleContext, handle_request};
 pub use clone::handle_clone;

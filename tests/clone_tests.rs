@@ -11,12 +11,12 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::controllers::api::HandleContext;
+use mcp_server_atlassian_bitbucket::controllers::api::BitbucketContext;
 use mcp_server_atlassian_bitbucket::controllers::handle_clone;
 use mcp_server_atlassian_bitbucket::tools::args::CloneArgs;
 use mcp_server_atlassian_bitbucket::transport::build_client;
 use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
-use mcp_server_atlassian_bitbucket::workspace::reset_cache;
+use mcp_server_atlassian_bitbucket::workspace::WorkspaceCache;
 use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;
@@ -66,8 +66,7 @@ fn restore_path(original: String) {
 #[tokio::test]
 #[serial]
 async fn successful_clone_prefers_ssh_and_invokes_git() {
-    reset_cache();
-let server = MockServer::start().await;
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/repositories/acme/widget"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -95,7 +94,8 @@ let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
     let vendor = BitbucketVendor::with_base_url(server.uri());
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
+    let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
     let resp = handle_clone(&ctx, &args).await.unwrap();
 
     restore_path(original_path);
@@ -112,8 +112,7 @@ let server = MockServer::start().await;
 #[tokio::test]
 #[serial]
 async fn falls_back_to_https_when_no_ssh_link() {
-    reset_cache();
-let server = MockServer::start().await;
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/repositories/acme/widget"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -140,7 +139,8 @@ let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
     let vendor = BitbucketVendor::with_base_url(server.uri());
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
+    let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
     let resp = handle_clone(&ctx, &args).await.unwrap();
 
     restore_path(original_path);
@@ -153,8 +153,7 @@ let server = MockServer::start().await;
 #[tokio::test]
 #[serial]
 async fn invalid_slug_is_rejected_before_network() {
-    reset_cache();
-let server = MockServer::start().await;
+    let server = MockServer::start().await;
     // Intentionally no mocks: reaching the network would produce a 404, but
     // the slug validation should short-circuit before that.
     let clone_root = TempDir::new().unwrap();
@@ -167,7 +166,8 @@ let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
     let vendor = BitbucketVendor::with_base_url(server.uri());
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
+    let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
     let err = handle_clone(&ctx, &args).await.unwrap_err();
     assert!(err.message.contains("Invalid repository slug"));
 }
@@ -175,8 +175,7 @@ let server = MockServer::start().await;
 #[tokio::test]
 #[serial]
 async fn existing_subdir_returns_info_not_error() {
-    reset_cache();
-let server = MockServer::start().await;
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/repositories/acme/widget"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -202,7 +201,8 @@ let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
     let vendor = BitbucketVendor::with_base_url(server.uri());
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
+    let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
     let resp = handle_clone(&ctx, &args).await.unwrap();
     assert!(resp.content.contains("already exists"));
 }
@@ -210,8 +210,7 @@ let server = MockServer::start().await;
 #[tokio::test]
 #[serial]
 async fn git_failure_surfaces_ssh_troubleshooting() {
-    reset_cache();
-let server = MockServer::start().await;
+    let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/repositories/acme/widget"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -238,7 +237,8 @@ let server = MockServer::start().await;
     let client = build_client().unwrap();
     let config = Config::from_map(creds());
     let vendor = BitbucketVendor::with_base_url(server.uri());
-    let ctx = HandleContext::new(&client, &config, &vendor);
+    let cache = WorkspaceCache::new();
+    let ctx = BitbucketContext::new(&client, &config, &vendor, &cache);
     let err = handle_clone(&ctx, &args).await.unwrap_err();
 
     restore_path(original_path);

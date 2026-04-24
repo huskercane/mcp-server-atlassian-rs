@@ -6,12 +6,12 @@ use serde_json::json;
 
 /// The test runs side-effects on the real filesystem (matches TS behaviour);
 /// we clean up our own files to stay polite.
-fn cleanup(path: &std::path::Path) {
-    let _ = std::fs::remove_file(path);
+async fn cleanup(path: &std::path::Path) {
+    let _ = tokio::fs::remove_file(path).await;
 }
 
-#[test]
-fn writes_file_under_tmp_mcp() {
+#[tokio::test]
+async fn writes_file_under_tmp_mcp() {
     let response = json!({"values":[{"id":1},{"id":2}]});
     let path = save(
         "https://api.bitbucket.org/2.0/repositories/foo",
@@ -21,6 +21,7 @@ fn writes_file_under_tmp_mcp() {
         200,
         Duration::from_millis(123),
     )
+    .await
     .expect("raw response should be written");
 
     assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian-bitbucket-rs/"));
@@ -42,7 +43,7 @@ fn writes_file_under_tmp_mcp() {
         "unexpected filename chars in {stem}"
     );
 
-    let content = std::fs::read_to_string(&path).unwrap();
+    let content = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(content.contains("RAW API RESPONSE LOG"));
     assert!(content.contains("URL: https://api.bitbucket.org/2.0/repositories/foo"));
     assert!(content.contains("Method: GET"));
@@ -52,11 +53,11 @@ fn writes_file_under_tmp_mcp() {
     // closing separator at the end (matches TS `response.util.ts`).
     assert_eq!(content.matches("=".repeat(80).as_str()).count(), 7);
 
-    cleanup(&path);
+    cleanup(&path).await;
 }
 
-#[test]
-fn request_body_section_contains_body_or_noop() {
+#[tokio::test]
+async fn request_body_section_contains_body_or_noop() {
     let req_body = json!({"foo": "bar"});
     let resp = json!({"ok": true});
     let path = save(
@@ -67,10 +68,11 @@ fn request_body_section_contains_body_or_noop() {
         201,
         Duration::from_millis(50),
     )
+    .await
     .unwrap();
-    let content = std::fs::read_to_string(&path).unwrap();
+    let content = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(content.contains("\"foo\": \"bar\""));
-    cleanup(&path);
+    cleanup(&path).await;
 
     let path = save(
         "https://api.bitbucket.org/2.0/foo",
@@ -80,8 +82,9 @@ fn request_body_section_contains_body_or_noop() {
         200,
         Duration::from_millis(25),
     )
+    .await
     .unwrap();
-    let content = std::fs::read_to_string(&path).unwrap();
+    let content = tokio::fs::read_to_string(&path).await.unwrap();
     assert!(content.contains("(no request body)"));
-    cleanup(&path);
+    cleanup(&path).await;
 }

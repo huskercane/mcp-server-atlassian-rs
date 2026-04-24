@@ -24,13 +24,14 @@ use tracing::debug;
 use url::form_urlencoded;
 
 use crate::auth::Credentials;
-use crate::config::Config;
+use crate::config::{Config, VENDOR_BITBUCKET};
 use crate::error::{McpError, auth_missing_default};
 use crate::format::{OutputFormat, jmespath::apply_jq_filter, render};
 use crate::tools::args::{QueryParams, ReadArgs, WriteArgs};
 use crate::transport::{HttpMethod, RequestOptions, ResponseBody, TransportResponse, fetch};
 use crate::vendor::Vendor;
 use crate::vendor::bitbucket::BitbucketVendor;
+use crate::workspace::WorkspaceCache;
 
 /// Shared dependencies threaded into controller calls. Keeps the pipeline
 /// deterministic and avoids hidden singletons.
@@ -51,6 +52,57 @@ impl<'a> HandleContext<'a> {
             config,
             vendor,
         }
+    }
+}
+
+/// Bitbucket-only request context. Wraps a [`HandleContext`] whose vendor
+/// is statically known to be a [`BitbucketVendor`], plus the per-instance
+/// [`WorkspaceCache`] used by `resolve_default_workspace`.
+///
+/// Operations that are Bitbucket-only by definition (`handle_clone`,
+/// workspace resolution) take `&BitbucketContext` rather than the
+/// vendor-neutral [`HandleContext`] so the type system rejects calls made
+/// with a Jira (or any future) vendor at compile time. Generic API tools
+/// like `bb_get`/`bb_post` continue to use [`HandleContext`] via
+/// [`Self::handle`].
+#[derive(Clone, Copy)]
+pub struct BitbucketContext<'a> {
+    inner: HandleContext<'a>,
+    cache: &'a WorkspaceCache,
+}
+
+impl<'a> BitbucketContext<'a> {
+    /// Construct a Bitbucket-scoped context. Takes a concrete
+    /// `&BitbucketVendor` (not `&dyn Vendor`) so misuse with another
+    /// vendor is impossible. A debug-build assertion confirms the vendor
+    /// canonical name as belt-and-braces in case the trait impl ever
+    /// drifts.
+    pub fn new(
+        client: &'a Client,
+        config: &'a Config,
+        vendor: &'a BitbucketVendor,
+        cache: &'a WorkspaceCache,
+    ) -> Self {
+        debug_assert_eq!(
+            <BitbucketVendor as Vendor>::name(vendor),
+            VENDOR_BITBUCKET,
+            "BitbucketVendor::name() must return VENDOR_BITBUCKET"
+        );
+        Self {
+            inner: HandleContext::new(client, config, vendor),
+            cache,
+        }
+    }
+
+    /// Borrow the underlying vendor-neutral context. Used by helpers
+    /// that delegate to `transport::fetch` or `handle_request`.
+    pub fn handle(&self) -> &HandleContext<'a> {
+        &self.inner
+    }
+
+    /// Borrow the per-instance workspace cache.
+    pub fn cache(&self) -> &'a WorkspaceCache {
+        self.cache
     }
 }
 

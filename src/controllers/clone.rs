@@ -19,7 +19,7 @@ use serde_json::Value;
 use tracing::{debug, warn};
 
 use crate::auth::Credentials;
-use crate::controllers::api::{ControllerResponse, HandleContext};
+use crate::controllers::api::{BitbucketContext, ControllerResponse};
 use crate::error::{McpError, auth_missing_default, unexpected};
 use crate::shell;
 use crate::tools::args::CloneArgs;
@@ -51,7 +51,7 @@ fn slug_is_valid(slug: &str) -> bool {
 
 /// Main entry point invoked by both the MCP tool and the CLI subcommand.
 pub async fn handle_clone(
-    ctx: &HandleContext<'_>,
+    ctx: &BitbucketContext<'_>,
     args: &CloneArgs,
 ) -> Result<ControllerResponse, McpError> {
     let workspace = resolve_workspace(ctx, args.workspace_slug.as_deref()).await?;
@@ -101,7 +101,7 @@ pub async fn handle_clone(
 }
 
 async fn resolve_workspace(
-    ctx: &HandleContext<'_>,
+    ctx: &BitbucketContext<'_>,
     explicit: Option<&str>,
 ) -> Result<String, McpError> {
     if let Some(slug) = explicit
@@ -201,17 +201,18 @@ async fn target_subdir_exists(path: &Path) -> bool {
 }
 
 async fn fetch_repo_metadata(
-    ctx: &HandleContext<'_>,
+    ctx: &BitbucketContext<'_>,
     workspace: &str,
     repo: &str,
 ) -> Result<Value, McpError> {
-    let creds = Credentials::resolve(ctx.config).ok_or_else(auth_missing_default)?;
+    let handle = ctx.handle();
+    let creds = Credentials::resolve(handle.config).ok_or_else(auth_missing_default)?;
     let path = format!("/2.0/repositories/{workspace}/{repo}");
     let response = fetch(
-        ctx.client,
-        ctx.vendor,
+        handle.client,
+        handle.vendor,
         &creds,
-        ctx.config,
+        handle.config,
         &path,
         RequestOptions::default(),
     )

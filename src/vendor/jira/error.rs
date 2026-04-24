@@ -1,15 +1,28 @@
 //! Parse Jira error response bodies into typed [`McpError`] values.
 //!
-//! Jira REST API v3 error envelopes:
-//! 1. Canonical: `{"errorMessages": ["..."], "errors": {"field": "msg"}}`
-//!    Either side may be empty; field validation errors live in `errors`,
-//!    higher-level failures (auth/permission/not-found) in `errorMessages`.
-//! 2. Fallback: `{"message": "..."}` — used by some auth endpoints.
-//! 3. OAuth-style: `{"error": "...", "error_description": "..."}` — caught
-//!    via the nested-error branch.
+//! Mirrors `src/utils/transport.util.ts` from the TS Jira reference
+//! (`@aashari/mcp-server-atlassian-jira`). The parser walks **every**
+//! recognised envelope shape in TS order and concatenates the parts with
+//! ` | ` (parts) and `; ` (within-part lists):
 //!
-//! When none match, the raw body text is surfaced via
-//! [`OriginalError::String`] so the MCP error formatter can expose it.
+//! 1. `errorMessages: string[]` — joined by `'; '`
+//! 2. `errors` (object, field validation) — `key: value` pairs joined by `'; '`
+//! 3. `message: string` — appended verbatim
+//! 4. `errors` (array, legacy Atlassian format) — first entry's `title` and
+//!    `detail` appended as separate parts
+//! 5. `warningMessages: string[]` — prefixed `Warnings: ` then joined by `'; '`
+//!
+//! Final concatenation: `parts.join(' | ')`.
+//!
+//! Status mapping mirrors TS:
+//! - 401 → `auth_invalid`, prefix `"Authentication failed. Jira API: "`
+//! - 403 → `auth_invalid`, prefix `"Insufficient permissions. Jira API: "`
+//!   (the previous Rust port mapped 403 to `api_error`; that broke parity
+//!   with TS, which treats both as auth/permission failures)
+//! - 404 → `api_error(404)`, prefix `"Resource not found. Jira API: "`
+//! - 429 → `api_error(429)`, prefix `"Rate limit exceeded. Jira API: "`
+//! - 5xx → `api_error(status)`, prefix `"Jira server error. Detail: "`
+//! - other → `api_error(status)`, prefix `"Jira API request failed. Detail: "`
 
 use reqwest::StatusCode;
 use serde_json::Value;
@@ -20,41 +33,36 @@ use crate::error::{McpError, OriginalError, api_error, auth_invalid};
 /// preserving the upstream payload as `original`.
 pub fn classify(status: StatusCode, body_text: &str) -> McpError {
     let parsed = parse_error_body(body_text);
-    let message_suffix = parsed.message.as_deref().unwrap_or(body_text);
-    let message_suffix = if message_suffix.is_empty() {
-        status
-            .canonical_reason()
-            .unwrap_or("Jira API error")
-            .to_owned()
-    } else {
-        message_suffix.to_owned()
-    };
+    let message = parsed.message.unwrap_or_else(|| {
+        // TS fallback: `${status} ${statusText}`. We don't have statusText
+        // pre-formatted here, so emit `<status> <canonical reason>`.
+        let reason = status.canonical_reason().unwrap_or("Jira API error");
+        format!("{} {reason}", status.as_u16())
+    });
 
     match status.as_u16() {
-        401 => auth_invalid(format!("Jira API: Authentication failed - {message_suffix}"))
+        401 => auth_invalid(format!("Authentication failed. Jira API: {message}"))
             .with_original(parsed.original),
-        403 => api_error(
-            format!("Jira API: Permission denied - {message_suffix}"),
-            Some(403),
-            parsed.original,
-        ),
+        403 => auth_invalid(format!("Insufficient permissions. Jira API: {message}"))
+            .with_status(403)
+            .with_original(parsed.original),
         404 => api_error(
-            format!("Jira API: Resource not found - {message_suffix}"),
+            format!("Resource not found. Jira API: {message}"),
             Some(404),
             parsed.original,
         ),
         429 => api_error(
-            format!("Jira API: Rate limit exceeded - {message_suffix}"),
+            format!("Rate limit exceeded. Jira API: {message}"),
             Some(429),
             parsed.original,
         ),
         s if s >= 500 => api_error(
-            format!("Jira API: Service error - {message_suffix}"),
+            format!("Jira server error. Detail: {message}"),
             Some(s),
             parsed.original,
         ),
         s => api_error(
-            format!("Jira API Error: {message_suffix}"),
+            format!("Jira API request failed. Detail: {message}"),
             Some(s),
             parsed.original,
         ),
@@ -89,94 +97,97 @@ pub fn parse_error_body(body_text: &str) -> ParsedError {
         };
     };
 
-    if let Some(result) = parse_jira_envelope(&parsed) {
-        return result;
-    }
-    if let Some(result) = parse_oauth_error(&parsed) {
-        return result;
-    }
-    if let Some(result) = parse_flat_message(&parsed) {
-        return result;
-    }
-
-    ParsedError {
-        message: None,
-        original: Some(OriginalError::Json(parsed)),
-    }
-}
-
-/// `{"errorMessages": ["..."], "errors": {"field": "msg"}}` — the canonical
-/// Jira envelope. Either side may be empty; the parser concatenates both
-/// into a single "; "-delimited message so the human sees everything.
-fn parse_jira_envelope(parsed: &Value) -> Option<ParsedError> {
-    let obj = parsed.as_object()?;
-    let messages = obj.get("errorMessages").and_then(Value::as_array);
-    let errors = obj.get("errors").and_then(Value::as_object);
-    if messages.is_none() && errors.is_none() {
-        return None;
-    }
-
+    // Walk every recognised envelope shape in TS order and accumulate
+    // human-readable parts. Multiple shapes can coexist (a single 400
+    // response can carry both `errors` field validation and a top-level
+    // `message`), so this is additive rather than first-match-wins.
     let mut parts: Vec<String> = Vec::new();
-    if let Some(arr) = messages {
-        for v in arr {
-            if let Some(s) = v.as_str() {
-                parts.push(s.to_owned());
-            }
+
+    if let Some(arr) = parsed.get("errorMessages").and_then(Value::as_array) {
+        let joined = join_string_array(arr, "; ");
+        if !joined.is_empty() {
+            parts.push(joined);
         }
     }
-    if let Some(field_errors) = errors {
-        for (field, value) in field_errors {
-            if let Some(s) = value.as_str() {
-                parts.push(format!("{field}: {s}"));
+
+    if let Some(obj) = parsed.get("errors").and_then(Value::as_object)
+        && !obj.is_empty()
+    {
+        let mut field_pairs: Vec<String> = Vec::new();
+        for (k, v) in obj {
+            if let Some(s) = v.as_str() {
+                field_pairs.push(format!("{k}: {s}"));
+            } else {
+                // Non-string field value (rare). Best-effort stringify so the
+                // user still sees something useful.
+                field_pairs.push(format!("{k}: {v}"));
             }
+        }
+        if !field_pairs.is_empty() {
+            parts.push(field_pairs.join("; "));
+        }
+    }
+
+    if let Some(message) = parsed.get("message").and_then(Value::as_str)
+        && !message.is_empty()
+    {
+        parts.push(message.to_owned());
+    }
+
+    if let Some(arr) = parsed.get("errors").and_then(Value::as_array)
+        && let Some(first) = arr.first().and_then(Value::as_object)
+    {
+        // Legacy Atlassian `errors[0]` shape: emit title and detail as
+        // separate parts (TS pushes them independently, so the final
+        // `' | '` join naturally separates them).
+        if let Some(title) = first.get("title").and_then(Value::as_str) {
+            parts.push(title.to_owned());
+        }
+        if let Some(detail) = first.get("detail").and_then(Value::as_str) {
+            parts.push(detail.to_owned());
+        }
+    }
+
+    if let Some(arr) = parsed.get("warningMessages").and_then(Value::as_array) {
+        let joined = join_string_array(arr, "; ");
+        if !joined.is_empty() {
+            parts.push(format!("Warnings: {joined}"));
         }
     }
 
     let message = if parts.is_empty() {
         None
     } else {
-        Some(parts.join("; "))
+        Some(parts.join(" | "))
     };
 
-    Some(ParsedError {
+    ParsedError {
         message,
-        original: Some(OriginalError::Json(parsed.clone())),
-    })
+        original: Some(OriginalError::Json(parsed)),
+    }
 }
 
-/// OAuth-style: `{"error": "...", "error_description": "..."}`.
-fn parse_oauth_error(parsed: &Value) -> Option<ParsedError> {
-    let obj = parsed.as_object()?;
-    let code = obj.get("error").and_then(Value::as_str)?;
-    let description = obj
-        .get("error_description")
-        .and_then(Value::as_str)
-        .unwrap_or(code)
-        .to_owned();
-    Some(ParsedError {
-        message: Some(description),
-        original: Some(OriginalError::Json(parsed.clone())),
-    })
+fn join_string_array(arr: &[Value], sep: &str) -> String {
+    arr.iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(sep)
 }
 
-fn parse_flat_message(parsed: &Value) -> Option<ParsedError> {
-    let obj = parsed.as_object()?;
-    let message = obj.get("message").and_then(Value::as_str)?.to_owned();
-    Some(ParsedError {
-        message: Some(message),
-        original: Some(OriginalError::Json(parsed.clone())),
-    })
-}
-
-// Extension helper to fluently attach an original payload to an existing
+// Extension helpers to fluently attach extra fields to an existing
 // McpError (avoids repeating the constructor pattern in `classify`).
-trait WithOriginal {
+trait WithMutators {
     fn with_original(self, original: Option<OriginalError>) -> Self;
+    fn with_status(self, status: u16) -> Self;
 }
 
-impl WithOriginal for McpError {
+impl WithMutators for McpError {
     fn with_original(mut self, original: Option<OriginalError>) -> Self {
         self.original = original;
+        self
+    }
+    fn with_status(mut self, status: u16) -> Self {
+        self.status_code = Some(status);
         self
     }
 }

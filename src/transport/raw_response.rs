@@ -4,14 +4,18 @@
 //! Filename is `<iso-ts-dashed>-<8hex>.txt` (colons/dots in the timestamp are
 //! replaced with `-` to match TS). Body uses 80-char `=` separators around
 //! metadata / request body / response data sections.
+//!
+//! All filesystem I/O goes through `tokio::fs` so the request path stays
+//! cooperatively async — a heavy traffic burst can't block tokio worker
+//! threads on `mkdir`/`write` syscalls.
 
 use std::fmt::Write as _;
-use std::io::Write;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rand::RngCore;
 use serde_json::Value;
+use tokio::fs;
 use tracing::debug;
 
 use crate::constants::UNSCOPED_PACKAGE_NAME;
@@ -19,7 +23,7 @@ use crate::constants::UNSCOPED_PACKAGE_NAME;
 /// Write the raw API response to disk and return the path written. Returns
 /// `None` on any failure — parity with TS behaviour, which logs but does not
 /// propagate errors from this subsystem.
-pub fn save(
+pub async fn save(
     url: &str,
     method: &str,
     request_body: Option<&Value>,
@@ -30,7 +34,7 @@ pub fn save(
     let dir = PathBuf::from("/tmp")
         .join("mcp")
         .join(UNSCOPED_PACKAGE_NAME);
-    if let Err(err) = std::fs::create_dir_all(&dir) {
+    if let Err(err) = fs::create_dir_all(&dir).await {
         debug!(%err, dir = %dir.display(), "failed to create raw response dir");
         return None;
     }
@@ -40,7 +44,7 @@ pub fn save(
 
     let content = build_content(url, method, request_body, response_data, status_code, duration);
 
-    match std::fs::File::create(&path).and_then(|mut f| f.write_all(content.as_bytes())) {
+    match fs::write(&path, content.as_bytes()).await {
         Ok(()) => {
             debug!(path = %path.display(), "saved raw response");
             Some(path)

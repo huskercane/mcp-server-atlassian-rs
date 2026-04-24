@@ -34,13 +34,14 @@ use rmcp::{
 
 use crate::config::Config;
 use crate::constants::{PACKAGE_NAME, VERSION};
-use crate::controllers::api::{HandleContext, handle_read, handle_write};
+use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, handle_write};
 use crate::controllers::handle_clone;
 use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
 use crate::vendor::jira::JiraVendor;
+use crate::workspace::WorkspaceCache;
 use args::{CloneArgs, ReadArgs, WriteArgs};
 
 #[derive(Clone)]
@@ -58,6 +59,10 @@ struct ServerState {
     config: Config,
     bitbucket_vendor: BitbucketVendor,
     jira_vendor: JiraVendor,
+    /// Per-instance workspace cache. Lives here (not as a process-global
+    /// singleton) so multi-server embedders never leak one account's
+    /// default workspace into another's lookups.
+    workspace_cache: WorkspaceCache,
 }
 
 impl AtlassianServer {
@@ -92,6 +97,7 @@ impl AtlassianServer {
                 config,
                 bitbucket_vendor,
                 jira_vendor,
+                workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
         }
@@ -111,6 +117,19 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.bitbucket_vendor,
+        )
+    }
+
+    /// Bitbucket-only typed context for `bb_clone` and any future
+    /// Bitbucket-specific operation. Carries the workspace cache so
+    /// `resolve_default_workspace` lookups stay scoped to this server
+    /// instance.
+    fn bitbucket_typed_ctx(&self) -> BitbucketContext<'_> {
+        BitbucketContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.bitbucket_vendor,
+            &self.state.workspace_cache,
         )
     }
 
@@ -354,7 +373,7 @@ async fn run_write_jira(
 }
 
 async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
-    match handle_clone(&server.bitbucket_ctx(), args).await {
+    match handle_clone(&server.bitbucket_typed_ctx(), args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
