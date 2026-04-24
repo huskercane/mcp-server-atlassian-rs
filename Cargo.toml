@@ -1,20 +1,20 @@
 [package]
-name         = "mcp-server-atlassian-bitbucket"
+name         = "mcp-server-atlassian"
 version      = "0.1.0"
 edition      = "2024"
 rust-version = "1.85"
-description  = "Rust MCP server for Atlassian Bitbucket (Cloud). Port of the TypeScript reference implementation."
+description  = "Rust MCP server for Atlassian Bitbucket and Jira (Cloud). Ports of the TypeScript reference implementations."
 license      = "ISC"
 repository   = "https://github.com/aashari/mcp-server-atlassian-bitbucket"
 readme       = "../README.md"
 publish      = false
 
 [lib]
-name = "mcp_server_atlassian_bitbucket"
+name = "mcp_server_atlassian"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mcp-atlassian-bitbucket"
+name = "mcp-atlassian"
 path = "src/main.rs"
 
 [dependencies]

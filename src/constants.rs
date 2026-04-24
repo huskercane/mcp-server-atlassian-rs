@@ -2,11 +2,11 @@ use std::time::Duration;
 
 pub const VERSION: &str = "3.1.0";
 
-pub const PACKAGE_NAME: &str = "@huskercane/mcp-server-atlassian-bitbucket-rs";
+pub const PACKAGE_NAME: &str = "@huskercane/mcp-server-atlassian";
 
-pub const UNSCOPED_PACKAGE_NAME: &str = "mcp-server-atlassian-bitbucket-rs";
+pub const UNSCOPED_PACKAGE_NAME: &str = "mcp-server-atlassian";
 
-pub const CLI_NAME: &str = "mcp-atlassian-bitbucket";
+pub const CLI_NAME: &str = "mcp-atlassian";
 
 pub mod network_timeouts {
     use super::Duration;

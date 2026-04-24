@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use mcp_server_atlassian_bitbucket::auth::Credentials;
-use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::error::ErrorKind;
+use mcp_server_atlassian::auth::Credentials;
+use mcp_server_atlassian::config::Config;
+use mcp_server_atlassian::error::ErrorKind;
 use pretty_assertions::assert_eq;
 
 fn cfg(entries: &[(&str, &str)]) -> Config {

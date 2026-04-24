@@ -1,14 +1,14 @@
 //! Tool-schema sanity: round-trip the `AtlassianServer`'s advertised info,
 //! and verify the `args` types serialise with camelCase keys (TS parity).
 
-use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::tools::AtlassianServer;
-use mcp_server_atlassian_bitbucket::tools::args::{
+use mcp_server_atlassian::config::Config;
+use mcp_server_atlassian::tools::AtlassianServer;
+use mcp_server_atlassian::tools::args::{
     OutputFormatArg, QueryParams, ReadArgs, WriteArgs,
 };
-use mcp_server_atlassian_bitbucket::transport::build_client;
-use mcp_server_atlassian_bitbucket::vendor::bitbucket::BitbucketVendor;
-use mcp_server_atlassian_bitbucket::vendor::jira::JiraVendor;
+use mcp_server_atlassian::transport::build_client;
+use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
+use mcp_server_atlassian::vendor::jira::JiraVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
 use std::collections::HashMap;
@@ -24,11 +24,11 @@ fn server_info_reports_expected_identity() {
     let info = server.get_info();
     assert_eq!(
         info.server_info.name,
-        mcp_server_atlassian_bitbucket::constants::PACKAGE_NAME
+        mcp_server_atlassian::constants::PACKAGE_NAME
     );
     assert_eq!(
         info.server_info.version,
-        mcp_server_atlassian_bitbucket::constants::VERSION
+        mcp_server_atlassian::constants::VERSION
     );
     assert!(info.capabilities.tools.is_some());
 }

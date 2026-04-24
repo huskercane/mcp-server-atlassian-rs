@@ -1,11 +1,11 @@
 //! Port of `bitbucket-error-detection.test.ts`. Exercises the controller-level
 //! classifier and, at the same time, the body parser used by transport.
 
-use mcp_server_atlassian_bitbucket::error::{
+use mcp_server_atlassian::error::{
     DetectedError, ErrorCode, ErrorContext, OriginalError, api_error, detect_error_type,
     unexpected,
 };
-use mcp_server_atlassian_bitbucket::transport::bitbucket_error::{classify, parse_error_body};
+use mcp_server_atlassian::transport::bitbucket_error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use serde_json::json;

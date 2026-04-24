@@ -15,7 +15,7 @@ use crate::error::McpError;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::jira::JiraVendor;
 
-/// Verbs exposed under `mcp-atlassian-bitbucket jira …`.
+/// Verbs exposed under `mcp-atlassian jira …`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// GET any Jira endpoint. Returns the response body to stdout.

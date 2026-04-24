@@ -4,11 +4,11 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::error::{ErrorKind, OriginalError};
-use mcp_server_atlassian_bitbucket::vendor::Vendor;
-use mcp_server_atlassian_bitbucket::vendor::jira::JiraVendor;
-use mcp_server_atlassian_bitbucket::vendor::jira::error::{classify, parse_error_body};
+use mcp_server_atlassian::config::Config;
+use mcp_server_atlassian::error::{ErrorKind, OriginalError};
+use mcp_server_atlassian::vendor::Vendor;
+use mcp_server_atlassian::vendor::jira::JiraVendor;
+use mcp_server_atlassian::vendor::jira::error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use serde_json::json;

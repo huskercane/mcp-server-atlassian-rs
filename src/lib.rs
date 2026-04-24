@@ -1,4 +1,6 @@
-//! Rust port of the TypeScript `@aashari/mcp-server-atlassian-bitbucket-rs`.
+//! Rust port of the TypeScript `@aashari/mcp-server-atlassian-bitbucket` and
+//! `@aashari/mcp-server-atlassian-jira` MCP servers, unified into a single
+//! binary that exposes both vendors' tool surfaces.
 //!
 //! Phase 1 scope: foundation modules (config, auth, errors, logger, constants)
 //! and a minimal `rmcp` stdio server skeleton. Tools, CLI, and the streamable

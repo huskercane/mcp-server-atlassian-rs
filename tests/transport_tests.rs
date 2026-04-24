@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mcp_server_atlassian_bitbucket::auth::Credentials;
-use mcp_server_atlassian_bitbucket::config::Config;
-use mcp_server_atlassian_bitbucket::error::ErrorKind;
-use mcp_server_atlassian_bitbucket::transport::{
+use mcp_server_atlassian::auth::Credentials;
+use mcp_server_atlassian::config::Config;
+use mcp_server_atlassian::error::ErrorKind;
+use mcp_server_atlassian::transport::{
     HttpMethod, RequestOptions, ResponseBody, build_client,
 };
 use pretty_assertions::assert_eq;
@@ -24,8 +24,8 @@ async fn call_mock(
     path_suffix: &str,
     options: RequestOptions,
 ) -> Result<
-    mcp_server_atlassian_bitbucket::transport::TransportResponse,
-    mcp_server_atlassian_bitbucket::error::McpError,
+    mcp_server_atlassian::transport::TransportResponse,
+    mcp_server_atlassian::error::McpError,
 > {
     let client = build_client().unwrap();
     let creds = Credentials::AtlassianApiToken {
@@ -52,10 +52,10 @@ async fn call_mock(
 /// the wiremock server's URL for the duration of the test. Implemented as an
 /// inline module to keep scope out of the public API.
 mod override_url {
-    use mcp_server_atlassian_bitbucket::auth::Credentials;
-    use mcp_server_atlassian_bitbucket::config::Config;
-    use mcp_server_atlassian_bitbucket::error::McpError;
-    use mcp_server_atlassian_bitbucket::transport::{
+    use mcp_server_atlassian::auth::Credentials;
+    use mcp_server_atlassian::config::Config;
+    use mcp_server_atlassian::error::McpError;
+    use mcp_server_atlassian::transport::{
         RequestOptions, TransportResponse, fetch_bitbucket_with_base,
     };
     use wiremock::MockServer;
@@ -99,7 +99,7 @@ async fn get_json_response_is_classified_and_persisted() {
         other => panic!("expected JSON, got {other:?}"),
     }
     let path = resp.raw_response_path.expect("raw path for JSON response");
-    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian-bitbucket-rs/"));
+    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian/"));
     let _ = std::fs::remove_file(&path);
 }
 

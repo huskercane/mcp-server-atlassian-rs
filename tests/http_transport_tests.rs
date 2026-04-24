@@ -7,8 +7,8 @@
 
 use std::time::Duration;
 
-use mcp_server_atlassian_bitbucket::server::http::build_app;
-use mcp_server_atlassian_bitbucket::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL};
+use mcp_server_atlassian::server::http::build_app;
+use mcp_server_atlassian::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL};
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
 use serde_json::json;

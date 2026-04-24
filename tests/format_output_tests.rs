@@ -1,4 +1,4 @@
-use mcp_server_atlassian_bitbucket::format::{OutputFormat, render, to_pretty_json};
+use mcp_server_atlassian::format::{OutputFormat, render, to_pretty_json};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 

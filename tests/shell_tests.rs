@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use mcp_server_atlassian_bitbucket::shell::{DEFAULT_TIMEOUT, execute, execute_with_timeout};
+use mcp_server_atlassian::shell::{DEFAULT_TIMEOUT, execute, execute_with_timeout};
 use pretty_assertions::assert_eq;
 
 #[tokio::test]

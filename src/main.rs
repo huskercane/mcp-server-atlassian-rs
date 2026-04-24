@@ -1,4 +1,4 @@
-//! `mcp-atlassian-bitbucket` binary entry point.
+//! `mcp-atlassian` binary entry point.
 //!
 //! Runtime mode is chosen by argv + `TRANSPORT_MODE`, matching the TS
 //! behaviour at `src/index.ts:380-400`:
@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use mcp_server_atlassian_bitbucket::{cli, logger, server};
+use mcp_server_atlassian::{cli, logger, server};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use tracing_subscriber::layer::SubscriberExt;

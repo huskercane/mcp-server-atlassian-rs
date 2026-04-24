@@ -1,4 +1,4 @@
-use mcp_server_atlassian_bitbucket::format::markdown::{format_heading, format_separator};
+use mcp_server_atlassian::format::markdown::{format_heading, format_separator};
 use pretty_assertions::assert_eq;
 
 #[test]

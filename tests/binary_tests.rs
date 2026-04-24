@@ -1,4 +1,4 @@
-//! End-to-end tests that drive the `mcp-atlassian-bitbucket` binary through
+//! End-to-end tests that drive the `mcp-atlassian` binary through
 //! its real `main` function. These tests deliberately stay narrow — per-
 //! transport behavior is covered by the library-level tests in
 //! `tests/http_transport_tests.rs` and the various tool/controller tests.
@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use assert_cmd::cargo::cargo_bin;
 use tokio::process::Command as TokioCommand;
 
-const BIN: &str = "mcp-atlassian-bitbucket";
+const BIN: &str = "mcp-atlassian";
 
 /// Probe `127.0.0.1:0` to get a port the OS considers free, then drop the
 /// listener so the binary-under-test can bind it. There is a small race with

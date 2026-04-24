@@ -4,7 +4,7 @@
 //! `get_deep_original`, `format_error_for_mcp_tool`,
 //! `format_error_for_mcp_resource`.
 
-use mcp_server_atlassian_bitbucket::error::{
+use mcp_server_atlassian::error::{
     ErrorKind, McpError, OriginalError, api_error, auth_invalid, auth_missing_default,
     ensure_mcp_error, ensure_mcp_error_from_string, format_error_for_mcp_resource,
     format_error_for_mcp_tool, get_deep_original, unexpected_default,

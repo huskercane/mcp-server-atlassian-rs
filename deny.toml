@@ -1,4 +1,4 @@
-# cargo-deny configuration for the Rust port of mcp-server-atlassian-bitbucket.
+# cargo-deny configuration for the Rust port of mcp-server-atlassian (Bitbucket + Jira).
 #
 # Run locally with `cargo deny check` from inside `rust/`. Not wired into CI.
 # Strict mode: every unhandled advisory, license, or ban is a hard error.

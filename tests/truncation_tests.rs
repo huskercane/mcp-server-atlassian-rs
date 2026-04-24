@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use mcp_server_atlassian_bitbucket::format::truncation::{MAX_RESPONSE_CHARS, truncate_for_ai};
+use mcp_server_atlassian::format::truncation::{MAX_RESPONSE_CHARS, truncate_for_ai};
 use pretty_assertions::assert_eq;
 
 #[test]
@@ -38,7 +38,7 @@ fn oversized_content_is_truncated_and_annotated() {
 #[test]
 fn includes_raw_path_when_provided() {
     let content = "a".repeat(MAX_RESPONSE_CHARS + 500);
-    let path = Path::new("/tmp/mcp/mcp-server-atlassian-bitbucket-rs/abc.txt");
+    let path = Path::new("/tmp/mcp/mcp-server-atlassian/abc.txt");
     let out = truncate_for_ai(&content, Some(path));
     assert!(out.contains("The full raw API response is saved at:"));
     assert!(out.contains(path.to_string_lossy().as_ref()));

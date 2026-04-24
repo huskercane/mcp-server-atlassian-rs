@@ -1,4 +1,4 @@
-use mcp_server_atlassian_bitbucket::pagination::{
+use mcp_server_atlassian::pagination::{
     PaginationType, extract_pagination_info, validate_page_size,
 };
 use pretty_assertions::assert_eq;

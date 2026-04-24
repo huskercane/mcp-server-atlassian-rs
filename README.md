@@ -1,8 +1,8 @@
-# mcp-server-atlassian-bitbucket (Rust port)
+# mcp-server-atlassian (Rust port)
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud and Jira Cloud** through a single binary. Ports both [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket) and [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
-This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian-bitbucket`.
+This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
 ## Why a Rust port
 
@@ -20,7 +20,7 @@ cd mcp-server-atlassian-bitbucket/rust
 cargo build --release
 ```
 
-The binary lands at `target/release/mcp-atlassian-bitbucket`. Requires Rust 1.85 or later.
+The binary lands at `target/release/mcp-atlassian`. Requires Rust 1.85 or later.
 
 Optional checks:
 ```bash
@@ -78,7 +78,7 @@ Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 {
   "mcpServers": {
     "bitbucket": {
-      "command": "/absolute/path/to/mcp-atlassian-bitbucket",
+      "command": "/absolute/path/to/mcp-atlassian",
       "env": {
         "ATLASSIAN_USER_EMAIL": "your.email@company.com",
         "ATLASSIAN_API_TOKEN": "ATATT..."
@@ -133,28 +133,28 @@ Two subcommand groups — one per vendor — keep the verbs unambiguous:
 
 ```bash
 # Bitbucket
-./mcp-atlassian-bitbucket bb get --path "/workspaces"
+./mcp-atlassian bb get --path "/workspaces"
 
-./mcp-atlassian-bitbucket bb get \
+./mcp-atlassian bb get \
     --path "/repositories/acme" \
     --query-params '{"pagelen":"10"}' \
     --jq 'values[].{slug:slug,language:language}'
 
-./mcp-atlassian-bitbucket bb post \
+./mcp-atlassian bb post \
     --path "/repositories/acme/website/pullrequests" \
     --body '{"title":"Fix login","source":{"branch":{"name":"fix-login"}},"destination":{"branch":{"name":"main"}}}'
 
-./mcp-atlassian-bitbucket bb clone --repo-slug website --target-path ~/work
+./mcp-atlassian bb clone --repo-slug website --target-path ~/work
 
 # Jira
-./mcp-atlassian-bitbucket jira get --path "/rest/api/3/myself"
+./mcp-atlassian jira get --path "/rest/api/3/myself"
 
-./mcp-atlassian-bitbucket jira get \
+./mcp-atlassian jira get \
     --path "/rest/api/3/search/jql" \
     --query-params '{"jql":"project=PROJ AND status=\"In Progress\"","maxResults":"10"}' \
     --jq 'issues[*].{key:key,summary:fields.summary}'
 
-./mcp-atlassian-bitbucket jira post \
+./mcp-atlassian jira post \
     --path "/rest/api/3/issue" \
     --body '{"fields":{"project":{"key":"PROJ"},"summary":"New task","issuetype":{"name":"Task"}}}'
 ```
@@ -163,12 +163,12 @@ Every verb accepts `--output-format toon|json` (default `toon`, parity with the 
 
 ### Deprecated top-level Bitbucket verbs
 
-The original CLI exposed Bitbucket verbs without the `bb` prefix (`./mcp-atlassian-bitbucket get …`). Those are kept as hidden aliases for one release and emit a stderr deprecation notice when invoked. Migrate scripts to the explicit `bb` form before the next major release.
+The original CLI exposed Bitbucket verbs without the `bb` prefix (`./mcp-atlassian get …`). Those are kept as hidden aliases for one release and emit a stderr deprecation notice when invoked. Migrate scripts to the explicit `bb` form before the next major release.
 
 ## Transports
 
 - **stdio (default)**: MCP client spawns the binary, reads JSON-RPC framed by newlines on stdout, writes on stdin. Ctrl-D / stdin-EOF triggers a clean exit.
-- **streamable HTTP**: `TRANSPORT_MODE=http ./mcp-atlassian-bitbucket`. Binds `127.0.0.1:${PORT:-3000}`. Endpoints:
+- **streamable HTTP**: `TRANSPORT_MODE=http ./mcp-atlassian`. Binds `127.0.0.1:${PORT:-3000}`. Endpoints:
   - `GET /` — plaintext health banner.
   - `POST /mcp` — MCP initialize + JSON-RPC calls. Returns `Mcp-Session-Id` on first call; subsequent calls must echo it.
   - `GET /mcp` — SSE stream for a session.

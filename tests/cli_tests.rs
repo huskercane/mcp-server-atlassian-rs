@@ -8,12 +8,12 @@
 //!    the deprecation shim emits a stderr notice.
 
 use clap::{CommandFactory, Parser};
-use mcp_server_atlassian_bitbucket::cli::Cli;
-use mcp_server_atlassian_bitbucket::cli::api::{parse_object, parse_query_params};
+use mcp_server_atlassian::cli::Cli;
+use mcp_server_atlassian::cli::api::{parse_object, parse_query_params};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-const BIN: &str = "mcp-atlassian-bitbucket";
+const BIN: &str = "mcp-atlassian";
 
 // ---- parse_object ----
 

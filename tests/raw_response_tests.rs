@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mcp_server_atlassian_bitbucket::transport::raw_response::save;
+use mcp_server_atlassian::transport::raw_response::save;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -24,7 +24,7 @@ async fn writes_file_under_tmp_mcp() {
     .await
     .expect("raw response should be written");
 
-    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian-bitbucket-rs/"));
+    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian/"));
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())
