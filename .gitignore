@@ -1,0 +1,37 @@
+# Rust / Cargo
+/target
+**/*.rs.bk
+*.pdb
+
+# Cargo.lock — this is a binary crate, so convention is to commit it.
+# Remove the line below if you want it tracked.
+Cargo.lock
+
+# Secrets & local config
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+
+# Coverage / profiling
+/coverage
+tarpaulin-report.*
+cobertura.xml
+*.profraw
+perf.data
+perf.data.old
+flamegraph.svg
+
+# Editors / IDEs
+.idea/
+.vscode/
+*.iml
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db

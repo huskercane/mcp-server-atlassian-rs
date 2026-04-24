@@ -1,0 +1,69 @@
+[package]
+name         = "mcp-server-atlassian-bitbucket"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.85"
+description  = "Rust MCP server for Atlassian Bitbucket (Cloud). Port of the TypeScript reference implementation."
+license      = "ISC"
+repository   = "https://github.com/aashari/mcp-server-atlassian-bitbucket"
+readme       = "../README.md"
+publish      = false
+
+[lib]
+name = "mcp_server_atlassian_bitbucket"
+path = "src/lib.rs"
+
+[[bin]]
+name = "mcp-atlassian-bitbucket"
+path = "src/main.rs"
+
+[dependencies]
+rmcp                = { version = "=1.5.0", features = ["transport-io", "transport-streamable-http-server"] }
+tokio               = { version = "=1.48.0", features = ["rt-multi-thread", "macros", "signal", "io-std", "fs", "sync", "time", "process"] }
+axum                = "=0.8.9"
+tower-http          = { version = "=0.6.8", features = ["cors", "limit"] }
+tokio-util          = { version = "=0.7.18", features = ["rt"] }
+futures             = "=0.3.32"
+serde               = { version = "=1.0.228", features = ["derive"] }
+serde_json          = "=1.0.145"
+tracing             = "=0.1.41"
+tracing-subscriber  = { version = "=0.3.20", features = ["env-filter", "fmt", "registry", "std"] }
+dotenvy             = "=0.15.7"
+base64              = "=0.22.1"
+dirs                = "=6.0.0"
+uuid                = { version = "=1.18.1", features = ["v4"] }
+regex               = "=1.11.3"
+reqwest             = { version = "=0.13.2", default-features = false, features = ["json", "rustls", "charset", "http2"] }
+url                 = "=2.5.7"
+jmespath            = "=0.5.0"
+toon-format         = { version = "=0.4.5", default-features = false }
+rand                = "=0.8.6"
+schemars            = "=1.2.1"
+clap                = { version = "=4.6.1", features = ["derive", "env", "wrap_help"] }
+
+[dev-dependencies]
+tempfile            = "=3.23.0"
+pretty_assertions   = "=1.4.1"
+serial_test         = "=3.2.0"
+wiremock            = "=0.6.5"
+assert_cmd          = "=2.2.1"
+
+[profile.release]
+lto              = "thin"
+codegen-units    = 1
+strip            = "symbols"
+opt-level        = 3
+
+[lints.rust]
+# `deny` (not `forbid`), so individual test files that need to mutate
+# `std::env` (which became `unsafe` in the 2024 edition) can opt in via
+# `#![allow(unsafe_code)]`. Production code never opts in.
+unsafe_code = "deny"
+
+[lints.clippy]
+all           = { level = "warn", priority = -1 }
+pedantic      = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
