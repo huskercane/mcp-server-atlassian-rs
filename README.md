@@ -12,11 +12,24 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - One binary serves both Bitbucket and Jira — instead of running two Node processes side-by-side, you get one MCP server exposing all 11 tools (six `bb_*`, five `jira_*`).
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
+## Download prebuilt binaries
+
+Grab the latest release for your platform from the [GitHub Releases page](https://github.com/huskercane/mcp-server-atlassian-rs/releases/latest):
+
+| Platform | Archive |
+|---|---|
+| Linux (x86_64) | `mcp-atlassian-linux-x86_64.tar.gz` |
+| macOS (Intel) | `mcp-atlassian-macos-x86_64.tar.gz` |
+| macOS (Apple Silicon) | `mcp-atlassian-macos-aarch64.tar.gz` |
+| Windows (x86_64) | `mcp-atlassian-windows-x86_64.zip` |
+
+Each archive ships the `mcp-atlassian` binary and a `.sha256` checksum sibling. On macOS you may need to clear the quarantine bit: `xattr -d com.apple.quarantine ./mcp-atlassian`.
+
 ## Build from source
 
 ```bash
-git clone https://github.com/aashari/mcp-server-atlassian-bitbucket.git
-cd mcp-server-atlassian-bitbucket/rust
+git clone https://github.com/huskercane/mcp-server-atlassian-rs.git
+cd mcp-server-atlassian-rs
 cargo build --release
 ```
 
