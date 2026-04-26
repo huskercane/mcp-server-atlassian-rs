@@ -5,7 +5,7 @@
 
 # Cargo.lock — this is a binary crate, so convention is to commit it.
 # Remove the line below if you want it tracked.
-Cargo.lock
+# Cargo.lock
 
 # Secrets & local config
 .env
