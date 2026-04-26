@@ -26,6 +26,7 @@
 //! error at tool-call time rather than crashing the process at boot.
 
 pub mod bitbucket;
+pub mod confluence;
 pub mod jira;
 
 use reqwest::StatusCode;

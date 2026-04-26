@@ -1,7 +1,8 @@
 #![allow(clippy::doc_markdown)]
 
-//! Shared CLI option types and JSON-parse helpers used by both the
-//! [`bb`](crate::cli::bb) and [`jira`](crate::cli::jira) subcommand groups.
+//! Shared CLI option types and JSON-parse helpers used by the
+//! [`bb`](crate::cli::bb), [`jira`](crate::cli::jira), and
+//! [`conf`](crate::cli::conf) subcommand groups.
 //!
 //! The actual subcommand enums and dispatchers live in their respective
 //! per-vendor modules.
@@ -40,12 +41,14 @@ impl From<OutputFormatFlag> for OutputFormat {
 pub struct ReadOpts {
     /// API endpoint path. For Bitbucket, omit the `/2.0` prefix (added
     /// automatically). For Jira, supply the full path including the API
-    /// version, e.g. `/rest/api/3/myself`.
+    /// version, e.g. `/rest/api/3/myself`. For Confluence, supply the
+    /// full path, e.g. `/wiki/api/v2/spaces` or `/wiki/rest/api/search`.
     #[arg(short = 'p', long = "path")]
     pub path: String,
 
     /// Query parameters as a JSON object string, e.g. `'{"pagelen":"25"}'`
-    /// (Bitbucket) or `'{"jql":"project=PROJ"}'` (Jira).
+    /// (Bitbucket), `'{"jql":"project=PROJ"}'` (Jira), or
+    /// `'{"cql":"type=page"}'` (Confluence).
     #[arg(short = 'q', long = "query-params")]
     pub query_params: Option<String>,
 
@@ -60,7 +63,7 @@ pub struct ReadOpts {
     pub output_format: OutputFormatFlag,
 }
 
-/// Args shared by all write-shaped verbs (POST, PUT, PATCH) on both vendors.
+/// Args shared by all write-shaped verbs (POST, PUT, PATCH) across all vendors.
 #[derive(Debug, Clone, clap::Args)]
 pub struct WriteOpts {
     /// API endpoint path. See [`ReadOpts::path`] for vendor-specific

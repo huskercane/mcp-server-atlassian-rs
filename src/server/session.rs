@@ -23,9 +23,9 @@ use tokio::time::{MissedTickBehavior, interval};
 use tracing::{debug, warn};
 
 /// TS reference uses a 30-minute idle timeout. See `src/index.ts`.
-pub const DEFAULT_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+pub const DEFAULT_IDLE_TTL: Duration = Duration::from_mins(30);
 /// TS reference sweeps every 5 minutes.
-pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_mins(5);
 
 /// [`SessionManager`] that layers an idle-reap policy over
 /// [`LocalSessionManager`].

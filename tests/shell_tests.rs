@@ -43,5 +43,5 @@ async fn timeout_kills_long_running_command() {
 
 #[test]
 fn default_timeout_is_five_minutes() {
-    assert_eq!(DEFAULT_TIMEOUT, Duration::from_secs(5 * 60));
+    assert_eq!(DEFAULT_TIMEOUT, Duration::from_mins(5));
 }

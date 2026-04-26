@@ -50,6 +50,9 @@ pub const VENDOR_BITBUCKET: &str = "bitbucket";
 /// Canonical vendor name for Jira.
 pub const VENDOR_JIRA: &str = "jira";
 
+/// Canonical vendor name for Confluence.
+pub const VENDOR_CONFLUENCE: &str = "confluence";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -169,7 +172,7 @@ impl Config {
     /// section only. Never reads another vendor's section.
     ///
     /// Use this for keys that are vendor-specific by definition
-    /// (`BITBUCKET_DEFAULT_WORKSPACE`, `ATLASSIAN_SITE_NAME`).
+    /// (`BITBUCKET_DEFAULT_WORKSPACE`).
     pub fn get_for(&self, vendor: &str, key: &str) -> Option<&str> {
         if let Some(v) = self.shared.get(key) {
             return Some(v.as_str());
@@ -178,6 +181,40 @@ impl Config {
             .get(vendor)
             .and_then(|m| m.get(key))
             .map(String::as_str)
+    }
+
+    /// Vendor-scoped lookup with a fallback chain through a caller-supplied
+    /// list of sibling vendors. Reads `shared`, then `by_vendor[primary]`,
+    /// then each fallback in order, returning the first defined value.
+    ///
+    /// Use this for keys that are nominally vendor-specific but realistically
+    /// shared across products on the same Atlassian site. The canonical case
+    /// is `ATLASSIAN_SITE_NAME`: the `jira` and `confluence` sections both
+    /// rely on the same site shortname, so a user with one section populated
+    /// shouldn't be forced to duplicate it under the other.
+    ///
+    /// Disagreement between sections is **not** detected here — callers that
+    /// need disambiguation should use [`get_for`](Self::get_for) instead.
+    /// The fallback list is intentionally explicit so unrelated vendors
+    /// (e.g. Bitbucket) do not silently leak into the lookup.
+    pub fn get_for_with_fallback(
+        &self,
+        primary: &str,
+        fallbacks: &[&str],
+        key: &str,
+    ) -> Option<&str> {
+        if let Some(v) = self.shared.get(key) {
+            return Some(v.as_str());
+        }
+        if let Some(v) = self.by_vendor.get(primary).and_then(|m| m.get(key)) {
+            return Some(v.as_str());
+        }
+        for vendor in fallbacks {
+            if let Some(v) = self.by_vendor.get(*vendor).and_then(|m| m.get(key)) {
+                return Some(v.as_str());
+            }
+        }
+        None
     }
 
     pub fn get_or(&self, key: &str, default: &str) -> String {
@@ -334,10 +371,18 @@ fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "@aashari/mcp-server-atlassian-jira".to_string(),
         "mcp-server-atlassian-jira".to_string(),
     ];
+    let confluence_aliases = vec![
+        "confluence".to_string(),
+        "atlassian-confluence".to_string(),
+        // TS Confluence package names — same migration guarantee.
+        "@aashari/mcp-server-atlassian-confluence".to_string(),
+        "mcp-server-atlassian-confluence".to_string(),
+    ];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
         (VENDOR_JIRA, jira_aliases),
+        (VENDOR_CONFLUENCE, confluence_aliases),
     ]
 }
 

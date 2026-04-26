@@ -1,12 +1,12 @@
-//! Jira Cloud vendor implementation.
+//! Confluence Cloud vendor implementation.
 //!
 //! - Base URL is derived from `ATLASSIAN_SITE_NAME` (resolved per-request,
 //!   never at server construction). Tests can bypass the env lookup with
-//!   [`JiraVendor::with_base_url`].
-//! - Path normalisation only ensures a leading `/`; Jira REST callers pass
-//!   the full path including the API version (e.g. `/rest/api/3/myself`).
-//! - Error parsing handles the canonical Jira envelope plus the OAuth and
-//!   flat-message fallbacks (see [`error`]).
+//!   [`ConfluenceVendor::with_base_url`].
+//! - Path normalisation only ensures a leading `/`; Confluence callers pass
+//!   the full path (e.g. `/wiki/api/v2/spaces`, `/wiki/rest/api/search`).
+//! - Error parsing handles the canonical Confluence v2 envelope plus the
+//!   legacy `message` / `errorMessages` / `errors[]` shapes (see [`error`]).
 
 pub mod error;
 
@@ -16,24 +16,21 @@ use crate::config::{Config, VENDOR_CONFLUENCE, VENDOR_JIRA};
 use crate::error::{McpError, auth_missing};
 use crate::vendor::Vendor;
 
-/// Jira Cloud [`Vendor`] strategy.
+/// Confluence Cloud [`Vendor`] strategy.
 ///
 /// Two construction paths:
-/// - [`JiraVendor::new`] (production) defers base-URL resolution to
+/// - [`ConfluenceVendor::new`] (production) defers base-URL resolution to
 ///   [`Vendor::base_url`], which reads `ATLASSIAN_SITE_NAME` from the
 ///   per-request [`Config`]. Missing site name surfaces as a tool-call
 ///   error, never a startup failure.
-/// - [`JiraVendor::with_base_url`] (tests) pins an absolute URL — typically
-///   a wiremock — and skips the env lookup entirely.
+/// - [`ConfluenceVendor::with_base_url`] (tests) pins an absolute URL —
+///   typically a wiremock — and skips the env lookup entirely.
 #[derive(Debug, Clone, Default)]
-pub struct JiraVendor {
-    /// Optional base URL override. When `Some`, [`Vendor::base_url`]
-    /// returns it as-is; when `None`, it derives the URL from
-    /// `ATLASSIAN_SITE_NAME`.
+pub struct ConfluenceVendor {
     base_url_override: Option<String>,
 }
 
-impl JiraVendor {
+impl ConfluenceVendor {
     /// New vendor that derives its base URL from `ATLASSIAN_SITE_NAME` at
     /// request time. Construction itself is infallible.
     pub fn new() -> Self {
@@ -52,15 +49,15 @@ impl JiraVendor {
     }
 }
 
-impl Vendor for JiraVendor {
+impl Vendor for ConfluenceVendor {
     fn name(&self) -> &'static str {
-        VENDOR_JIRA
+        VENDOR_CONFLUENCE
     }
 
     /// Resolve the absolute base URL. When constructed via
     /// [`Self::with_base_url`], returns the pinned override. Otherwise
-    /// looks up `ATLASSIAN_SITE_NAME` (vendor-scoped to `jira`, with
-    /// fallback to the shared overlay) and builds
+    /// looks up `ATLASSIAN_SITE_NAME` (vendor-scoped to `confluence`,
+    /// with fallback to the shared overlay) and builds
     /// `https://{site}.atlassian.net`. An empty or missing value surfaces
     /// as [`crate::error::auth_missing`] so the user sees a clear
     /// configuration error at tool-call time.
@@ -68,17 +65,17 @@ impl Vendor for JiraVendor {
         if let Some(base) = &self.base_url_override {
             return Ok(base.clone());
         }
-        // Site name is shared with Confluence (same Atlassian site), so a
-        // user with `ATLASSIAN_SITE_NAME` only under the `confluence`
-        // section still gets a working `jira_*` surface. The fallback is
-        // explicit to keep unrelated vendors (Bitbucket) out of the lookup.
+        // Site name is shared with Jira (same Atlassian site), so a user
+        // with `ATLASSIAN_SITE_NAME` only under the `jira` section still
+        // gets a working `conf_*` surface. The fallback is explicit to
+        // keep unrelated vendors (Bitbucket) out of the lookup.
         let raw = config
-            .get_for_with_fallback(VENDOR_JIRA, &[VENDOR_CONFLUENCE], "ATLASSIAN_SITE_NAME")
+            .get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME")
             .ok_or_else(|| {
                 auth_missing(
-                    "ATLASSIAN_SITE_NAME is required for jira_* tools. Set the env var \
+                    "ATLASSIAN_SITE_NAME is required for conf_* tools. Set the env var \
                      (e.g. `mycompany` for mycompany.atlassian.net) or add it under the \
-                     `jira` (or `confluence`) section of ~/.mcp/configs.json.",
+                     `confluence` (or `jira`) section of ~/.mcp/configs.json.",
                 )
             })?;
         let site = raw.trim();
@@ -88,8 +85,9 @@ impl Vendor for JiraVendor {
         Ok(format!("https://{site}.atlassian.net"))
     }
 
-    /// Jira paths are passed through verbatim — callers supply the full
-    /// `/rest/api/3/...` path. We only ensure a leading `/`.
+    /// Confluence paths pass through verbatim — callers supply the full
+    /// `/wiki/api/v2/...` or `/wiki/rest/api/...` path. We only ensure a
+    /// leading `/`.
     fn normalize_path(&self, path: &str) -> String {
         if path.starts_with('/') {
             path.to_owned()

@@ -5,7 +5,7 @@
 
 //! MCP tool registration for the Atlassian product surface.
 //!
-//! [`AtlassianServer`] hosts two `#[tool_router]` impl blocks on the same
+//! [`AtlassianServer`] hosts three `#[tool_router]` impl blocks on the same
 //! handler type, then combines them in an inherent
 //! [`AtlassianServer::tool_router`] so [`#[tool_handler]`](rmcp::tool_handler)
 //! sees a single `ToolRouter` containing every tool:
@@ -19,6 +19,10 @@
 //!   per-request from `ATLASSIAN_SITE_NAME`; Bitbucket-only deployments
 //!   are unaffected — Jira tools surface a clear configuration error at
 //!   tool-call time only when the env var is missing.
+//! - **`conf_*`** (five generic verbs) — Confluence Cloud, ported from
+//!   `@aashari/mcp-server-atlassian-confluence`. Paths are passed through
+//!   verbatim (callers supply `/wiki/api/v2/...` or `/wiki/rest/api/...`).
+//!   Same `ATLASSIAN_SITE_NAME`-derived base URL as Jira.
 
 pub mod args;
 
@@ -40,6 +44,7 @@ use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
+use crate::vendor::confluence::ConfluenceVendor;
 use crate::vendor::jira::JiraVendor;
 use crate::workspace::WorkspaceCache;
 use args::{CloneArgs, ReadArgs, WriteArgs};
@@ -59,6 +64,7 @@ struct ServerState {
     config: Config,
     bitbucket_vendor: BitbucketVendor,
     jira_vendor: JiraVendor,
+    confluence_vendor: ConfluenceVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -79,17 +85,19 @@ impl AtlassianServer {
             client,
             BitbucketVendor::new(),
             JiraVendor::new(),
+            ConfluenceVendor::new(),
         ))
     }
 
     /// Build a server from caller-supplied components. Useful when tests or
-    /// embedders want to pre-configure the `Config` or point either vendor
+    /// embedders want to pre-configure the `Config` or point any vendor
     /// at a mock URL via `with_base_url`.
     pub fn with_components(
         config: Config,
         client: Client,
         bitbucket_vendor: BitbucketVendor,
         jira_vendor: JiraVendor,
+        confluence_vendor: ConfluenceVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -97,6 +105,7 @@ impl AtlassianServer {
                 config,
                 bitbucket_vendor,
                 jira_vendor,
+                confluence_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -104,12 +113,12 @@ impl AtlassianServer {
     }
 
     /// Combined router that drives `#[tool_handler]`. Stitches together
-    /// the two vendor-scoped routers via the `Add` impl on
+    /// the three vendor-scoped routers via the `Add` impl on
     /// [`ToolRouter`](rmcp::handler::server::router::tool::ToolRouter).
     /// Naming this method `tool_router` (the macro's default) lets
     /// `#[tool_handler]` find it without a custom `router = …` attr.
     fn tool_router() -> ToolRouter<Self> {
-        Self::bitbucket_router() + Self::jira_router()
+        Self::bitbucket_router() + Self::jira_router() + Self::confluence_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -138,6 +147,14 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.jira_vendor,
+        )
+    }
+
+    fn confluence_ctx(&self) -> HandleContext<'_> {
+        HandleContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.confluence_vendor,
         )
     }
 }
@@ -299,6 +316,78 @@ impl AtlassianServer {
     }
 }
 
+// ============================================================================
+// Confluence tools
+// ============================================================================
+
+#[tool_router(router = confluence_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/conf_get.md")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn conf_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_confluence(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/conf_post.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn conf_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_confluence(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/conf_put.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn conf_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_confluence(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/conf_patch.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn conf_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_confluence(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/conf_delete.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn conf_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_confluence(self, HttpMethod::Delete, &args).await)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
@@ -364,6 +453,34 @@ async fn run_write_jira(
     args: &WriteArgs,
 ) -> CallToolResult {
     match handle_write(&server.jira_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_confluence(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match handle_read(&server.confluence_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_confluence(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match handle_write(&server.confluence_ctx(), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])

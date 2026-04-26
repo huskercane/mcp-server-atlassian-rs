@@ -12,7 +12,7 @@ pub mod network_timeouts {
     use super::Duration;
 
     pub const DEFAULT_REQUEST: Duration = Duration::from_secs(30);
-    pub const LARGE_REQUEST: Duration = Duration::from_secs(60);
+    pub const LARGE_REQUEST: Duration = Duration::from_mins(1);
     pub const SEARCH_REQUEST: Duration = Duration::from_secs(45);
 }
 

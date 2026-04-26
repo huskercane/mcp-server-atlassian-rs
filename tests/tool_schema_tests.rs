@@ -8,6 +8,7 @@ use mcp_server_atlassian::tools::args::{
 };
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
+use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
@@ -20,6 +21,7 @@ fn server_info_reports_expected_identity() {
         build_client().unwrap(),
         BitbucketVendor::new(),
         JiraVendor::new(),
+        ConfluenceVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

@@ -13,7 +13,7 @@ use tokio::time::timeout;
 use crate::error::{McpError, unexpected};
 
 /// How long a single command is allowed to run. Matches TS's 5-minute cap.
-pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5 * 60);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_mins(5);
 
 /// Outcome of a successful subprocess invocation.
 #[derive(Debug, Clone)]

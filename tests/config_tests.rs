@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use mcp_server_atlassian::config::{
-    Config, VENDOR_BITBUCKET, VENDOR_JIRA, candidate_keys, extract_all_vendor_sections,
-    extract_environments_for,
+    Config, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA, candidate_keys,
+    extract_all_vendor_sections, extract_environments_for,
 };
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -457,6 +457,177 @@ fn ts_bitbucket_package_aliases_resolve_to_bitbucket_section() {
     assert_eq!(
         bb.get("BITBUCKET_DEFAULT_WORKSPACE").map(String::as_str),
         Some("from-ts-bitbucket")
+    );
+}
+
+// ---- Confluence aliasing + Jira/Confluence site-name fallback ----
+
+#[test]
+fn confluence_aliases_resolve_to_confluence_section() {
+    // Migration guarantee: a user who set up the TS Confluence server keyed
+    // their global config under "@aashari/mcp-server-atlassian-confluence" or
+    // its unscoped form. Both must land in the canonical "confluence"
+    // section after migration.
+    let doc = json!({
+        "@aashari/mcp-server-atlassian-confluence": {
+            "environments": { "ATLASSIAN_SITE_NAME": "from-ts-conf-scoped" }
+        }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let conf = map.get(VENDOR_CONFLUENCE).expect("confluence section resolved");
+    assert_eq!(
+        conf.get("ATLASSIAN_SITE_NAME").map(String::as_str),
+        Some("from-ts-conf-scoped")
+    );
+
+    let doc = json!({
+        "mcp-server-atlassian-confluence": {
+            "environments": { "ATLASSIAN_SITE_NAME": "from-ts-conf-unscoped" }
+        }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let conf = map.get(VENDOR_CONFLUENCE).expect("confluence section resolved");
+    assert_eq!(
+        conf.get("ATLASSIAN_SITE_NAME").map(String::as_str),
+        Some("from-ts-conf-unscoped")
+    );
+}
+
+#[test]
+fn confluence_short_and_product_aliases_merge_with_priority() {
+    // `confluence` (short) wins over `atlassian-confluence` (product) per-key,
+    // matching the TS Confluence reference's alias order.
+    let doc = json!({
+        "confluence":           { "environments": { "K": "from-short", "ONLY_SHORT": "x" } },
+        "atlassian-confluence": { "environments": { "K": "from-product", "ONLY_PRODUCT": "y" } }
+    });
+    let map = extract_all_vendor_sections(&doc, PKG);
+    let conf = map.get(VENDOR_CONFLUENCE).unwrap();
+    assert_eq!(conf.get("K").map(String::as_str), Some("from-short"));
+    assert_eq!(conf.get("ONLY_SHORT").map(String::as_str), Some("x"));
+    assert_eq!(conf.get("ONLY_PRODUCT").map(String::as_str), Some("y"));
+}
+
+#[test]
+fn get_for_with_fallback_reads_primary_then_fallback_section() {
+    // The canonical case: a user has `ATLASSIAN_SITE_NAME` only under
+    // `jira` in configs.json; the Confluence vendor must still see it via
+    // the explicit Jira fallback. The reverse direction works the same.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "jira": { "environments": { "ATLASSIAN_SITE_NAME": "shared-site" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    // Confluence vendor lookup with Jira fallback resolves the value.
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME"),
+        Some("shared-site")
+    );
+    // Plain `get_for` (no fallback) does NOT cross sections — preserves
+    // the strict isolation guarantee for callers that explicitly opt in.
+    assert_eq!(
+        cfg.get_for(VENDOR_CONFLUENCE, "ATLASSIAN_SITE_NAME"),
+        None
+    );
+    assert_eq!(
+        cfg.get_for(VENDOR_JIRA, "ATLASSIAN_SITE_NAME"),
+        Some("shared-site")
+    );
+}
+
+#[test]
+fn get_for_with_fallback_works_in_reverse_direction_too() {
+    // Symmetric case: a user with only the `confluence` section populated
+    // gets a working `jira_*` surface.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "confluence": { "environments": { "ATLASSIAN_SITE_NAME": "shared-site" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_JIRA, &[VENDOR_CONFLUENCE], "ATLASSIAN_SITE_NAME"),
+        Some("shared-site")
+    );
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME"),
+        Some("shared-site")
+    );
+}
+
+#[test]
+fn get_for_with_fallback_prefers_primary_when_both_define_the_key() {
+    // If the caller's primary section has the value, the fallback list is
+    // never consulted — even when both sections define the same key with
+    // *different* values, we deterministically return the primary.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "jira":       { "environments": { "ATLASSIAN_SITE_NAME": "jira-site" } },
+            "confluence": { "environments": { "ATLASSIAN_SITE_NAME": "conf-site" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME"),
+        Some("conf-site")
+    );
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_JIRA, &[VENDOR_CONFLUENCE], "ATLASSIAN_SITE_NAME"),
+        Some("jira-site")
+    );
+}
+
+#[test]
+fn get_for_with_fallback_does_not_leak_unrelated_vendor_sections() {
+    // Bitbucket is intentionally NOT in the fallback list for the
+    // jira/confluence site name. A `BITBUCKET_DEFAULT_WORKSPACE`-like key
+    // living in the bb section must not be reachable via fallback.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_SITE_NAME": "should-not-leak" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&global), None, &HashMap::new());
+
+    // Confluence asking for site name with Jira-only fallback should NOT
+    // see the Bitbucket value.
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME"),
+        None
+    );
+}
+
+#[test]
+fn get_for_with_fallback_shared_overlay_still_wins() {
+    // Process env (shared overlay) is the highest-priority source — it
+    // beats both the primary vendor section and any fallback.
+    let dir = TempDir::new().unwrap();
+    let global = write_global(
+        &dir,
+        &json!({
+            "jira":       { "environments": { "ATLASSIAN_SITE_NAME": "from-jira-section" } },
+            "confluence": { "environments": { "ATLASSIAN_SITE_NAME": "from-conf-section" } }
+        }),
+    );
+    let mut proc_env = HashMap::new();
+    proc_env.insert("ATLASSIAN_SITE_NAME".into(), "from-process-env".into());
+    let cfg = Config::load_from_sources(Some(&global), None, &proc_env);
+
+    assert_eq!(
+        cfg.get_for_with_fallback(VENDOR_CONFLUENCE, &[VENDOR_JIRA], "ATLASSIAN_SITE_NAME"),
+        Some("from-process-env")
     );
 }
 

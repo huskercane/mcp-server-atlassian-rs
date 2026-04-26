@@ -12,6 +12,7 @@ use mcp_server_atlassian::vendor::jira::error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use serde_json::json;
+use tempfile::TempDir;
 
 fn cfg(entries: &[(&str, &str)]) -> Config {
     let mut m = HashMap::new();
@@ -56,6 +57,31 @@ fn base_url_missing_site_returns_auth_missing() {
     let err = vendor.base_url(&config).unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("ATLASSIAN_SITE_NAME"));
+}
+
+#[test]
+fn base_url_falls_back_to_confluence_section_when_jira_section_absent() {
+    // Symmetric to the Confluence test: a user with `ATLASSIAN_SITE_NAME`
+    // only under the `confluence` section gets a working `jira_*` surface
+    // without having to duplicate it.
+    let dir = TempDir::new().unwrap();
+    let global_path = dir.path().join("configs.json");
+    std::fs::write(
+        &global_path,
+        serde_json::to_string(&json!({
+            "confluence": { "environments": { "ATLASSIAN_SITE_NAME": "shared-site" } }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    let config =
+        Config::load_from_sources(Some(&global_path), None, &HashMap::new());
+
+    let vendor = JiraVendor::new();
+    assert_eq!(
+        vendor.base_url(&config).unwrap(),
+        "https://shared-site.atlassian.net"
+    );
 }
 
 #[test]

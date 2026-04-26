@@ -10,6 +10,7 @@
 //! ```text
 //! mcp-atlassian bb   <get|post|put|patch|delete|clone> ...
 //! mcp-atlassian jira <get|post|put|patch|delete>       ...
+//! mcp-atlassian conf <get|post|put|patch|delete>       ...
 //! ```
 //!
 //! ## Deprecated top-level verbs
@@ -22,6 +23,7 @@
 
 pub mod api;
 pub mod bb;
+pub mod conf;
 pub mod jira;
 
 use std::process::ExitCode;
@@ -34,7 +36,7 @@ use crate::constants::{CLI_NAME, VERSION};
 #[command(
     name = CLI_NAME,
     version = VERSION,
-    about = "A Model Context Protocol (MCP) server for Atlassian Bitbucket and Jira",
+    about = "A Model Context Protocol (MCP) server for Atlassian Bitbucket, Jira, and Confluence",
     disable_help_subcommand = true,
     propagate_version = true,
 )]
@@ -55,6 +57,11 @@ pub enum TopCommand {
     Jira {
         #[command(subcommand)]
         action: jira::Command,
+    },
+    /// Confluence Cloud REST API (`conf get|post|put|patch|delete`).
+    Conf {
+        #[command(subcommand)]
+        action: conf::Command,
     },
 
     // ----------------------------------------------------------------------
@@ -96,6 +103,7 @@ where
     let result = match cli.command {
         TopCommand::Bb { action } => bb::dispatch(action).await,
         TopCommand::Jira { action } => jira::dispatch(action).await,
+        TopCommand::Conf { action } => conf::dispatch(action).await,
         legacy => dispatch_legacy(legacy).await,
     };
 
@@ -137,8 +145,8 @@ async fn dispatch_legacy(legacy: TopCommand) -> Result<(), crate::error::McpErro
             warn_deprecated("clone");
             bb::Command::Clone(opts)
         }
-        // Bb / Jira are handled by the caller; reaching here is a logic bug.
-        TopCommand::Bb { .. } | TopCommand::Jira { .. } => unreachable!(
+        // Bb / Jira / Conf are handled by the caller; reaching here is a logic bug.
+        TopCommand::Bb { .. } | TopCommand::Jira { .. } | TopCommand::Conf { .. } => unreachable!(
             "vendor groups are dispatched directly; legacy path receives only flat verbs"
         ),
     };

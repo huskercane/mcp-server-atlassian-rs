@@ -199,6 +199,61 @@ fn jira_search_jql_accepts_query_params() {
     .expect("`jira get` with --query-params should parse");
 }
 
+// ---- new `conf` subcommand group ----
+
+#[test]
+fn conf_get_with_required_path_parses() {
+    Cli::try_parse_from([BIN, "conf", "get", "--path", "/wiki/api/v2/spaces"])
+        .expect("`conf get --path` should parse");
+}
+
+#[test]
+fn conf_post_requires_path_and_body() {
+    Cli::try_parse_from([
+        BIN,
+        "conf",
+        "post",
+        "--path",
+        "/wiki/api/v2/pages",
+        "--body",
+        r#"{"spaceId":"1","status":"current","title":"x","body":{"representation":"storage","value":"<p>x</p>"}}"#,
+    ])
+    .expect("`conf post` with both flags should parse");
+}
+
+#[test]
+fn conf_search_accepts_cql_query_param() {
+    Cli::try_parse_from([
+        BIN,
+        "conf",
+        "get",
+        "--path",
+        "/wiki/rest/api/search",
+        "--query-params",
+        r#"{"cql":"type=page AND space=DEV","limit":"5"}"#,
+    ])
+    .expect("`conf get` with --query-params should parse");
+}
+
+#[test]
+fn conf_does_not_expose_clone_subcommand() {
+    let err = Cli::try_parse_from([
+        BIN,
+        "conf",
+        "clone",
+        "--repo-slug",
+        "widget",
+        "--target-path",
+        "/tmp/x",
+    ])
+    .unwrap_err();
+    let msg = err.render().to_string().to_lowercase();
+    assert!(
+        msg.contains("clone") || msg.contains("unrecognized") || msg.contains("subcommand"),
+        "expected conf to reject `clone` subcommand; got: {msg}"
+    );
+}
+
 // ---- --output-format flag (parity with TS Jira CLI) ----
 
 #[test]
@@ -215,6 +270,16 @@ fn output_format_json_accepted_on_bb_and_jira_verbs() {
         ],
         vec![
             "jira", "post", "--path", "/rest/api/3/issue", "--body", "{}", "--output-format",
+            "json",
+        ],
+        vec![
+            "conf", "get", "--path", "/wiki/api/v2/spaces", "--output-format", "json",
+        ],
+        vec![
+            "conf", "delete", "--path", "/wiki/api/v2/pages/1", "--output-format", "json",
+        ],
+        vec![
+            "conf", "post", "--path", "/wiki/api/v2/pages", "--body", "{}", "--output-format",
             "json",
         ],
     ] {
@@ -301,4 +366,5 @@ fn legacy_top_level_verbs_are_hidden_from_help() {
     let help = Cli::command().render_help().to_string();
     assert!(help.contains("bb"), "help missing `bb`: {help}");
     assert!(help.contains("jira"), "help missing `jira`: {help}");
+    assert!(help.contains("conf"), "help missing `conf`: {help}");
 }

@@ -194,10 +194,7 @@ async fn writable_check(path: &Path) -> std::io::Result<()> {
 }
 
 async fn target_subdir_exists(path: &Path) -> bool {
-    tokio::fs::metadata(path)
-        .await
-        .map(|m| m.is_dir())
-        .unwrap_or(false)
+    tokio::fs::metadata(path).await.is_ok_and(|m| m.is_dir())
 }
 
 async fn fetch_repo_metadata(

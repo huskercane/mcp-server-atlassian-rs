@@ -19,7 +19,14 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
+    - name: Show toolchain
+      # rust-toolchain.toml is the source of truth — `cargo` auto-installs
+      # and uses it. Echo the resolved version so CI logs make the pin
+      # explicit (helps when investigating "works locally" reports).
+      run: rustc --version && cargo --version
     - name: Build
       run: cargo build --verbose
+    - name: Clippy
+      run: cargo clippy --all-targets -- -D warnings
     - name: Run tests
       run: cargo test --verbose

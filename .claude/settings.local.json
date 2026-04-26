@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo check *)",
+      "Bash(cargo test *)",
+      "Bash(awk '{ ok += $4; failed += $6 } END { print \"Total OK:\", ok, \"Total Failed:\", failed }')",
+      "Bash(cargo clippy *)",
+      "Bash(git stash *)",
+      "Bash(cargo build *)",
+      "Bash(./target/release/mcp-atlassian --help)",
+      "Bash(./target/release/mcp-atlassian conf *)",
+      "Bash(rustc --version)",
+      "Bash(rustup show *)",
+      "Read(//Users/rohitsingh/.rustup/toolchains/**)"
+    ]
+  }
+}
