@@ -9,14 +9,9 @@
 use std::process::ExitCode;
 
 use mcp_server_atlassian::{cli, logger, server};
-use tracing_subscriber::EnvFilter;
-use tracing_subscriber::fmt;
-use tracing_subscriber::layer::SubscriberExt;
-use tracing_subscriber::util::SubscriberInitExt;
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    install_tracing();
     logger::init();
 
     let args: Vec<String> = std::env::args().collect();
@@ -42,15 +37,4 @@ async fn main() -> ExitCode {
             }
         }
     }
-}
-
-fn install_tracing() {
-    let filter = EnvFilter::try_from_default_env()
-        .or_else(|_| EnvFilter::try_new("info,bitbucket=debug"))
-        .expect("static filter");
-
-    tracing_subscriber::registry()
-        .with(fmt::layer().with_writer(std::io::stderr).with_target(false))
-        .with(filter)
-        .init();
 }
