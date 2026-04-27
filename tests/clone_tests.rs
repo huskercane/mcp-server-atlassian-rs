@@ -2,6 +2,11 @@
 // `unsafe` under the 2024 edition. `#[serial]` + `path_lock()` serialize the
 // mutations; this `allow` is scoped to the test file.
 #![allow(unsafe_code)]
+// The shim is a `#!/bin/sh` script that Windows can't execute, so PATH
+// interception only works on unix. Skip the whole file on Windows; the
+// controller's clone logic is platform-agnostic and is exercised on the
+// unix runners in the matrix.
+#![cfg(unix)]
 
 //! End-to-end clone controller tests. Intercepts the metadata fetch via
 //! wiremock and replaces `git` with a test shim on PATH so the clone
