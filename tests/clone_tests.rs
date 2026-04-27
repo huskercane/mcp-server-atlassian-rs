@@ -39,13 +39,13 @@ fn install_git_shim(shim_dir: &Path, marker: &Path, exit_code: i32) -> String {
         marker = marker.display()
     );
     std::fs::write(&git_path, script).unwrap();
-    let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&git_path).unwrap().permissions();
         perms.set_mode(0o755);
+        std::fs::set_permissions(&git_path, perms).unwrap();
     }
-    std::fs::set_permissions(&git_path, perms).unwrap();
 
     let original = std::env::var("PATH").unwrap_or_default();
     let new_path = format!("{}:{original}", shim_dir.display());
