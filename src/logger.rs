@@ -37,6 +37,15 @@ const LOG_RETENTION_DAYS: u64 = 7;
 const LOG_RETENTION_MAX_BYTES: u64 = 50 * 1024 * 1024;
 const REDACTION_PLACEHOLDER: &str = "XXX-REDACTED-XXX";
 
+/// Convenience: build a `Duration` from a whole-day count without
+/// triggering clippy's `duration_suboptimal_units` lint at every
+/// call site (`from_hours`/`from_days` aren't quite the right shape
+/// for our retention math here).
+#[allow(clippy::duration_suboptimal_units)]
+const fn days(n: u64) -> Duration {
+    Duration::from_secs(n * 86_400)
+}
+
 /// Initialise process-wide logging. Idempotent — subsequent calls are no-ops
 /// and return the same path.
 pub fn init() -> PathBuf {
@@ -119,7 +128,7 @@ pub fn init() -> PathBuf {
             let _ = sweep_retention(
                 &dir_for_sweep,
                 &keep,
-                Duration::from_secs(LOG_RETENTION_DAYS * 86_400),
+                days(LOG_RETENTION_DAYS),
                 LOG_RETENTION_MAX_BYTES,
                 SystemTime::now(),
             );
@@ -136,7 +145,7 @@ fn build_filter(rust_log: Option<&str>, debug: Option<&str>) -> EnvFilter {
     {
         return filter;
     }
-    if matches!(debug, Some("true") | Some("1")) {
+    if matches!(debug, Some("true" | "1")) {
         return EnvFilter::new("debug");
     }
     EnvFilter::new("info,mcp_server_atlassian=debug")
@@ -252,7 +261,9 @@ fn sweep_retention(
         let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
             continue;
         };
-        if !name.starts_with(&prefix) || !name.ends_with(".log") {
+        if !name.starts_with(&prefix)
+            || path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("log"))
+        {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
@@ -277,7 +288,7 @@ fn sweep_retention(
     // Size pass: oldest first. The kept file counts toward the cap so that
     // `max_total_bytes` reflects total dir size, not just deletable bytes.
     candidates.sort_by_key(|(_, modified, _)| *modified);
-    let kept_size = std::fs::metadata(keep).map(|m| m.len()).unwrap_or(0);
+    let kept_size = std::fs::metadata(keep).map_or(0, |m| m.len());
     let mut total: u64 = kept_size + candidates.iter().map(|(_, _, size)| *size).sum::<u64>();
     for (path, _, size) in &candidates {
         if total <= max_total_bytes {
@@ -475,8 +486,8 @@ mod tests {
     fn retention_deletes_files_older_than_max_age() {
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
-        let old = now - Duration::from_secs(8 * 86_400);
-        let young = now - Duration::from_secs(2 * 86_400);
+        let old = now - days(8);
+        let young = now - days(2);
 
         let kept = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
         let stale = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.old.log"));
@@ -489,7 +500,7 @@ mod tests {
         sweep_retention(
             dir.path(),
             &kept,
-            Duration::from_secs(7 * 86_400),
+            days(7),
             10 * 1024 * 1024,
             now,
         )
@@ -504,7 +515,7 @@ mod tests {
     fn retention_enforces_size_cap_oldest_first() {
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
-        let one_day = Duration::from_secs(86_400);
+        let one_day = days(1);
 
         let kept = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.kept.log"));
         let oldest = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.a.log"));
@@ -520,7 +531,7 @@ mod tests {
         sweep_retention(
             dir.path(),
             &kept,
-            Duration::from_secs(7 * 86_400),
+            days(7),
             250,
             now,
         )
@@ -536,7 +547,7 @@ mod tests {
     fn retention_skips_unrelated_files() {
         let dir = tempfile::tempdir().unwrap();
         let now = SystemTime::now();
-        let old = now - Duration::from_secs(30 * 86_400);
+        let old = now - days(30);
 
         let kept = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
         let unrelated = dir.path().join("some-other-tool.log");
@@ -549,7 +560,7 @@ mod tests {
         sweep_retention(
             dir.path(),
             &kept,
-            Duration::from_secs(7 * 86_400),
+            days(7),
             10 * 1024 * 1024,
             now,
         )

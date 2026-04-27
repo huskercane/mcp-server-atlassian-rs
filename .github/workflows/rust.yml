@@ -14,8 +14,17 @@ env:
 
 jobs:
   build:
+    # Three-OS matrix. Sharp edges in this codebase (keychain backend
+    # selection, atomic-replace semantics) are target-specific, so we
+    # build + test on each desktop OS we support. Headless Linux is also
+    # exercised via `--no-default-features` to confirm the keychain-off
+    # build path stays green.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
 
     steps:
     - uses: actions/checkout@v4
@@ -24,8 +33,25 @@ jobs:
       # and uses it. Echo the resolved version so CI logs make the pin
       # explicit (helps when investigating "works locally" reports).
       run: rustc --version && cargo --version
-    - name: Build
+    - name: Install Linux keyring build deps
+      # `keyring`'s sync-secret-service backend links libsecret + dbus.
+      # GitHub-hosted ubuntu-latest images already ship these, but
+      # installing explicitly makes the dependency obvious for self-hosted
+      # runners and locked-down forks.
+      if: runner.os == 'Linux'
+      run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev libdbus-1-dev
+    - name: Build (default features)
       run: cargo build --verbose
+    - name: Build (no default features) — headless / keychain-off
+      # End-to-end keychain interaction can't be exercised on headless CI
+      # runners (no Keychain ACL UI on macOS, no logged-in DPAPI session
+      # on Windows-runner under some configs, no D-Bus on Linux runners
+      # by default). The matrix proves the cross-target *compile* of both
+      # keychain-on and keychain-off paths; the in-process tests cover
+      # behaviour against InMemoryKeychain. Real-keychain validation is
+      # done manually via the README smoke checklist before release.
+      if: runner.os == 'Linux'
+      run: cargo build --no-default-features --verbose
     - name: Clippy
       run: cargo clippy --all-targets -- -D warnings
     - name: Run tests

@@ -40,7 +40,7 @@ use crate::auth::Credentials;
 use crate::config::Config;
 use crate::constants::{data_limits::MAX_RESPONSE_SIZE, network_timeouts::DEFAULT_REQUEST};
 use crate::error::{
-    McpError, OriginalError, api_error, auth_invalid, auth_missing_default, unexpected,
+    McpError, OriginalError, api_error, auth_invalid, unexpected,
 };
 use crate::vendor::Vendor;
 use crate::vendor::bitbucket::BitbucketVendor;
@@ -365,6 +365,10 @@ fn map_reqwest_error(err: &reqwest::Error, url: &str) -> McpError {
 
 /// Exposed for callers that just want a well-formed auth header (e.g. tests
 /// and diagnostics). Prefer [`fetch`] for real traffic.
+///
+/// Synchronous; safe in tests and diagnostics. Async server paths must
+/// use [`Credentials::require_async`] so the keychain syscall doesn't
+/// block a Tokio worker.
 pub fn require_credentials(config: &Config) -> Result<Credentials, McpError> {
-    Credentials::resolve(config).ok_or_else(auth_missing_default)
+    Credentials::require(config)
 }

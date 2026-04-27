@@ -24,7 +24,6 @@ use tracing::{debug, warn};
 use crate::auth::Credentials;
 use crate::config::VENDOR_BITBUCKET;
 use crate::controllers::api::BitbucketContext;
-use crate::error::auth_missing_default;
 use crate::transport::{RequestOptions, ResponseBody, TransportResponse, fetch};
 
 /// Memoises the resolved default workspace slug for one server instance.
@@ -111,7 +110,7 @@ async fn fetch_first_workspace(
     ctx: &BitbucketContext<'_>,
 ) -> Result<Option<String>, crate::error::McpError> {
     let handle = ctx.handle();
-    let creds = Credentials::resolve(handle.config).ok_or_else(auth_missing_default)?;
+    let creds = Credentials::require_async(handle.config).await?;
     let response: TransportResponse = fetch(
         handle.client,
         handle.vendor,

@@ -64,6 +64,21 @@ pub struct Config {
     by_vendor: BTreeMap<String, HashMap<String, String>>,
 }
 
+/// Outcome of [`Config::resolve`]. Distinguishes "key absent everywhere"
+/// from "vendor sections disagree" — both of which appear as `None` from
+/// [`Config::get`]. `creds migrate` needs the distinction to refuse
+/// migrating an already-broken config silently.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolved<'a> {
+    /// Neither `shared` nor any vendor section defines the key.
+    Missing,
+    /// `shared` defines it, or all vendor sections that define it agree.
+    Resolved(&'a str),
+    /// Two or more vendor sections define the key with different values.
+    /// Each `(vendor, value)` pair is reported in `by_vendor` order.
+    Ambiguous { values: Vec<(&'a str, &'a str)> },
+}
+
 /// Builds the snapshot using the standard cascade. Calls to this function
 /// read the filesystem (global config + `.env`) and `std::env`. It is
 /// intentionally side-effect free.
@@ -150,22 +165,36 @@ impl Config {
     ///
     /// Returns `None` when two or more vendor sections define the key with
     /// different values; the caller must then disambiguate via
-    /// [`get_for`](Self::get_for).
+    /// [`get_for`](Self::get_for). Callers that need to distinguish "key
+    /// absent everywhere" from "vendor sections disagree" should use
+    /// [`Self::resolve`] instead.
     pub fn get(&self, key: &str) -> Option<&str> {
-        if let Some(v) = self.shared.get(key) {
-            return Some(v.as_str());
+        match self.resolve(key) {
+            Resolved::Resolved(v) => Some(v),
+            Resolved::Missing | Resolved::Ambiguous { .. } => None,
         }
-        let mut found: Option<&str> = None;
-        for vendor_map in self.by_vendor.values() {
+    }
+
+    /// Vendor-neutral lookup with explicit disambiguation. Same priority
+    /// order as [`Self::get`] but tells callers which case they hit.
+    /// Used by `creds migrate` to refuse silently writing into a config
+    /// whose vendor sections disagree about a credential.
+    pub fn resolve(&self, key: &str) -> Resolved<'_> {
+        if let Some(v) = self.shared.get(key) {
+            return Resolved::Resolved(v.as_str());
+        }
+        let mut hits: Vec<(&str, &str)> = Vec::new();
+        for (vendor, vendor_map) in &self.by_vendor {
             if let Some(v) = vendor_map.get(key) {
-                match found {
-                    None => found = Some(v.as_str()),
-                    Some(prev) if prev == v.as_str() => {} // agreement counts as unambiguous
-                    Some(_) => return None,                // disagreement → force get_for
-                }
+                hits.push((vendor.as_str(), v.as_str()));
             }
         }
-        found
+        match hits.as_slice() {
+            [] => Resolved::Missing,
+            [(_, single)] => Resolved::Resolved(single),
+            _ if hits.iter().all(|(_, v)| *v == hits[0].1) => Resolved::Resolved(hits[0].1),
+            _ => Resolved::Ambiguous { values: hits },
+        }
     }
 
     /// Vendor-scoped lookup. Reads `shared` first, then the named vendor's
@@ -345,7 +374,10 @@ pub fn candidate_keys(package_name: &str) -> Vec<String> {
 /// (`@aashari/mcp-server-atlassian-bitbucket`, `@aashari/mcp-server-atlassian-jira`)
 /// keep resolving without edits. The Bitbucket vendor additionally
 /// includes this crate's own `package_name`-derived aliases.
-fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
+///
+/// Exposed publicly so `creds migrate` can walk the raw JSON using the
+/// same canonical-vendor → aliases mapping the loader uses.
+pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
     let bitbucket_aliases = {
         let mut v = vec![
             "bitbucket".to_string(),

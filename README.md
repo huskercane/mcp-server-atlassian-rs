@@ -88,6 +88,75 @@ Shared keys (e.g. `ATLASSIAN_API_TOKEN`) can live in any section — when the sa
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
+### Storing credentials in the OS keychain (desktop only)
+
+If you'd rather not keep API tokens or app passwords in plaintext on disk, store them in the OS keychain and put the literal string `"keychain"` in their place. Supported on **macOS** (Keychain Services), **Windows** (Credential Manager), and **Linux desktop** (GNOME Keyring or KWallet, auto-unlocked at login).
+
+> **Headless / CI / SSH-only Linux is out of scope.** Keychain backends require a logged-in desktop session with a keyring agent running. For server-style deployments either keep using env vars in your launcher, or build with `--no-default-features` to compile without the `keyring` dependency entirely.
+
+#### Resolution order
+
+When the binary needs a credential, it tries each source in priority order; the first hit wins:
+
+1. Process environment variable (e.g. `ATLASSIAN_API_TOKEN`)
+2. `.env` file in the current working directory
+3. `~/.mcp/configs.json`
+4. **OS keychain** — consulted in two cases:
+   - **Explicit**: a previous source returned the literal string `"keychain"` (the sentinel). The principal (email/username) is read from the same cascade. A missing keychain entry is a hard auth error — it tells you the configuration intent didn't match reality.
+   - **Implicit**: the secret is absent from every source above but the principal is set. Useful if you've migrated and deleted the field outright. A miss falls through silently.
+
+`Config::get` itself is unaware of the keychain; the expansion happens entirely inside `auth::Credentials::resolve_with`. Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
+
+#### CLI
+
+```bash
+# Store a token (no echo when stdin is a tty; pipes work too).
+mcp-atlassian creds set --kind api-token --principal you@company.com
+mcp-atlassian creds set --kind app-password --principal your-bb-username
+
+# Confirm an entry exists (prints the last 4 chars only).
+mcp-atlassian creds get --kind api-token --principal you@company.com
+
+# Remove an entry.
+mcp-atlassian creds rm --kind api-token --principal you@company.com
+
+# One-shot migration: read tokens from ~/.mcp/configs.json, copy them to the
+# keychain, replace each with the "keychain" sentinel, and write a .bak.
+mcp-atlassian creds migrate
+
+# `creds migrate --force` overrides the stale-clobber guard: when the keychain
+# already holds a different value than configs.json, force overwrites it
+# (logged with both fingerprints). Without --force, that's a hard error so a
+# rotated keychain entry can't be silently regressed by a stale file value.
+mcp-atlassian creds migrate --force
+```
+
+There is no `creds list` — `keyring`'s `Entry` API has no portable enumeration. Inspect entries through the OS-native UI: **Keychain Access** on macOS, **`credwiz.exe`** on Windows, **`seahorse`** on Linux. Look for the `mcp-server-atlassian.api-token` and `mcp-server-atlassian.app-password` services.
+
+#### After migrating
+
+`~/.mcp/configs.json` will look like this:
+
+```json
+{
+  "bitbucket": {
+    "environments": {
+      "ATLASSIAN_USER_EMAIL": "you@company.com",
+      "ATLASSIAN_API_TOKEN": "keychain"
+    }
+  }
+}
+```
+
+Restart your MCP client. The first time the server resolves the credential it logs an info-level breadcrumb (`source=keychain, kind=api-token, principal=…`) so you can confirm the keychain path was taken. After validating, delete the `.bak` file `creds migrate` left behind.
+
+#### Platform notes
+
+- **macOS unsigned dev builds**: `keyring` keys ACLs by code signature, so every `cargo build` produces a new signature and Keychain prompts to re-grant access. Click *Always Allow* per rebuild, or install a release-signed binary at `~/.cargo/bin/mcp-atlassian` and invoke that. Same pattern as 1Password CLI, AWS Vault, and `gh`.
+- **Windows**: silent under the user account that ran `creds set`. If your MCP client runs as a different user, the keychain entry won't be visible — re-run `creds set` from that account.
+- **Linux desktop**: `libsecret` and `dbus` need to be available at build time. On Debian/Ubuntu: `sudo apt install libsecret-1-dev libdbus-1-dev`. The keyring agent (GNOME Keyring or KWallet) must be running and unlocked at runtime; both auto-unlock at GUI login on standard desktop distros.
+- **Headless Linux**: build with `cargo build --release --no-default-features` to drop the keyring dep entirely. The CLI subcommands and sentinel resolution still compile but every keychain operation returns `KeychainError::Unavailable`. Keep using env vars / `~/.mcp/configs.json` plaintext in this mode.
+
 ## MCP client configuration
 
 ### Claude Desktop

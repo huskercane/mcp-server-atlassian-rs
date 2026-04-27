@@ -5,7 +5,8 @@
 //! [`Vendor`](crate::vendor::Vendor) trait carried by [`HandleContext`].
 //!
 //! Pipeline (shared by all five HTTP verbs):
-//! 1. Resolve credentials (fail with [`auth_missing_default`] when missing).
+//! 1. Resolve credentials via [`Credentials::require_async`]; missing or
+//!    keychain-specific failures propagate verbatim.
 //! 2. Apply the vendor's path normalisation (Bitbucket prepends `/2.0`;
 //!    Jira passes through verbatim).
 //! 3. Append the supplied `queryParams` as a URL-encoded query string.
@@ -25,7 +26,7 @@ use url::form_urlencoded;
 
 use crate::auth::Credentials;
 use crate::config::{Config, VENDOR_BITBUCKET};
-use crate::error::{McpError, auth_missing_default};
+use crate::error::McpError;
 use crate::format::{OutputFormat, jmespath::apply_jq_filter, render};
 use crate::tools::args::{QueryParams, ReadArgs, WriteArgs};
 use crate::transport::{HttpMethod, RequestOptions, ResponseBody, TransportResponse, fetch};
@@ -123,7 +124,7 @@ pub async fn handle_request(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
-    let creds = Credentials::resolve(ctx.config).ok_or_else(auth_missing_default)?;
+    let creds = Credentials::require_async(ctx.config).await?;
     let normalized = normalize_and_append(ctx.vendor, path, query_params);
     debug!(
         %normalized,

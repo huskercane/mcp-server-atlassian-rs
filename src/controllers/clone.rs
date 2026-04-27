@@ -20,7 +20,7 @@ use tracing::{debug, warn};
 
 use crate::auth::Credentials;
 use crate::controllers::api::{BitbucketContext, ControllerResponse};
-use crate::error::{McpError, auth_missing_default, unexpected};
+use crate::error::{McpError, unexpected};
 use crate::shell;
 use crate::tools::args::CloneArgs;
 use crate::transport::{RequestOptions, ResponseBody, fetch};
@@ -203,7 +203,7 @@ async fn fetch_repo_metadata(
     repo: &str,
 ) -> Result<Value, McpError> {
     let handle = ctx.handle();
-    let creds = Credentials::resolve(handle.config).ok_or_else(auth_missing_default)?;
+    let creds = Credentials::require_async(handle.config).await?;
     let path = format!("/2.0/repositories/{workspace}/{repo}");
     let response = fetch(
         handle.client,

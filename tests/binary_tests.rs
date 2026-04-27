@@ -60,6 +60,45 @@ fn cli_help_lists_every_subcommand() {
             "help missing subcommand {sub}:\n{stdout}"
         );
     }
+    // Top-level groups including the new `creds` group.
+    for grp in ["bb", "jira", "conf", "creds"] {
+        assert!(
+            stdout.contains(grp),
+            "help missing top-level group {grp}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn creds_help_lists_every_subcommand() {
+    let output = StdCommand::new(cargo_bin(BIN))
+        .args(["creds", "--help"])
+        .env_remove("TRANSPORT_MODE")
+        .output()
+        .expect("spawn binary");
+    assert!(output.status.success(), "status: {:?}", output.status);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for sub in ["set", "get", "rm", "migrate"] {
+        assert!(
+            stdout.contains(sub),
+            "creds --help missing subcommand {sub}:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn creds_set_rejects_unknown_kind() {
+    let output = StdCommand::new(cargo_bin(BIN))
+        .args(["creds", "set", "--kind", "nonsense", "--principal", "x@y"])
+        .env_remove("TRANSPORT_MODE")
+        .output()
+        .expect("spawn binary");
+    assert!(!output.status.success(), "expected non-zero exit");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown kind") || stderr.contains("invalid value"),
+        "expected kind-validation error, got:\n{stderr}"
+    );
 }
 
 #[test]

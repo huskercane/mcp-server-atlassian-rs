@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::Write;
 
 use mcp_server_atlassian::config::{
-    Config, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA, candidate_keys,
+    Config, Resolved, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA, candidate_keys,
     extract_all_vendor_sections, extract_environments_for,
 };
 use pretty_assertions::assert_eq;
@@ -651,4 +651,118 @@ fn typed_getters_behave_like_ts() {
     assert_eq!(cfg.get_int("N", -1), 42);
     assert_eq!(cfg.get_int("N_BAD", -1), -1);
     assert_eq!(cfg.get_int("missing", 7), 7);
+}
+
+// ---- Config::resolve ----
+
+#[test]
+fn resolve_returns_missing_when_key_absent() {
+    let cfg = Config::from_map(HashMap::new());
+    assert_eq!(cfg.resolve("MISSING"), Resolved::Missing);
+}
+
+#[test]
+fn resolve_returns_resolved_from_shared() {
+    let mut m = HashMap::new();
+    m.insert("ATLASSIAN_API_TOKEN".into(), "from-env".into());
+    let cfg = Config::from_map(m);
+    assert_eq!(
+        cfg.resolve("ATLASSIAN_API_TOKEN"),
+        Resolved::Resolved("from-env")
+    );
+}
+
+#[test]
+fn resolve_returns_resolved_when_single_vendor_section_defines_key() {
+    let dir = TempDir::new().unwrap();
+    let path = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "only-here" } }
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&path), None, &HashMap::new());
+    assert_eq!(
+        cfg.resolve("ATLASSIAN_API_TOKEN"),
+        Resolved::Resolved("only-here")
+    );
+}
+
+#[test]
+fn resolve_returns_resolved_when_vendor_sections_agree() {
+    let dir = TempDir::new().unwrap();
+    let path = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "same-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "same-token" } },
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&path), None, &HashMap::new());
+    assert_eq!(
+        cfg.resolve("ATLASSIAN_API_TOKEN"),
+        Resolved::Resolved("same-token")
+    );
+}
+
+#[test]
+fn resolve_returns_ambiguous_when_vendor_sections_disagree() {
+    let dir = TempDir::new().unwrap();
+    let path = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "bb-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "jira-token" } },
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&path), None, &HashMap::new());
+    match cfg.resolve("ATLASSIAN_API_TOKEN") {
+        Resolved::Ambiguous { values } => {
+            // Reported in by_vendor (BTreeMap) order — bitbucket before jira.
+            let pairs: Vec<(&str, &str)> = values.iter().map(|(v, x)| (*v, *x)).collect();
+            assert_eq!(
+                pairs,
+                vec![
+                    (VENDOR_BITBUCKET, "bb-token"),
+                    (VENDOR_JIRA, "jira-token"),
+                ]
+            );
+        }
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
+fn resolve_shared_wins_over_vendor_disagreement() {
+    let dir = TempDir::new().unwrap();
+    let path = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "bb-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "jira-token" } },
+        }),
+    );
+    let mut env = HashMap::new();
+    env.insert("ATLASSIAN_API_TOKEN".into(), "process-env-wins".into());
+    let cfg = Config::load_from_sources(Some(&path), None, &env);
+    assert_eq!(
+        cfg.resolve("ATLASSIAN_API_TOKEN"),
+        Resolved::Resolved("process-env-wins")
+    );
+}
+
+#[test]
+fn get_collapses_ambiguous_to_none_for_back_compat() {
+    let dir = TempDir::new().unwrap();
+    let path = write_global(
+        &dir,
+        &json!({
+            "bitbucket": { "environments": { "ATLASSIAN_API_TOKEN": "bb-token" } },
+            "jira":      { "environments": { "ATLASSIAN_API_TOKEN": "jira-token" } },
+        }),
+    );
+    let cfg = Config::load_from_sources(Some(&path), None, &HashMap::new());
+    // Existing callers continue to see None for both Missing and Ambiguous.
+    assert_eq!(cfg.get("ATLASSIAN_API_TOKEN"), None);
+    assert_eq!(cfg.get("NONEXISTENT_KEY"), None);
 }
