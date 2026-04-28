@@ -23,7 +23,6 @@
 //! for the `mcp-server-atlassian.*` service prefix.
 
 use clap::{Args, Subcommand};
-use std::collections::HashMap;
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
@@ -31,7 +30,7 @@ use atomicwrites::{AllowOverwrite, AtomicFile};
 use serde_json::Value;
 
 use crate::auth::keychain::{KeychainBackend, KeychainError, OsKeychain, SecretKind};
-use crate::config::{self, Config, Resolved};
+use crate::config::{self, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA};
 use crate::constants::PACKAGE_NAME;
 use crate::error::{McpError, unexpected};
 
@@ -54,13 +53,18 @@ pub enum Command {
     Migrate(MigrateOpts),
 }
 
-/// Shared `--kind` + `--principal` selector.
+/// Shared `--kind` + `--vendor` + `--principal` selector.
 #[derive(Debug, Args)]
 pub struct SelectOpts {
     /// Secret kind: `api-token` (Atlassian Cloud) or `app-password`
     /// (Bitbucket).
     #[arg(long, value_parser = parse_kind)]
     pub kind: SecretKind,
+    /// Atlassian product the secret belongs to: `bitbucket`, `jira`, or
+    /// `confluence`. The same email may have a different token per
+    /// vendor, so the slot is vendor-scoped.
+    #[arg(long, value_parser = parse_vendor)]
+    pub vendor: String,
     /// Account identifier — email for `api-token`, username for
     /// `app-password`. Same string `Credentials::principal()` returns.
     #[arg(long)]
@@ -71,6 +75,8 @@ pub struct SelectOpts {
 pub struct SetOpts {
     #[arg(long, value_parser = parse_kind)]
     pub kind: SecretKind,
+    #[arg(long, value_parser = parse_vendor)]
+    pub vendor: String,
     #[arg(long)]
     pub principal: String,
     /// When set, read the secret from stdin as a plain line without
@@ -126,9 +132,39 @@ fn parse_kind(s: &str) -> Result<SecretKind, String> {
     })
 }
 
+fn parse_vendor(s: &str) -> Result<String, String> {
+    match s {
+        VENDOR_BITBUCKET | VENDOR_JIRA | VENDOR_CONFLUENCE => Ok(s.to_owned()),
+        _ => Err(format!(
+            "unknown vendor '{s}': use one of '{VENDOR_BITBUCKET}', '{VENDOR_JIRA}', \
+             or '{VENDOR_CONFLUENCE}'"
+        )),
+    }
+}
+
+/// Reject `--kind app-password --vendor <not-bitbucket>`. Atlassian
+/// app-passwords are a Bitbucket-only auth scheme; runtime auth (see
+/// `Credentials::resolve_with_for`) will never read an app-password
+/// keychain entry under another vendor's scope, so creating, reading,
+/// or deleting one is dead state. Surface this at CLI parse time
+/// instead of letting the backend round-trip succeed and mislead.
+fn ensure_kind_vendor_combo(kind: SecretKind, vendor: &str) -> Result<(), McpError> {
+    if matches!(kind, SecretKind::AppPassword) && vendor != VENDOR_BITBUCKET {
+        return Err(unexpected(
+            format!(
+                "kind=app-password is Bitbucket-only; vendor `{vendor}` does not \
+                 support it. Drop --vendor or pass --vendor {VENDOR_BITBUCKET}."
+            ),
+            None,
+        ));
+    }
+    Ok(())
+}
+
 /// `creds set` handler. Public so tests can call it directly.
 #[allow(clippy::needless_pass_by_value)]
 pub fn set(backend: &dyn KeychainBackend, opts: SetOpts) -> Result<(), McpError> {
+    ensure_kind_vendor_combo(opts.kind, &opts.vendor)?;
     if opts.principal.is_empty() {
         return Err(unexpected("--principal must not be empty", None));
     }
@@ -149,11 +185,11 @@ pub fn set(backend: &dyn KeychainBackend, opts: SetOpts) -> Result<(), McpError>
     }
 
     backend
-        .set(opts.kind, &opts.principal, &secret)
+        .set(opts.kind, &opts.vendor, &opts.principal, &secret)
         .map_err(|e| unexpected(format!("keychain set failed: {e}"), None))?;
 
     // Verify roundtrip — catches mock backends that silently no-op.
-    match backend.get(opts.kind, &opts.principal) {
+    match backend.get(opts.kind, &opts.vendor, &opts.principal) {
         Ok(Some(stored)) if stored == secret => {}
         Ok(Some(_)) => {
             return Err(unexpected(
@@ -178,10 +214,11 @@ pub fn set(backend: &dyn KeychainBackend, opts: SetOpts) -> Result<(), McpError>
     }
 
     println!(
-        "stored {} for principal {} (service={})",
+        "stored {} for vendor {} principal {} (service={})",
         opts.kind,
+        opts.vendor,
         opts.principal,
-        opts.kind.service()
+        opts.kind.service_for(&opts.vendor)
     );
     Ok(())
 }
@@ -190,11 +227,13 @@ pub fn set(backend: &dyn KeychainBackend, opts: SetOpts) -> Result<(), McpError>
 /// without leaking the secret.
 #[allow(clippy::needless_pass_by_value)]
 pub fn get(backend: &dyn KeychainBackend, opts: SelectOpts) -> Result<(), McpError> {
-    match backend.get(opts.kind, &opts.principal) {
+    ensure_kind_vendor_combo(opts.kind, &opts.vendor)?;
+    match backend.get(opts.kind, &opts.vendor, &opts.principal) {
         Ok(Some(secret)) => {
             println!(
-                "{} for {} is set ({})",
+                "{} for vendor {} principal {} is set ({})",
                 opts.kind,
+                opts.vendor,
                 opts.principal,
                 fingerprint(&secret)
             );
@@ -202,8 +241,8 @@ pub fn get(backend: &dyn KeychainBackend, opts: SelectOpts) -> Result<(), McpErr
         }
         Ok(None) => Err(unexpected(
             format!(
-                "no keychain entry for kind={}, principal={}",
-                opts.kind, opts.principal
+                "no keychain entry for kind={}, vendor={}, principal={}",
+                opts.kind, opts.vendor, opts.principal
             ),
             None,
         )),
@@ -214,15 +253,19 @@ pub fn get(backend: &dyn KeychainBackend, opts: SelectOpts) -> Result<(), McpErr
 /// `creds rm` handler.
 #[allow(clippy::needless_pass_by_value)]
 pub fn rm(backend: &dyn KeychainBackend, opts: SelectOpts) -> Result<(), McpError> {
-    match backend.delete(opts.kind, &opts.principal) {
+    ensure_kind_vendor_combo(opts.kind, &opts.vendor)?;
+    match backend.delete(opts.kind, &opts.vendor, &opts.principal) {
         Ok(()) => {
-            println!("removed {} for {}", opts.kind, opts.principal);
+            println!(
+                "removed {} for vendor {} principal {}",
+                opts.kind, opts.vendor, opts.principal
+            );
             Ok(())
         }
         Err(KeychainError::NotFound) => Err(unexpected(
             format!(
-                "no keychain entry to remove for kind={}, principal={}",
-                opts.kind, opts.principal
+                "no keychain entry to remove for kind={}, vendor={}, principal={}",
+                opts.kind, opts.vendor, opts.principal
             ),
             None,
         )),
@@ -268,18 +311,6 @@ pub(crate) fn fingerprint(secret: &str) -> String {
     format!("****{tail}")
 }
 
-/// Render a `Config::resolve` `Ambiguous` payload for an error message
-/// without echoing raw values. Each entry is shown as `vendor=****abcd`.
-/// Used by `creds migrate` so a disagreement on `ATLASSIAN_API_TOKEN` etc.
-/// cannot leak the conflicting secrets to stderr/logs.
-fn fmt_ambiguous_redacted(values: &[(&str, &str)]) -> String {
-    values
-        .iter()
-        .map(|(vendor, val)| format!("{vendor}={}", fingerprint(val)))
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 // ----------------------------------------------------------------------------
 // `creds migrate`
 // ----------------------------------------------------------------------------
@@ -289,7 +320,7 @@ fn fmt_ambiguous_redacted(values: &[(&str, &str)]) -> String {
 pub struct MigrateOutcome {
     /// Credentials newly written to the keychain (or already-present and
     /// confirmed equal — both end with the file rewritten to `"keychain"`).
-    pub migrated: Vec<(SecretKind, String)>,
+    pub migrated: Vec<MigrateRecord>,
     /// Reasons specific candidates were skipped without error.
     pub skipped: Vec<MigrateSkip>,
     /// Path of the `.bak` file created next to the rewritten configs.json.
@@ -299,26 +330,47 @@ pub struct MigrateOutcome {
 }
 
 #[derive(Debug, PartialEq, Eq)]
+pub struct MigrateRecord {
+    pub kind: SecretKind,
+    pub vendor: String,
+    pub principal: String,
+}
+
+#[derive(Debug, PartialEq, Eq)]
 pub enum MigrateSkip {
     /// Sentinel was already present and the keychain entry verified.
-    AlreadyMigrated { kind: SecretKind, principal: String },
+    AlreadyMigrated {
+        kind: SecretKind,
+        vendor: String,
+        principal: String,
+    },
     /// Plaintext value matches an existing keychain entry; no write needed,
     /// file still rewritten to `"keychain"`.
-    InSync { kind: SecretKind, principal: String },
-    /// Neither principal nor secret is set anywhere.
-    NotConfigured { kind: SecretKind },
+    InSync {
+        kind: SecretKind,
+        vendor: String,
+        principal: String,
+    },
+    /// Neither principal nor secret is set in this vendor section.
+    NotConfigured { kind: SecretKind, vendor: String },
     /// Principal is set but secret is missing (no plaintext to migrate).
     /// Mirrors the runtime auth fallback semantics.
-    PartiallyConfigured { kind: SecretKind },
+    PartiallyConfigured { kind: SecretKind, vendor: String },
 }
 
 /// Migrate plaintext secrets in `configs_path` to the keychain. Pure — does
 /// not read process env or `.env`. Public so tests call it directly with
 /// an in-memory backend and a tempdir-relative path.
 ///
+/// Each canonical vendor section (`bitbucket` / `jira` / `confluence`) is
+/// migrated independently. The same email may have a different token per
+/// vendor — that is the supported model — so cross-vendor disagreement on
+/// a secret value is *not* an error. Three vendor sections with three
+/// different tokens produce three keychain entries, each scoped by vendor.
+///
 /// On success, writes `<configs_path>.bak` (full original) and
-/// atomic-replaces `configs_path` with secrets replaced by the literal
-/// `"keychain"` sentinel.
+/// atomic-replaces `configs_path` with each migrated secret replaced by
+/// the literal `"keychain"` sentinel within its own vendor section.
 ///
 /// On failure, neither the file nor the keychain is left in an
 /// intermediate state: any keychain writes performed earlier in the run
@@ -354,45 +406,54 @@ pub fn migrate_with(
         )
     })?;
 
-    // File-only Config — no .env, no process env. We must mirror runtime
-    // resolution but on the file alone, so migration doesn't pick up
-    // env-sourced credentials it has no business writing to disk.
-    let cfg = Config::load_from_sources(Some(configs_path), None, &HashMap::new());
-
-    let candidates = [
-        Candidate {
-            kind: SecretKind::ApiToken,
-            principal_key: "ATLASSIAN_USER_EMAIL",
-            secret_key: "ATLASSIAN_API_TOKEN",
-        },
-        Candidate {
-            kind: SecretKind::AppPassword,
-            principal_key: "ATLASSIAN_BITBUCKET_USERNAME",
-            secret_key: "ATLASSIAN_BITBUCKET_APP_PASSWORD",
-        },
-    ];
     let aliases = config::vendor_aliases(PACKAGE_NAME);
 
-    // Plan every candidate before any keychain write so we can fail fast on
-    // misconfiguration without leaving partial state.
+    // Plan every (vendor, candidate) tuple before any keychain write so we
+    // can fail fast on misconfiguration without leaving partial state.
     let mut planned: Vec<PlannedAction> = Vec::new();
     let mut skipped: Vec<MigrateSkip> = Vec::new();
 
-    for candidate in &candidates {
-        match plan_candidate(candidate, &cfg, &json, &aliases)? {
-            CandidateOutcome::Migrate(plan) => planned.push(plan),
-            CandidateOutcome::Skip(reason) => skipped.push(reason),
+    for (canonical, alias_list) in &aliases {
+        // App-passwords are Bitbucket-only; runtime auth never reads them
+        // for any other vendor, so migrating them under jira/confluence
+        // would silently store dead state.
+        let candidates: &[Candidate] = if *canonical == VENDOR_BITBUCKET {
+            &[
+                Candidate {
+                    kind: SecretKind::ApiToken,
+                    principal_key: "ATLASSIAN_USER_EMAIL",
+                    secret_key: "ATLASSIAN_API_TOKEN",
+                },
+                Candidate {
+                    kind: SecretKind::AppPassword,
+                    principal_key: "ATLASSIAN_BITBUCKET_USERNAME",
+                    secret_key: "ATLASSIAN_BITBUCKET_APP_PASSWORD",
+                },
+            ]
+        } else {
+            &[Candidate {
+                kind: SecretKind::ApiToken,
+                principal_key: "ATLASSIAN_USER_EMAIL",
+                secret_key: "ATLASSIAN_API_TOKEN",
+            }]
+        };
+
+        for candidate in candidates {
+            match plan_candidate(candidate, canonical, alias_list, &json)? {
+                CandidateOutcome::Migrate(plan) => planned.push(plan),
+                CandidateOutcome::Skip(reason) => skipped.push(reason),
+            }
         }
     }
 
     // Execute keychain writes with rollback on failure.
     let mut applied: Vec<RollbackEntry> = Vec::new();
-    let mut migrated: Vec<(SecretKind, String)> = Vec::new();
+    let mut migrated: Vec<MigrateRecord> = Vec::new();
     let mut to_rewrite: Vec<&PlannedAction> = Vec::new();
 
     for plan in &planned {
         let prior = backend
-            .get(plan.kind, &plan.principal)
+            .get(plan.kind, &plan.vendor, &plan.principal)
             .map_err(|e| unexpected(format!("keychain pre-read failed: {e}"), None))?;
 
         match (&prior, plan.action) {
@@ -401,6 +462,7 @@ pub fn migrate_with(
                 // file still gets the sentinel.
                 skipped.push(MigrateSkip::InSync {
                     kind: plan.kind,
+                    vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
                 });
                 to_rewrite.push(plan);
@@ -411,26 +473,32 @@ pub fn migrate_with(
                     return Err(unexpected(
                         format!(
                             "keychain already has a different value for kind={}, \
-                             principal={} (plaintext={}, keychain={}). The keychain \
-                             value looks fresh; the configs.json value looks stale. \
-                             Re-run with --force to overwrite the keychain, or remove \
-                             the secret from configs.json to discard the plaintext.",
+                             vendor={}, principal={} (plaintext={}, keychain={}). The \
+                             keychain value looks fresh; the configs.json value looks \
+                             stale. Re-run with --force to overwrite the keychain, or \
+                             remove the secret from the `{}` section to discard the \
+                             plaintext.",
                             plan.kind,
+                            plan.vendor,
                             plan.principal,
                             fingerprint(&plan.value),
                             fingerprint(existing),
+                            plan.vendor,
                         ),
                         None,
                     ));
                 }
                 tracing::warn!(
                     kind = %plan.kind,
+                    vendor = plan.vendor.as_str(),
                     principal = plan.principal.as_str(),
                     plaintext_fp = fingerprint(&plan.value),
                     keychain_fp = fingerprint(existing),
                     "--force: overwriting existing keychain entry"
                 );
-                if let Err(e) = backend.set(plan.kind, &plan.principal, &plan.value) {
+                if let Err(e) =
+                    backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value)
+                {
                     rollback(&applied, backend);
                     return Err(unexpected(format!("keychain set failed: {e}"), None));
                 }
@@ -440,15 +508,22 @@ pub fn migrate_with(
                 }
                 applied.push(RollbackEntry {
                     kind: plan.kind,
+                    vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
                     prior: prior.clone(),
                 });
-                migrated.push((plan.kind, plan.principal.clone()));
+                migrated.push(MigrateRecord {
+                    kind: plan.kind,
+                    vendor: plan.vendor.clone(),
+                    principal: plan.principal.clone(),
+                });
                 to_rewrite.push(plan);
             }
             (_, PlannedKind::WriteFromPlaintext) => {
                 // Either no prior or non-conflict; do the write.
-                if let Err(e) = backend.set(plan.kind, &plan.principal, &plan.value) {
+                if let Err(e) =
+                    backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value)
+                {
                     rollback(&applied, backend);
                     return Err(unexpected(format!("keychain set failed: {e}"), None));
                 }
@@ -458,10 +533,15 @@ pub fn migrate_with(
                 }
                 applied.push(RollbackEntry {
                     kind: plan.kind,
+                    vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
                     prior: prior.clone(),
                 });
-                migrated.push((plan.kind, plan.principal.clone()));
+                migrated.push(MigrateRecord {
+                    kind: plan.kind,
+                    vendor: plan.vendor.clone(),
+                    principal: plan.principal.clone(),
+                });
                 to_rewrite.push(plan);
             }
             (Some(s), PlannedKind::VerifySentinel) if !s.is_empty() => {
@@ -469,6 +549,7 @@ pub fn migrate_with(
                 // file already has the sentinel.
                 skipped.push(MigrateSkip::AlreadyMigrated {
                     kind: plan.kind,
+                    vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
                 });
             }
@@ -486,11 +567,16 @@ pub fn migrate_with(
                 };
                 return Err(unexpected(
                     format!(
-                        "config has \"keychain\" sentinel for kind={}, principal={}, \
-                         but {detail}. Run \
-                         `mcp-atlassian creds set --kind {} --principal {}` \
+                        "config has \"keychain\" sentinel for kind={}, vendor={}, \
+                         principal={}, but {detail}. Run \
+                         `mcp-atlassian creds set --kind {} --vendor {} --principal {}` \
                          or remove the sentinel from configs.json.",
-                        plan.kind, plan.principal, plan.kind, plan.principal,
+                        plan.kind,
+                        plan.vendor,
+                        plan.principal,
+                        plan.kind,
+                        plan.vendor,
+                        plan.principal,
                     ),
                     None,
                 ));
@@ -498,13 +584,16 @@ pub fn migrate_with(
         }
     }
 
-    // Rewrite the JSON: for every recognized alias section of every
-    // canonical vendor we just migrated, set environments[secret_key] =
-    // "keychain" if currently set. Unrecognized top-level sections stay
-    // untouched.
+    // Rewrite the JSON: for every alias of each migrated vendor, set
+    // environments[secret_key] = "keychain" if currently a non-empty
+    // string. Other vendors' sections are not touched.
     if !to_rewrite.is_empty() {
         for plan in &to_rewrite {
-            rewrite_aliases_to_sentinel(&mut json, plan.secret_key, &aliases);
+            let alias_list = aliases
+                .iter()
+                .find(|(c, _)| *c == plan.vendor)
+                .map_or(&[][..], |(_, list)| list.as_slice());
+            rewrite_vendor_aliases_to_sentinel(&mut json, plan.secret_key, alias_list);
         }
     }
 
@@ -562,25 +651,35 @@ fn print_migrate_summary(outcome: &MigrateOutcome) {
             "migrated {} credential(s) to OS keychain",
             outcome.migrated.len()
         );
-        for (kind, principal) in &outcome.migrated {
-            println!("  - {kind} for {principal}");
+        for rec in &outcome.migrated {
+            println!("  - {} for vendor {} principal {}", rec.kind, rec.vendor, rec.principal);
         }
     }
     for skip in &outcome.skipped {
         match skip {
-            MigrateSkip::AlreadyMigrated { kind, principal } => {
-                println!("  (already migrated) {kind} for {principal}");
+            MigrateSkip::AlreadyMigrated {
+                kind,
+                vendor,
+                principal,
+            } => {
+                println!("  (already migrated) {kind} for vendor {vendor} principal {principal}");
             }
-            MigrateSkip::InSync { kind, principal } => {
-                println!("  (in sync; rewriting file) {kind} for {principal}");
-            }
-            MigrateSkip::NotConfigured { kind } => {
-                println!("  (not configured) {kind}");
-            }
-            MigrateSkip::PartiallyConfigured { kind } => {
+            MigrateSkip::InSync {
+                kind,
+                vendor,
+                principal,
+            } => {
                 println!(
-                    "  (partial; principal set but secret missing) {kind}; \
-                     leaving as-is per runtime auth fallback rules"
+                    "  (in sync; rewriting file) {kind} for vendor {vendor} principal {principal}"
+                );
+            }
+            MigrateSkip::NotConfigured { kind, vendor } => {
+                println!("  (not configured) {kind} for vendor {vendor}");
+            }
+            MigrateSkip::PartiallyConfigured { kind, vendor } => {
+                println!(
+                    "  (partial; principal set but secret missing) {kind} for vendor \
+                     {vendor}; leaving as-is per runtime auth fallback rules"
                 );
             }
         }
@@ -612,6 +711,7 @@ enum PlannedKind {
 #[derive(Debug)]
 struct PlannedAction {
     kind: SecretKind,
+    vendor: String,
     principal: String,
     secret_key: &'static str,
     value: String, // plaintext; empty for VerifySentinel
@@ -626,192 +726,131 @@ enum CandidateOutcome {
 #[derive(Debug)]
 struct RollbackEntry {
     kind: SecretKind,
+    vendor: String,
     principal: String,
     prior: Option<String>,
 }
 
-#[allow(clippy::too_many_lines)]
-fn plan_candidate(
-    candidate: &Candidate,
-    cfg: &Config,
-    json: &Value,
-    aliases: &[(&'static str, Vec<String>)],
-) -> Result<CandidateOutcome, McpError> {
-    // (3a) Raw alias-group inspection — runs first so a sentinel in one
-    // alias hiding plaintext in another is still caught.
-    let alias_state = inspect_aliases(json, candidate.secret_key, aliases)?;
-    if let AliasInspection::Conflict { canonical, found } = &alias_state {
+/// Read a string-valued env entry from the canonical vendor's section,
+/// merging across the vendor's alias list. The first alias in priority
+/// order with a non-empty string wins. Within a single canonical vendor,
+/// disagreement between alias spellings is still a conflict — that is a
+/// copy-paste / migration mistake, not a per-product choice — and is
+/// surfaced as `Err`.
+fn read_vendor_string<'a>(
+    json: &'a Value,
+    canonical: &str,
+    alias_list: &[String],
+    key: &str,
+) -> Result<Option<&'a str>, McpError> {
+    let mut chosen: Option<(&str, &str)> = None;
+    let mut conflicts: Vec<(String, String)> = Vec::new();
+    for alias in alias_list {
+        let Some(val) = json
+            .get(alias)
+            .and_then(|s| s.get("environments"))
+            .and_then(|env| env.get(key))
+        else {
+            continue;
+        };
+        match val {
+            Value::Null => {}
+            Value::String(s) if s.is_empty() => {}
+            Value::String(s) => match chosen {
+                None => chosen = Some((alias.as_str(), s.as_str())),
+                Some((_, prev)) if prev == s.as_str() => {}
+                Some(_) => conflicts.push((alias.clone(), s.clone())),
+            },
+            other => {
+                return Err(unexpected(
+                    format!(
+                        "{key} in section `{alias}` is a JSON {} value; migrate refuses \
+                         to coerce. Quote the value as a string in configs.json first.",
+                        json_type_name(other)
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+
+    if !conflicts.is_empty()
+        && let Some((first_alias, first_val)) = chosen
+    {
+        let mut all = vec![(first_alias.to_owned(), first_val.to_owned())];
+        all.extend(conflicts);
+        let rendered = all
+            .iter()
+            .map(|(a, v)| format!("{a}={}", fingerprint(v)))
+            .collect::<Vec<_>>()
+            .join(", ");
         return Err(unexpected(
             format!(
-                "alias conflict for {} within canonical vendor `{}`: {}. Reconcile \
-                 manually before migrating.",
-                candidate.secret_key,
-                canonical,
-                found
-                    .iter()
-                    .map(|(alias, val)| format!("{alias}={}", fingerprint(val)))
-                    .collect::<Vec<_>>()
-                    .join(", "),
+                "alias conflict for {key} within canonical vendor `{canonical}`: \
+                 {rendered}. Reconcile manually before migrating.",
             ),
             None,
         ));
     }
 
-    // (3b) Resolve via Config::resolve and dispatch.
-    let principal = match cfg.resolve(candidate.principal_key) {
-        Resolved::Resolved("") => {
-            return Err(unexpected(
-                format!(
-                    "{} is set to an empty value; cannot migrate {}",
-                    candidate.principal_key, candidate.secret_key
-                ),
-                None,
-            ));
-        }
-        Resolved::Resolved(p) => p,
-        Resolved::Ambiguous { values } => {
-            // Defensive redaction: the principal is normally email/username
-            // (non-secret), but a misconfigured file might have a token in
-            // that slot. Cheaper to fingerprint than to leak.
-            return Err(unexpected(
-                format!(
-                    "{} disagrees across vendor sections [{}]; reconcile before migrating",
-                    candidate.principal_key,
-                    fmt_ambiguous_redacted(&values),
-                ),
-                None,
-            ));
-        }
-        Resolved::Missing => {
-            // Principal absent. Two subcases:
-            //   - secret says "keychain" → hard error (sentinel implies opt-in).
-            //   - secret has plaintext  → hard error (we'd leave plaintext on disk).
-            //   - secret missing too    → not configured, skip.
-            //   - secret empty          → not configured, skip.
-            return match cfg.resolve(candidate.secret_key) {
-                Resolved::Missing | Resolved::Resolved("") => {
-                    Ok(CandidateOutcome::Skip(MigrateSkip::NotConfigured {
-                        kind: candidate.kind,
-                    }))
-                }
-                Resolved::Resolved("keychain") => Err(unexpected(
-                    format!(
-                        "config sets {}=\"keychain\" but {} is missing; cannot migrate",
-                        candidate.secret_key, candidate.principal_key
-                    ),
-                    None,
-                )),
-                Resolved::Resolved(_) => Err(unexpected(
-                    format!(
-                        "plaintext {} is set in configs.json but {} is missing; \
-                         migration cannot move it safely. Add {} or remove {} first.",
-                        candidate.secret_key,
-                        candidate.principal_key,
-                        candidate.principal_key,
-                        candidate.secret_key
-                    ),
-                    None,
-                )),
-                Resolved::Ambiguous { values } => Err(unexpected(
-                    format!(
-                        "{} disagrees across vendor sections [{}]; reconcile before migrating",
-                        candidate.secret_key,
-                        fmt_ambiguous_redacted(&values),
-                    ),
-                    None,
-                )),
-            };
-        }
-    };
+    Ok(chosen.map(|(_, v)| v))
+}
 
-    match cfg.resolve(candidate.secret_key) {
-        Resolved::Missing => Ok(CandidateOutcome::Skip(MigrateSkip::PartiallyConfigured {
+fn plan_candidate(
+    candidate: &Candidate,
+    canonical: &str,
+    alias_list: &[String],
+    json: &Value,
+) -> Result<CandidateOutcome, McpError> {
+    let principal = read_vendor_string(json, canonical, alias_list, candidate.principal_key)?;
+    let secret = read_vendor_string(json, canonical, alias_list, candidate.secret_key)?;
+
+    match (principal, secret) {
+        (None, None) => Ok(CandidateOutcome::Skip(MigrateSkip::NotConfigured {
             kind: candidate.kind,
+            vendor: canonical.to_owned(),
         })),
-        Resolved::Resolved("") => Err(unexpected(
-            format!("{} is set to an empty string; nothing to migrate", candidate.secret_key),
-            None,
-        )),
-        Resolved::Resolved("keychain") => Ok(CandidateOutcome::Migrate(PlannedAction {
-            kind: candidate.kind,
-            principal: principal.to_owned(),
-            secret_key: candidate.secret_key,
-            value: String::new(),
-            action: PlannedKind::VerifySentinel,
-        })),
-        Resolved::Resolved(s) => Ok(CandidateOutcome::Migrate(PlannedAction {
-            kind: candidate.kind,
-            principal: principal.to_owned(),
-            secret_key: candidate.secret_key,
-            value: s.to_owned(),
-            action: PlannedKind::WriteFromPlaintext,
-        })),
-        Resolved::Ambiguous { values } => Err(unexpected(
+        (None, Some("keychain")) => Err(unexpected(
             format!(
-                "{} disagrees across vendor sections [{}]; reconcile before migrating",
-                candidate.secret_key,
-                fmt_ambiguous_redacted(&values),
+                "vendor `{canonical}` sets {}=\"keychain\" but {} is missing; cannot migrate",
+                candidate.secret_key, candidate.principal_key
             ),
             None,
         )),
-    }
-}
-
-#[derive(Debug)]
-enum AliasInspection {
-    /// All alias values for this canonical vendor are equal-or-absent.
-    Uniform,
-    /// Aliases of one canonical vendor have different non-empty values.
-    Conflict {
-        canonical: &'static str,
-        found: Vec<(String, String)>,
-    },
-}
-
-/// Walk the raw JSON for every recognized alias of every canonical vendor
-/// and validate that within each canonical vendor, the value of
-/// `secret_key` is uniform (all equal, or absent). Also enforces the type
-/// guard: secret values must be JSON strings.
-fn inspect_aliases(
-    json: &Value,
-    secret_key: &str,
-    aliases: &[(&'static str, Vec<String>)],
-) -> Result<AliasInspection, McpError> {
-    for (canonical, alias_list) in aliases {
-        let mut found: Vec<(String, String)> = Vec::new();
-        for alias in alias_list {
-            let val = json
-                .get(alias)
-                .and_then(|s| s.get("environments"))
-                .and_then(|env| env.get(secret_key));
-            match val {
-                None | Some(Value::Null) => {}
-                Some(Value::String(s)) if s.is_empty() => {}
-                Some(Value::String(s)) => found.push((alias.clone(), s.clone())),
-                Some(other) => {
-                    return Err(unexpected(
-                        format!(
-                            "{secret_key} in section `{alias}` is a JSON {} value; \
-                             migrate refuses to coerce. Quote the value as a string in \
-                             configs.json first.",
-                            json_type_name(other)
-                        ),
-                        None,
-                    ));
-                }
-            }
+        (None, Some(_)) => Err(unexpected(
+            format!(
+                "plaintext {} is set in vendor `{canonical}` but {} is missing; \
+                 migration cannot move it safely. Add {} or remove {} first.",
+                candidate.secret_key,
+                candidate.principal_key,
+                candidate.principal_key,
+                candidate.secret_key
+            ),
+            None,
+        )),
+        (Some(_), None) => Ok(CandidateOutcome::Skip(MigrateSkip::PartiallyConfigured {
+            kind: candidate.kind,
+            vendor: canonical.to_owned(),
+        })),
+        (Some(principal), Some("keychain")) => {
+            Ok(CandidateOutcome::Migrate(PlannedAction {
+                kind: candidate.kind,
+                vendor: canonical.to_owned(),
+                principal: principal.to_owned(),
+                secret_key: candidate.secret_key,
+                value: String::new(),
+                action: PlannedKind::VerifySentinel,
+            }))
         }
-        if found.len() > 1 {
-            let first = &found[0].1;
-            if !found.iter().all(|(_, v)| v == first) {
-                return Ok(AliasInspection::Conflict {
-                    canonical,
-                    found,
-                });
-            }
-        }
+        (Some(principal), Some(secret)) => Ok(CandidateOutcome::Migrate(PlannedAction {
+            kind: candidate.kind,
+            vendor: canonical.to_owned(),
+            principal: principal.to_owned(),
+            secret_key: candidate.secret_key,
+            value: secret.to_owned(),
+            action: PlannedKind::WriteFromPlaintext,
+        })),
     }
-    Ok(AliasInspection::Uniform)
 }
 
 fn json_type_name(v: &Value) -> &'static str {
@@ -825,20 +864,14 @@ fn json_type_name(v: &Value) -> &'static str {
     }
 }
 
-fn rewrite_aliases_to_sentinel(
-    json: &mut Value,
-    secret_key: &str,
-    aliases: &[(&'static str, Vec<String>)],
-) {
-    let alias_set: Vec<String> = aliases
-        .iter()
-        .flat_map(|(_, list)| list.iter().cloned())
-        .collect();
+/// Replace `secret_key` with the `"keychain"` sentinel inside every alias
+/// of the supplied vendor. Other vendors' sections are left untouched.
+fn rewrite_vendor_aliases_to_sentinel(json: &mut Value, secret_key: &str, alias_list: &[String]) {
     let Some(root) = json.as_object_mut() else {
         return;
     };
-    for alias in alias_set {
-        let Some(section) = root.get_mut(&alias).and_then(|s| s.as_object_mut()) else {
+    for alias in alias_list {
+        let Some(section) = root.get_mut(alias).and_then(|s| s.as_object_mut()) else {
             continue;
         };
         let Some(env) = section
@@ -856,7 +889,7 @@ fn rewrite_aliases_to_sentinel(
 }
 
 fn verify_set(backend: &dyn KeychainBackend, plan: &PlannedAction) -> Result<(), McpError> {
-    match backend.get(plan.kind, &plan.principal) {
+    match backend.get(plan.kind, &plan.vendor, &plan.principal) {
         Ok(Some(s)) if s == plan.value => Ok(()),
         Ok(Some(_)) => Err(unexpected(
             "keychain readback returned a different value than was just written; \
@@ -880,8 +913,8 @@ fn rollback(applied: &[RollbackEntry], backend: &dyn KeychainBackend) {
     // failure leaves earlier entries un-touched.
     for entry in applied.iter().rev() {
         let result = match &entry.prior {
-            Some(prior) => backend.set(entry.kind, &entry.principal, prior),
-            None => match backend.delete(entry.kind, &entry.principal) {
+            Some(prior) => backend.set(entry.kind, &entry.vendor, &entry.principal, prior),
+            None => match backend.delete(entry.kind, &entry.vendor, &entry.principal) {
                 Ok(()) | Err(KeychainError::NotFound) => Ok(()),
                 Err(e) => Err(e),
             },
@@ -889,6 +922,7 @@ fn rollback(applied: &[RollbackEntry], backend: &dyn KeychainBackend) {
         if let Err(e) = result {
             tracing::error!(
                 kind = %entry.kind,
+                vendor = entry.vendor.as_str(),
                 principal = entry.principal.as_str(),
                 error = %e,
                 "rollback failed; keychain may be in an inconsistent state"
@@ -902,9 +936,10 @@ mod tests {
     use super::*;
     use crate::auth::InMemoryKeychain;
 
-    fn select(kind: SecretKind, principal: &str) -> SelectOpts {
+    fn select(kind: SecretKind, vendor: &str, principal: &str) -> SelectOpts {
         SelectOpts {
             kind,
+            vendor: vendor.to_owned(),
             principal: principal.to_owned(),
         }
     }
@@ -925,31 +960,52 @@ mod tests {
     #[test]
     fn get_handler_reports_missing_entry() {
         let kc = InMemoryKeychain::new();
-        let err = get(&kc, select(SecretKind::ApiToken, "alice@x")).unwrap_err();
+        let err = get(&kc, select(SecretKind::ApiToken, "bitbucket", "alice@x")).unwrap_err();
         assert!(err.message.contains("no keychain entry"));
     }
 
     #[test]
     fn get_handler_succeeds_when_entry_exists() {
         let kc = InMemoryKeychain::new();
-        kc.set(SecretKind::ApiToken, "alice@x", "tok").unwrap();
-        // Just exercise the success path — stdout isn't captured here, but
-        // the function returning Ok(()) means the entry was found.
-        get(&kc, select(SecretKind::ApiToken, "alice@x")).unwrap();
+        kc.set(SecretKind::ApiToken, "bitbucket", "alice@x", "tok")
+            .unwrap();
+        get(&kc, select(SecretKind::ApiToken, "bitbucket", "alice@x")).unwrap();
     }
 
     #[test]
     fn rm_handler_removes_entry() {
         let kc = InMemoryKeychain::new();
-        kc.set(SecretKind::ApiToken, "alice@x", "tok").unwrap();
-        rm(&kc, select(SecretKind::ApiToken, "alice@x")).unwrap();
+        kc.set(SecretKind::ApiToken, "bitbucket", "alice@x", "tok")
+            .unwrap();
+        rm(&kc, select(SecretKind::ApiToken, "bitbucket", "alice@x")).unwrap();
         assert!(kc.is_empty());
     }
 
     #[test]
     fn rm_handler_errors_on_missing() {
         let kc = InMemoryKeychain::new();
-        let err = rm(&kc, select(SecretKind::ApiToken, "alice@x")).unwrap_err();
+        let err = rm(&kc, select(SecretKind::ApiToken, "bitbucket", "alice@x")).unwrap_err();
         assert!(err.message.contains("no keychain entry to remove"));
+    }
+
+    #[test]
+    fn app_password_rejected_for_non_bitbucket_vendors() {
+        let kc = InMemoryKeychain::new();
+        for v in ["jira", "confluence"] {
+            let err = get(&kc, select(SecretKind::AppPassword, v, "bobby")).unwrap_err();
+            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+            let err = rm(&kc, select(SecretKind::AppPassword, v, "bobby")).unwrap_err();
+            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+            let opts = SetOpts {
+                kind: SecretKind::AppPassword,
+                vendor: v.to_owned(),
+                principal: "bobby".into(),
+                from_stdin: true,
+            };
+            let err = set(&kc, opts).unwrap_err();
+            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+        }
+        // The keychain must remain untouched — guard fired before any backend call.
+        assert!(kc.is_empty());
     }
 }

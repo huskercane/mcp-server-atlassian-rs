@@ -110,7 +110,7 @@ async fn fetch_first_workspace(
     ctx: &BitbucketContext<'_>,
 ) -> Result<Option<String>, crate::error::McpError> {
     let handle = ctx.handle();
-    let creds = Credentials::require_async(handle.config).await?;
+    let creds = Credentials::require_for_async(handle.config, handle.vendor.name()).await?;
     let response: TransportResponse = fetch(
         handle.client,
         handle.vendor,

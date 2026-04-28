@@ -89,7 +89,16 @@ fn creds_help_lists_every_subcommand() {
 #[test]
 fn creds_set_rejects_unknown_kind() {
     let output = StdCommand::new(cargo_bin(BIN))
-        .args(["creds", "set", "--kind", "nonsense", "--principal", "x@y"])
+        .args([
+            "creds",
+            "set",
+            "--kind",
+            "nonsense",
+            "--vendor",
+            "bitbucket",
+            "--principal",
+            "x@y",
+        ])
         .env_remove("TRANSPORT_MODE")
         .output()
         .expect("spawn binary");

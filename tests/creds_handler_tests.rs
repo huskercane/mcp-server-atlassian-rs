@@ -12,6 +12,7 @@ use std::sync::Mutex;
 use mcp_server_atlassian::auth::keychain::{KeychainBackend, KeychainError, KeychainResult};
 use mcp_server_atlassian::auth::{InMemoryKeychain, SecretKind};
 use mcp_server_atlassian::cli::creds::{self, MigrateSkip};
+use mcp_server_atlassian::config::{VENDOR_BITBUCKET, VENDOR_JIRA};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -58,10 +59,11 @@ fn migrate_happy_path_moves_token_and_rewrites_file() {
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
 
     assert_eq!(outcome.migrated.len(), 1);
-    assert_eq!(outcome.migrated[0].0, SecretKind::ApiToken);
-    assert_eq!(outcome.migrated[0].1, "alice@example.com");
+    assert_eq!(outcome.migrated[0].kind, SecretKind::ApiToken);
+    assert_eq!(outcome.migrated[0].vendor, VENDOR_BITBUCKET);
+    assert_eq!(outcome.migrated[0].principal, "alice@example.com");
     assert_eq!(
-        kc.get(SecretKind::ApiToken, "alice@example.com")
+        kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap()
             .as_deref(),
         Some("real-plaintext-token")
@@ -71,12 +73,10 @@ fn migrate_happy_path_moves_token_and_rewrites_file() {
         env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
         Some("keychain".into())
     );
-    // Email left untouched.
     assert_eq!(
         env_value(&after, "bitbucket", "ATLASSIAN_USER_EMAIL"),
         Some("alice@example.com".into())
     );
-    // .bak exists and matches the original byte-for-byte.
     let bak = outcome.backup_path.unwrap();
     let original = serde_json::to_vec_pretty(&json!({
         "bitbucket": { "environments": {
@@ -106,9 +106,12 @@ fn migrate_app_password_kind_works() {
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
 
     assert_eq!(outcome.migrated.len(), 1);
-    assert_eq!(outcome.migrated[0].0, SecretKind::AppPassword);
+    assert_eq!(outcome.migrated[0].kind, SecretKind::AppPassword);
+    assert_eq!(outcome.migrated[0].vendor, VENDOR_BITBUCKET);
     assert_eq!(
-        kc.get(SecretKind::AppPassword, "bobby").unwrap().as_deref(),
+        kc.get(SecretKind::AppPassword, VENDOR_BITBUCKET, "bobby")
+            .unwrap()
+            .as_deref(),
         Some("secret-app-pw")
     );
     let after = read_config(&path);
@@ -149,6 +152,71 @@ fn migrate_handles_both_kinds_in_one_run() {
     );
 }
 
+// ---- per-vendor tokens ---------------------------------------------------
+
+#[test]
+fn migrate_writes_independent_keychain_entries_per_vendor() {
+    // The user's actual case: three vendors, three different tokens, all
+    // under the same email principal. Each vendor section migrates into
+    // its own scoped keychain slot — no cross-vendor disagreement error.
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    write_config(
+        &path,
+        &json!({
+            "bitbucket": { "environments": {
+                "ATLASSIAN_USER_EMAIL": "alice@example.com",
+                "ATLASSIAN_API_TOKEN":  "bb-token",
+            }},
+            "jira": { "environments": {
+                "ATLASSIAN_USER_EMAIL": "alice@example.com",
+                "ATLASSIAN_API_TOKEN":  "jira-token",
+            }},
+            "confluence": { "environments": {
+                "ATLASSIAN_USER_EMAIL": "alice@example.com",
+                "ATLASSIAN_API_TOKEN":  "conf-token",
+            }},
+        }),
+    );
+    let kc = InMemoryKeychain::new();
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+
+    assert_eq!(outcome.migrated.len(), 3);
+    assert_eq!(
+        kc.get(SecretKind::ApiToken, "bitbucket", "alice@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("bb-token")
+    );
+    assert_eq!(
+        kc.get(SecretKind::ApiToken, "jira", "alice@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("jira-token")
+    );
+    assert_eq!(
+        kc.get(SecretKind::ApiToken, "confluence", "alice@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("conf-token")
+    );
+
+    // Each section's secret is replaced with the sentinel — but only its own.
+    let after = read_config(&path);
+    assert_eq!(
+        env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
+        Some("keychain".into())
+    );
+    assert_eq!(
+        env_value(&after, "jira", "ATLASSIAN_API_TOKEN"),
+        Some("keychain".into())
+    );
+    assert_eq!(
+        env_value(&after, "confluence", "ATLASSIAN_API_TOKEN"),
+        Some("keychain".into())
+    );
+}
+
 // ---- idempotency / sentinel verification ---------------------------------
 
 #[test]
@@ -165,7 +233,7 @@ fn migrate_is_idempotent_when_already_migrated() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "stored-token")
+    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "stored-token")
         .unwrap();
 
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
@@ -174,8 +242,6 @@ fn migrate_is_idempotent_when_already_migrated() {
         .skipped
         .iter()
         .any(|s| matches!(s, MigrateSkip::AlreadyMigrated { .. })));
-    // Idempotent: file still has the sentinel; .bak NOT created because we
-    // didn't actually rewrite anything.
     let after = read_config(&path);
     assert_eq!(
         env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
@@ -186,10 +252,6 @@ fn migrate_is_idempotent_when_already_migrated() {
 
 #[test]
 fn migrate_sentinel_with_empty_keychain_entry_is_hard_error() {
-    // Defensive: a manually-poisoned keychain entry holding the empty
-    // string would cause runtime auth (which requires non-empty) to
-    // hard-fail at request time. Migrate must catch this on the spot
-    // rather than report "already migrated" and walk away.
     let dir = TempDir::new().unwrap();
     let path = make_path(&dir, "configs.json");
     write_config(
@@ -202,7 +264,7 @@ fn migrate_sentinel_with_empty_keychain_entry_is_hard_error() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "")
+    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "")
         .unwrap();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
@@ -224,13 +286,11 @@ fn migrate_sentinel_without_keychain_entry_is_hard_error() {
         }},
     });
     write_config(&path, &original_body);
-    let kc = InMemoryKeychain::new(); // empty
+    let kc = InMemoryKeychain::new();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("no keychain entry"), "{}", err.message);
-    // File untouched.
     assert_eq!(read_config(&path), original_body);
-    // No .bak written because the error happens before backup.
     assert!(!path.with_extension("json.bak").exists());
 }
 
@@ -269,6 +329,10 @@ fn migrate_alias_agreement_rewrites_all_alias_copies() {
 
 #[test]
 fn migrate_alias_conflict_two_plaintext_values_is_hard_error() {
+    // Two ALIASES of the same canonical vendor disagreeing is still bad —
+    // it's a copy-paste mistake within one product, not a per-product
+    // choice. Cross-canonical-vendor disagreement is allowed (covered by
+    // `migrate_writes_independent_keychain_entries_per_vendor`).
     let dir = TempDir::new().unwrap();
     let path = make_path(&dir, "configs.json");
     let original = json!({
@@ -306,10 +370,7 @@ fn migrate_alias_conflict_sentinel_vs_plaintext_is_hard_error() {
     });
     write_config(&path, &original);
     let kc = InMemoryKeychain::new();
-    // Even with a real keychain entry, the alias conflict must surface
-    // because otherwise sentinel-verification would short-circuit and
-    // leave the lower-priority plaintext on disk.
-    kc.set(SecretKind::ApiToken, "alice@example.com", "stored")
+    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "stored")
         .unwrap();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
@@ -318,47 +379,40 @@ fn migrate_alias_conflict_sentinel_vs_plaintext_is_hard_error() {
 }
 
 #[test]
-fn migrate_disagreement_across_canonical_vendors_is_hard_error() {
+fn migrate_distinct_emails_per_vendor_are_independent() {
+    // Different email per vendor — each vendor migrates against its own
+    // principal. Used to error out as "ATLASSIAN_USER_EMAIL disagrees
+    // across vendor sections"; with vendor scoping, that is now valid.
     let dir = TempDir::new().unwrap();
     let path = make_path(&dir, "configs.json");
     write_config(
         &path,
         &json!({
             "bitbucket": { "environments": {
-                "ATLASSIAN_USER_EMAIL": "alice@example.com",
-                "ATLASSIAN_API_TOKEN":  "bb-token-leak-canary-AAAA",
+                "ATLASSIAN_USER_EMAIL": "bb@example.com",
+                "ATLASSIAN_API_TOKEN":  "bb-tok",
             }},
-            "jira":      { "environments": {
-                "ATLASSIAN_USER_EMAIL": "alice@example.com",
-                "ATLASSIAN_API_TOKEN":  "jira-token-leak-canary-BBBB",
+            "jira": { "environments": {
+                "ATLASSIAN_USER_EMAIL": "jira@example.com",
+                "ATLASSIAN_API_TOKEN":  "jira-tok",
             }},
         }),
     );
     let kc = InMemoryKeychain::new();
-    let err = creds::migrate_with(&kc, &path, false).unwrap_err();
-    assert!(
-        err.message.contains("disagree") || err.message.contains("Ambiguous"),
-        "{}",
-        err.message
+    creds::migrate_with(&kc, &path, false).unwrap();
+
+    assert_eq!(
+        kc.get(SecretKind::ApiToken, "bitbucket", "bb@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("bb-tok")
     );
-    // Ambiguity error must not leak full secret values.
-    assert!(
-        !err.message.contains("bb-token-leak-canary-AAAA"),
-        "full bitbucket token leaked in error: {}",
-        err.message
+    assert_eq!(
+        kc.get(SecretKind::ApiToken, "jira", "jira@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("jira-tok")
     );
-    assert!(
-        !err.message.contains("jira-token-leak-canary-BBBB"),
-        "full jira token leaked in error: {}",
-        err.message
-    );
-    // The redacted last-4 *should* be present for diagnostics.
-    assert!(
-        err.message.contains("AAAA") && err.message.contains("BBBB"),
-        "redacted fingerprints missing: {}",
-        err.message
-    );
-    assert!(kc.is_empty());
 }
 
 // ---- principal/secret edge cases -----------------------------------------
@@ -376,7 +430,6 @@ fn migrate_secret_present_principal_missing_is_hard_error() {
     let kc = InMemoryKeychain::new();
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("missing"), "{}", err.message);
-    // Plaintext still on disk (we refused to migrate without a principal).
     assert_eq!(read_config(&path), original);
 }
 
@@ -397,9 +450,11 @@ fn migrate_principal_present_secret_missing_skips_with_partial() {
     assert!(outcome.migrated.is_empty());
     assert!(outcome.skipped.iter().any(|s| matches!(
         s,
-        MigrateSkip::PartiallyConfigured { kind: SecretKind::ApiToken }
+        MigrateSkip::PartiallyConfigured {
+            kind: SecretKind::ApiToken,
+            ..
+        }
     )));
-    // No file rewrite needed because nothing migrated.
     assert!(outcome.backup_path.is_none());
 }
 
@@ -424,19 +479,58 @@ fn migrate_sentinel_with_principal_missing_is_hard_error() {
 }
 
 #[test]
-fn migrate_empty_secret_is_hard_error() {
+fn migrate_app_password_in_jira_section_is_ignored() {
+    // App-passwords are Bitbucket-only; runtime auth never reads them
+    // outside the bitbucket vendor. Migrate must not write a dead
+    // (jira, app-password) keychain entry just because the field happens
+    // to appear in a non-Bitbucket section.
     let dir = TempDir::new().unwrap();
     let path = make_path(&dir, "configs.json");
-    let original = json!({
-        "bitbucket": { "environments": {
-            "ATLASSIAN_USER_EMAIL": "alice@example.com",
-            "ATLASSIAN_API_TOKEN":  "",
-        }},
-    });
-    write_config(&path, &original);
+    write_config(
+        &path,
+        &json!({
+            "jira": { "environments": {
+                "ATLASSIAN_BITBUCKET_USERNAME":     "bobby",
+                "ATLASSIAN_BITBUCKET_APP_PASSWORD": "should-not-migrate",
+            }},
+        }),
+    );
     let kc = InMemoryKeychain::new();
-    let err = creds::migrate_with(&kc, &path, false).unwrap_err();
-    assert!(err.message.contains("empty"), "{}", err.message);
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+    assert!(outcome.migrated.is_empty());
+    assert!(
+        kc.get(SecretKind::AppPassword, VENDOR_JIRA, "bobby")
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
+fn migrate_empty_secret_falls_through_as_partial() {
+    // Empty plaintext secret with a principal: runtime auth treats this as
+    // implicit-fallback (try keychain). Migrate has nothing to write, so
+    // the candidate is reported as partial rather than an error.
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    write_config(
+        &path,
+        &json!({
+            "bitbucket": { "environments": {
+                "ATLASSIAN_USER_EMAIL": "alice@example.com",
+                "ATLASSIAN_API_TOKEN":  "",
+            }},
+        }),
+    );
+    let kc = InMemoryKeychain::new();
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+    assert!(outcome.migrated.is_empty());
+    assert!(outcome.skipped.iter().any(|s| matches!(
+        s,
+        MigrateSkip::PartiallyConfigured {
+            kind: SecretKind::ApiToken,
+            ..
+        }
+    )));
 }
 
 // ---- type guard ---------------------------------------------------------
@@ -472,19 +566,22 @@ fn migrate_stale_clobber_blocked_without_force() {
     });
     write_config(&path, &original);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "NEW-rotated-by-creds-set")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "NEW-rotated-by-creds-set",
+    )
+    .unwrap();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("--force"), "{}", err.message);
-    // Keychain unchanged.
     assert_eq!(
-        kc.get(SecretKind::ApiToken, "alice@example.com")
+        kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap()
             .as_deref(),
         Some("NEW-rotated-by-creds-set")
     );
-    // File unchanged.
     assert_eq!(read_config(&path), original);
 }
 
@@ -502,13 +599,18 @@ fn migrate_stale_clobber_with_force_overwrites() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "NEW-from-creds-set")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "NEW-from-creds-set",
+    )
+    .unwrap();
 
     let outcome = creds::migrate_with(&kc, &path, true).unwrap();
     assert_eq!(outcome.migrated.len(), 1);
     assert_eq!(
-        kc.get(SecretKind::ApiToken, "alice@example.com")
+        kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap()
             .as_deref(),
         Some("OLD-from-file"),
@@ -530,22 +632,25 @@ fn migrate_in_sync_skips_keychain_write_but_rewrites_file() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "same-token-everywhere")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "same-token-everywhere",
+    )
+    .unwrap();
 
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
     assert!(outcome
         .skipped
         .iter()
         .any(|s| matches!(s, MigrateSkip::InSync { .. })));
-    // Keychain still holds the same value.
     assert_eq!(
-        kc.get(SecretKind::ApiToken, "alice@example.com")
+        kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap()
             .as_deref(),
         Some("same-token-everywhere")
     );
-    // File rewritten so future runs are no-ops.
     let after = read_config(&path);
     assert_eq!(
         env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
@@ -578,7 +683,6 @@ fn migrate_unrelated_top_level_sections_are_not_touched() {
         env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
         Some("keychain".into())
     );
-    // Unrecognized section: untouched.
     assert_eq!(
         env_value(&after, "some-other-tool", "ATLASSIAN_API_TOKEN"),
         Some("this-stays-as-is".into())
@@ -605,19 +709,30 @@ impl FailingOnNthSet {
 }
 
 impl KeychainBackend for FailingOnNthSet {
-    fn get(&self, kind: SecretKind, principal: &str) -> KeychainResult<Option<String>> {
-        self.inner.get(kind, principal)
+    fn get(
+        &self,
+        kind: SecretKind,
+        vendor: &str,
+        principal: &str,
+    ) -> KeychainResult<Option<String>> {
+        self.inner.get(kind, vendor, principal)
     }
-    fn set(&self, kind: SecretKind, principal: &str, secret: &str) -> KeychainResult<()> {
+    fn set(
+        &self,
+        kind: SecretKind,
+        vendor: &str,
+        principal: &str,
+        secret: &str,
+    ) -> KeychainResult<()> {
         let mut left = self.fail_after.lock().unwrap();
         if *left == 0 {
             return Err(KeychainError::Backend("simulated mid-run failure".into()));
         }
         *left -= 1;
-        self.inner.set(kind, principal, secret)
+        self.inner.set(kind, vendor, principal, secret)
     }
-    fn delete(&self, kind: SecretKind, principal: &str) -> KeychainResult<()> {
-        self.inner.delete(kind, principal)
+    fn delete(&self, kind: SecretKind, vendor: &str, principal: &str) -> KeychainResult<()> {
+        self.inner.delete(kind, vendor, principal)
     }
 }
 
@@ -635,19 +750,16 @@ fn migrate_rolls_back_first_kind_when_second_fails() {
     });
     write_config(&path, &original);
 
-    // First set (api-token) succeeds; second set (app-password) fails.
     let kc = FailingOnNthSet::new(1);
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("simulated"), "{}", err.message);
 
-    // Rollback restored the keychain to empty (api-token entry deleted).
     assert_eq!(
-        kc.get(SecretKind::ApiToken, "alice@example.com")
+        kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap(),
         None,
         "first kind not rolled back"
     );
-    // File unchanged.
     assert_eq!(read_config(&path), original);
 }
 
@@ -655,9 +767,6 @@ fn migrate_rolls_back_first_kind_when_second_fails() {
 
 #[test]
 fn migrate_atomic_replace_produces_valid_json_on_disk() {
-    // Sanity: the rewritten file is valid JSON and parses identically when
-    // round-tripped. Catches issues with serializer settings or partial
-    // writes through atomicwrites.
     let dir = TempDir::new().unwrap();
     let path = make_path(&dir, "configs.json");
     write_config(
@@ -672,7 +781,6 @@ fn migrate_atomic_replace_produces_valid_json_on_disk() {
     let kc = InMemoryKeychain::new();
     creds::migrate_with(&kc, &path, false).unwrap();
 
-    // Re-read and verify the file parses.
     let raw = std::fs::read(&path).unwrap();
     let parsed: Value = serde_json::from_slice(&raw).expect("rewritten file is valid JSON");
     assert_eq!(

@@ -5,7 +5,7 @@
 //! [`Vendor`](crate::vendor::Vendor) trait carried by [`HandleContext`].
 //!
 //! Pipeline (shared by all five HTTP verbs):
-//! 1. Resolve credentials via [`Credentials::require_async`]; missing or
+//! 1. Resolve credentials via [`Credentials::require_for_async`]; missing or
 //!    keychain-specific failures propagate verbatim.
 //! 2. Apply the vendor's path normalisation (Bitbucket prepends `/2.0`;
 //!    Jira passes through verbatim).
@@ -124,7 +124,7 @@ pub async fn handle_request(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
-    let creds = Credentials::require_async(ctx.config).await?;
+    let creds = Credentials::require_for_async(ctx.config, ctx.vendor.name()).await?;
     let normalized = normalize_and_append(ctx.vendor, path, query_params);
     debug!(
         %normalized,

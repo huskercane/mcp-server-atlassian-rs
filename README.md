@@ -84,7 +84,7 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
 }
 ```
 
-Shared keys (e.g. `ATLASSIAN_API_TOKEN`) can live in any section — when the same key appears in multiple sections with the **same value** it's resolved unambiguously; if the values disagree, you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -105,23 +105,32 @@ When the binary needs a credential, it tries each source in priority order; the 
    - **Explicit**: a previous source returned the literal string `"keychain"` (the sentinel). The principal (email/username) is read from the same cascade. A missing keychain entry is a hard auth error — it tells you the configuration intent didn't match reality.
    - **Implicit**: the secret is absent from every source above but the principal is set. Useful if you've migrated and deleted the field outright. A miss falls through silently.
 
-`Config::get` itself is unaware of the keychain; the expansion happens entirely inside `auth::Credentials::resolve_with`. Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
+Keychain entries are scoped by `(kind, vendor, principal)` — the service name carries the vendor suffix (`mcp-server-atlassian.api-token.bitbucket`, `.jira`, `.confluence`), so the same email can hold a different token in each slot. `Config::get_for` itself is unaware of the keychain; the expansion happens entirely inside `auth::Credentials::resolve_with_for(config, backend, vendor)`. Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
 
 #### CLI
 
 ```bash
-# Store a token (no echo when stdin is a tty; pipes work too).
-mcp-atlassian creds set --kind api-token --principal you@company.com
-mcp-atlassian creds set --kind app-password --principal your-bb-username
+# Store a token. `--vendor` is required: api-token slots are per-product,
+# so the same email can hold one Bitbucket-scoped token, one Jira-scoped
+# token, etc. (no echo when stdin is a tty; pipes work too).
+mcp-atlassian creds set --kind api-token --vendor bitbucket --principal you@company.com
+mcp-atlassian creds set --kind api-token --vendor jira       --principal you@company.com
+mcp-atlassian creds set --kind api-token --vendor confluence --principal you@company.com
+
+# App-passwords are Bitbucket-only.
+mcp-atlassian creds set --kind app-password --vendor bitbucket --principal your-bb-username
 
 # Confirm an entry exists (prints the last 4 chars only).
-mcp-atlassian creds get --kind api-token --principal you@company.com
+mcp-atlassian creds get --kind api-token --vendor bitbucket --principal you@company.com
 
 # Remove an entry.
-mcp-atlassian creds rm --kind api-token --principal you@company.com
+mcp-atlassian creds rm --kind api-token --vendor bitbucket --principal you@company.com
 
-# One-shot migration: read tokens from ~/.mcp/configs.json, copy them to the
-# keychain, replace each with the "keychain" sentinel, and write a .bak.
+# One-shot migration: walk each vendor section in ~/.mcp/configs.json,
+# copy each token to its own scoped keychain entry, replace each section's
+# secret with the "keychain" sentinel, and write a .bak. Disagreement on
+# the secret value across vendors is fine — three sections with three
+# tokens produce three independent keychain entries.
 mcp-atlassian creds migrate
 
 # `creds migrate --force` overrides the stale-clobber guard: when the keychain
@@ -131,7 +140,7 @@ mcp-atlassian creds migrate
 mcp-atlassian creds migrate --force
 ```
 
-There is no `creds list` — `keyring`'s `Entry` API has no portable enumeration. Inspect entries through the OS-native UI: **Keychain Access** on macOS, **`credwiz.exe`** on Windows, **`seahorse`** on Linux. Look for the `mcp-server-atlassian.api-token` and `mcp-server-atlassian.app-password` services.
+There is no `creds list` — `keyring`'s `Entry` API has no portable enumeration. Inspect entries through the OS-native UI: **Keychain Access** on macOS, **`credwiz.exe`** on Windows, **`seahorse`** on Linux. Look for service names of the form `mcp-server-atlassian.api-token.<vendor>` or `mcp-server-atlassian.app-password.bitbucket`.
 
 #### After migrating
 
@@ -148,7 +157,7 @@ There is no `creds list` — `keyring`'s `Entry` API has no portable enumeration
 }
 ```
 
-Restart your MCP client. The first time the server resolves the credential it logs an info-level breadcrumb (`source=keychain, kind=api-token, principal=…`) so you can confirm the keychain path was taken. After validating, delete the `.bak` file `creds migrate` left behind.
+Restart your MCP client. The first time the server resolves the credential it logs an info-level breadcrumb (`source=keychain, kind=api-token, vendor=…, principal=…`) so you can confirm the keychain path was taken and which scope hit. After validating, delete the `.bak` file `creds migrate` left behind.
 
 #### Platform notes
 

@@ -366,9 +366,10 @@ fn map_reqwest_error(err: &reqwest::Error, url: &str) -> McpError {
 /// Exposed for callers that just want a well-formed auth header (e.g. tests
 /// and diagnostics). Prefer [`fetch`] for real traffic.
 ///
-/// Synchronous; safe in tests and diagnostics. Async server paths must
-/// use [`Credentials::require_async`] so the keychain syscall doesn't
+/// Vendor-scoped; the same email may have a different token per vendor.
+/// Synchronous — safe in tests and diagnostics. Async server paths must
+/// use [`Credentials::require_for_async`] so the keychain syscall doesn't
 /// block a Tokio worker.
-pub fn require_credentials(config: &Config) -> Result<Credentials, McpError> {
-    Credentials::require(config)
+pub fn require_credentials(config: &Config, vendor: &str) -> Result<Credentials, McpError> {
+    Credentials::require_for(config, vendor)
 }

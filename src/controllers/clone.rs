@@ -203,7 +203,7 @@ async fn fetch_repo_metadata(
     repo: &str,
 ) -> Result<Value, McpError> {
     let handle = ctx.handle();
-    let creds = Credentials::require_async(handle.config).await?;
+    let creds = Credentials::require_for_async(handle.config, handle.vendor.name()).await?;
     let path = format!("/2.0/repositories/{workspace}/{repo}");
     let response = fetch(
         handle.client,

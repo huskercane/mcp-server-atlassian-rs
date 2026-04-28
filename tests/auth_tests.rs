@@ -5,9 +5,14 @@ use std::collections::HashMap;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mcp_server_atlassian::auth::{Credentials, InMemoryKeychain, KeychainBackend, SecretKind};
-use mcp_server_atlassian::config::Config;
+use mcp_server_atlassian::config::{Config, VENDOR_BITBUCKET, VENDOR_JIRA};
 use mcp_server_atlassian::error::ErrorKind;
 use pretty_assertions::assert_eq;
+
+/// Default vendor for tests that don't care about vendor scope. We pick
+/// Bitbucket because it's the only vendor for which both credential
+/// conventions (`AtlassianApiToken` and `BitbucketAppPassword`) resolve.
+const V: &str = VENDOR_BITBUCKET;
 
 fn cfg(entries: &[(&str, &str)]) -> Config {
     let mut m = HashMap::new();
@@ -15,6 +20,10 @@ fn cfg(entries: &[(&str, &str)]) -> Config {
         m.insert((*k).to_string(), (*v).to_string());
     }
     Config::from_map(m)
+}
+
+fn empty_kc() -> InMemoryKeychain {
+    InMemoryKeychain::new()
 }
 
 #[test]
@@ -25,7 +34,9 @@ fn prefers_atlassian_api_token_when_both_present() {
         ("ATLASSIAN_BITBUCKET_USERNAME", "bbuser"),
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bbsecret"),
     ]);
-    let creds = Credentials::resolve(&c).unwrap();
+    let creds = Credentials::resolve_with_for(&c, &empty_kc(), V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -41,7 +52,9 @@ fn falls_back_to_bitbucket_app_password() {
         ("ATLASSIAN_BITBUCKET_USERNAME", "bbuser"),
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bbsecret"),
     ]);
-    let creds = Credentials::resolve(&c).unwrap();
+    let creds = Credentials::resolve_with_for(&c, &empty_kc(), V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::BitbucketAppPassword {
@@ -52,15 +65,42 @@ fn falls_back_to_bitbucket_app_password() {
 }
 
 #[test]
+fn app_password_path_only_resolves_for_bitbucket_vendor() {
+    // Jira and Confluence have no concept of an app-password; runtime auth
+    // must not pick one up even if the env happens to define those vars.
+    let c = cfg(&[
+        ("ATLASSIAN_BITBUCKET_USERNAME", "bbuser"),
+        ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bbsecret"),
+    ]);
+    assert!(
+        Credentials::resolve_with_for(&c, &empty_kc(), VENDOR_JIRA)
+            .unwrap()
+            .is_none()
+    );
+}
+
+#[test]
 fn resolves_none_when_neither_set_is_complete() {
     let c = cfg(&[("ATLASSIAN_USER_EMAIL", "only-email@example.com")]);
-    assert!(Credentials::resolve(&c).is_none());
+    assert!(
+        Credentials::resolve_with_for(&c, &empty_kc(), V)
+            .unwrap()
+            .is_none()
+    );
 
     let c = cfg(&[("ATLASSIAN_BITBUCKET_USERNAME", "only-username")]);
-    assert!(Credentials::resolve(&c).is_none());
+    assert!(
+        Credentials::resolve_with_for(&c, &empty_kc(), V)
+            .unwrap()
+            .is_none()
+    );
 
     let c = cfg(&[]);
-    assert!(Credentials::resolve(&c).is_none());
+    assert!(
+        Credentials::resolve_with_for(&c, &empty_kc(), V)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -69,13 +109,17 @@ fn rejects_empty_strings() {
         ("ATLASSIAN_USER_EMAIL", ""),
         ("ATLASSIAN_API_TOKEN", "token"),
     ]);
-    assert!(Credentials::resolve(&c).is_none());
+    assert!(
+        Credentials::resolve_with_for(&c, &empty_kc(), V)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
-fn require_errors_when_missing() {
+fn require_for_errors_when_missing() {
     let c = cfg(&[]);
-    let err = Credentials::require(&c).unwrap_err();
+    let err = Credentials::require_for(&c, V).unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 
@@ -125,10 +169,10 @@ fn keychain_sentinel_hit_expands_to_real_token() {
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "real-token-from-os")
+    kc.set(SecretKind::ApiToken, V, "alice@example.com", "real-token-from-os")
         .unwrap();
 
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -139,13 +183,44 @@ fn keychain_sentinel_hit_expands_to_real_token() {
 }
 
 #[test]
+fn keychain_sentinel_per_vendor_isolation() {
+    // The same email may have a different token per vendor. Resolving for
+    // jira must NOT pick up the bitbucket-scoped entry — that would defeat
+    // the entire point of vendor scope.
+    let cfg = cfg(&[
+        ("ATLASSIAN_USER_EMAIL", "alice@example.com"),
+        ("ATLASSIAN_API_TOKEN", "keychain"),
+    ]);
+    let kc = InMemoryKeychain::new();
+    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "bb-tok")
+        .unwrap();
+    kc.set(SecretKind::ApiToken, VENDOR_JIRA, "alice@example.com", "jira-tok")
+        .unwrap();
+
+    let bb = Credentials::resolve_with_for(&cfg, &kc, VENDOR_BITBUCKET)
+        .unwrap()
+        .unwrap();
+    let jira = Credentials::resolve_with_for(&cfg, &kc, VENDOR_JIRA)
+        .unwrap()
+        .unwrap();
+    match bb {
+        Credentials::AtlassianApiToken { token, .. } => assert_eq!(token, "bb-tok"),
+        other @ Credentials::BitbucketAppPassword { .. } => panic!("unexpected: {other:?}"),
+    }
+    match jira {
+        Credentials::AtlassianApiToken { token, .. } => assert_eq!(token, "jira-tok"),
+        other @ Credentials::BitbucketAppPassword { .. } => panic!("unexpected: {other:?}"),
+    }
+}
+
+#[test]
 fn keychain_sentinel_miss_is_hard_error() {
     let cfg = cfg(&[
         ("ATLASSIAN_USER_EMAIL", "alice@example.com"),
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
     let kc = InMemoryKeychain::new(); // empty — sentinel set but no entry
-    let err = Credentials::resolve_with(&cfg, &kc).unwrap_err();
+    let err = Credentials::resolve_with_for(&cfg, &kc, V).unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("no keychain entry"), "{}", err.message);
 }
@@ -153,8 +228,8 @@ fn keychain_sentinel_miss_is_hard_error() {
 #[test]
 fn keychain_sentinel_with_missing_principal_is_hard_error() {
     let cfg = cfg(&[("ATLASSIAN_API_TOKEN", "keychain")]); // email missing
-    let kc = InMemoryKeychain::new();
-    let err = Credentials::resolve_with(&cfg, &kc).unwrap_err();
+    let kc = empty_kc();
+    let err = Credentials::resolve_with_for(&cfg, &kc, V).unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(
         err.message.contains("ATLASSIAN_USER_EMAIL"),
@@ -167,10 +242,10 @@ fn keychain_sentinel_with_missing_principal_is_hard_error() {
 fn keychain_implicit_fallback_hit_expands_when_secret_absent() {
     let cfg = cfg(&[("ATLASSIAN_USER_EMAIL", "alice@example.com")]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "from-implicit")
+    kc.set(SecretKind::ApiToken, V, "alice@example.com", "from-implicit")
         .unwrap();
 
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -188,8 +263,8 @@ fn keychain_implicit_miss_falls_through_to_next_kind() {
         ("ATLASSIAN_BITBUCKET_USERNAME", "bb-fallback"),
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-secret"),
     ]);
-    let kc = InMemoryKeychain::new();
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let kc = empty_kc();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     assert_eq!(
         creds,
         Credentials::BitbucketAppPassword {
@@ -202,8 +277,12 @@ fn keychain_implicit_miss_falls_through_to_next_kind() {
 #[test]
 fn keychain_implicit_miss_on_both_kinds_returns_none() {
     let cfg = cfg(&[("ATLASSIAN_USER_EMAIL", "alice@example.com")]);
-    let kc = InMemoryKeychain::new();
-    assert!(Credentials::resolve_with(&cfg, &kc).unwrap().is_none());
+    let kc = empty_kc();
+    assert!(
+        Credentials::resolve_with_for(&cfg, &kc, V)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[test]
@@ -213,10 +292,10 @@ fn keychain_sentinel_works_for_app_password_kind() {
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "keychain"),
     ]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::AppPassword, "bobby", "real-app-password")
+    kc.set(SecretKind::AppPassword, V, "bobby", "real-app-password")
         .unwrap();
 
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     assert_eq!(
         creds,
         Credentials::BitbucketAppPassword {
@@ -233,10 +312,10 @@ fn plaintext_secret_takes_priority_over_keychain_lookup() {
         ("ATLASSIAN_API_TOKEN", "plaintext-from-config"),
     ]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, "alice@example.com", "ignored")
+    kc.set(SecretKind::ApiToken, V, "alice@example.com", "ignored")
         .unwrap();
 
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     match creds {
         Credentials::AtlassianApiToken { token, .. } => {
             assert_eq!(token, "plaintext-from-config");
@@ -255,8 +334,8 @@ fn empty_plaintext_secret_falls_through() {
         ("ATLASSIAN_BITBUCKET_USERNAME", "bb"),
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-pass"),
     ]);
-    let kc = InMemoryKeychain::new();
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let kc = empty_kc();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
         other @ Credentials::AtlassianApiToken { .. } => {
@@ -272,7 +351,7 @@ fn keychain_backend_error_on_sentinel_is_hard_error() {
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
     let kc = InMemoryKeychain::with_failure("dbus down");
-    let err = Credentials::resolve_with(&cfg, &kc).unwrap_err();
+    let err = Credentials::resolve_with_for(&cfg, &kc, V).unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("dbus down"), "{}", err.message);
 }
@@ -286,10 +365,7 @@ fn keychain_backend_error_on_implicit_falls_through() {
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-pass"),
     ]);
     let kc = InMemoryKeychain::with_failure("kc down");
-    // Implicit miss-on-error logs warn and falls through; app-password kind also
-    // hits the failing backend at "implicit" path? No — it has plaintext, so it
-    // goes plaintext path. Should resolve.
-    let creds = Credentials::resolve_with(&cfg, &kc).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
         other @ Credentials::AtlassianApiToken { .. } => {
@@ -304,12 +380,8 @@ fn require_propagates_keychain_specific_errors() {
         ("ATLASSIAN_USER_EMAIL", "alice@example.com"),
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
-    // Build the resolve_with directly with InMemoryKeychain (no entry) so
-    // we exercise the explicit-sentinel-miss → hard error path. This proves
-    // the production `require` would surface the same specific message,
-    // not the generic "auth missing" fallback.
-    let kc = InMemoryKeychain::new();
-    let err = Credentials::resolve_with(&cfg, &kc).unwrap_err();
+    let kc = empty_kc();
+    let err = Credentials::resolve_with_for(&cfg, &kc, V).unwrap_err();
     assert!(
         !err.message.contains("Authentication credentials are missing"),
         "got generic message instead of keychain-specific: {}",
@@ -318,32 +390,37 @@ fn require_propagates_keychain_specific_errors() {
 }
 
 #[test]
-fn implicit_failure_breadcrumb_dedupes_per_pair() {
+fn implicit_failure_breadcrumb_dedupes_per_triple() {
     // Backend that fails get() but tracks how many times note_implicit_failure
     // returned true (i.e. how many `warn!`s would fire).
-    use std::sync::Mutex;
     use mcp_server_atlassian::auth::keychain::{KeychainError, KeychainResult};
+    use std::sync::Mutex;
 
     struct CountingFailingBackend {
         warn_calls: Mutex<usize>,
-        seen: Mutex<std::collections::HashSet<(SecretKind, String)>>,
+        seen: Mutex<std::collections::HashSet<(SecretKind, String, String)>>,
     }
     impl KeychainBackend for CountingFailingBackend {
-        fn get(&self, _: SecretKind, _: &str) -> KeychainResult<Option<String>> {
+        fn get(&self, _: SecretKind, _: &str, _: &str) -> KeychainResult<Option<String>> {
             Err(KeychainError::Backend("simulated".into()))
         }
-        fn set(&self, _: SecretKind, _: &str, _: &str) -> KeychainResult<()> {
+        fn set(&self, _: SecretKind, _: &str, _: &str, _: &str) -> KeychainResult<()> {
             unreachable!()
         }
-        fn delete(&self, _: SecretKind, _: &str) -> KeychainResult<()> {
+        fn delete(&self, _: SecretKind, _: &str, _: &str) -> KeychainResult<()> {
             unreachable!()
         }
-        fn note_implicit_failure(&self, kind: SecretKind, principal: &str) -> bool {
+        fn note_implicit_failure(
+            &self,
+            kind: SecretKind,
+            vendor: &str,
+            principal: &str,
+        ) -> bool {
             let inserted = self
                 .seen
                 .lock()
                 .unwrap()
-                .insert((kind, principal.to_owned()));
+                .insert((kind, vendor.to_owned(), principal.to_owned()));
             if inserted {
                 *self.warn_calls.lock().unwrap() += 1;
             }
@@ -357,36 +434,25 @@ fn implicit_failure_breadcrumb_dedupes_per_pair() {
         seen: Mutex::new(std::collections::HashSet::new()),
     };
 
-    // First call: implicit miss + backend failure → first warn fires.
-    let _ = Credentials::resolve_with(&cfg, &backend);
-    // Second call same principal: should NOT log another warn.
-    let _ = Credentials::resolve_with(&cfg, &backend);
-    let _ = Credentials::resolve_with(&cfg, &backend);
+    // Three calls for the same (kind, vendor, principal) → only one warn.
+    let _ = Credentials::resolve_with_for(&cfg, &backend, V);
+    let _ = Credentials::resolve_with_for(&cfg, &backend, V);
+    let _ = Credentials::resolve_with_for(&cfg, &backend, V);
 
-    // Two kinds × one principal: api-token failure was hit each call.
-    // The trait method should have been entered three times but reported
-    // a "fresh" insertion only on the first.
     let warns = *backend.warn_calls.lock().unwrap();
     assert_eq!(warns, 1, "expected exactly one warn-worthy event, got {warns}");
 }
 
 #[tokio::test]
-async fn require_async_runs_off_the_runtime() {
+async fn require_for_async_runs_off_the_runtime() {
     // Keychain reads are synchronous and can block (macOS ACL prompt,
-    // libsecret D-Bus round-trip). `require_async` must offload to a
+    // libsecret D-Bus round-trip). `require_for_async` must offload to a
     // blocking task so a Tokio worker isn't held hostage.
-    //
-    // Regression test for an earlier design where async controllers
-    // called `Credentials::resolve` directly inside the request future,
-    // which would freeze the executor on a slow keychain backend.
     let good = cfg(&[
         ("ATLASSIAN_USER_EMAIL", "alice@example.com"),
         ("ATLASSIAN_API_TOKEN", "plaintext"),
     ]);
-    // We can't test thread offloading without a probe; what we can test
-    // is that the function is awaitable, returns the same value as the
-    // sync path, and surfaces errors verbatim.
-    let creds = Credentials::require_async(&good).await.unwrap();
+    let creds = Credentials::require_for_async(&good, V).await.unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -397,6 +463,6 @@ async fn require_async_runs_off_the_runtime() {
 
     // Errors from the inner sync path round-trip through .await.
     let bad = cfg(&[]);
-    let err = Credentials::require_async(&bad).await.unwrap_err();
+    let err = Credentials::require_for_async(&bad, V).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
