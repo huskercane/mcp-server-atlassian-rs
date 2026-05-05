@@ -17,6 +17,7 @@
 //!    text/empty bodies — matches TS behaviour which filters "any").
 //! 6. Render as TOON or JSON according to `outputFormat`.
 
+use std::future::Future;
 use std::path::PathBuf;
 
 use reqwest::Client;
@@ -146,11 +147,15 @@ pub async fn handle_request(
 
 /// Convenience wrapper for read-shaped tools. Just dispatches to
 /// [`handle_request`] with no body.
-pub async fn handle_read(
-    ctx: &HandleContext<'_>,
+//
+// Returns `impl Future` rather than being `async fn` so the compiler does
+// not wrap `handle_request`'s state machine in an outer one — pure tail-call
+// forwarding with infallible sync prep.
+pub fn handle_read<'a>(
+    ctx: &'a HandleContext<'a>,
     method: HttpMethod,
-    args: &ReadArgs,
-) -> Result<ControllerResponse, McpError> {
+    args: &'a ReadArgs,
+) -> impl Future<Output = Result<ControllerResponse, McpError>> + Send + 'a {
     let fmt = args.output_format.map_or(OutputFormat::Toon, Into::into);
     handle_request(
         ctx,
@@ -161,15 +166,14 @@ pub async fn handle_read(
         args.jq.as_deref(),
         fmt,
     )
-    .await
 }
 
 /// Convenience wrapper for write-shaped tools (POST / PUT / PATCH).
-pub async fn handle_write(
-    ctx: &HandleContext<'_>,
+pub fn handle_write<'a>(
+    ctx: &'a HandleContext<'a>,
     method: HttpMethod,
-    args: &WriteArgs,
-) -> Result<ControllerResponse, McpError> {
+    args: &'a WriteArgs,
+) -> impl Future<Output = Result<ControllerResponse, McpError>> + Send + 'a {
     let fmt = args.output_format.map_or(OutputFormat::Toon, Into::into);
     handle_request(
         ctx,
@@ -180,7 +184,6 @@ pub async fn handle_write(
         args.jq.as_deref(),
         fmt,
     )
-    .await
 }
 
 fn normalize_and_append(
