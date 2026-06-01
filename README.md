@@ -48,6 +48,8 @@ cargo deny check                             # license + advisory check
 
 Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or Confluence). The TS README has step-by-step screenshots: see [Get Your Bitbucket Credentials](https://github.com/aashari/mcp-server-atlassian-bitbucket#1-get-your-bitbucket-credentials).
 
+Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Server OAuth app](https://developers.zoom.us/docs/internal-apps/s2s-oauth/) and use its account ID, client ID, and client secret (`ZOOM_*` below). These never go through the OS keychain — they are read as plaintext from the `zoom` config section or environment.
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -65,7 +67,7 @@ Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or 
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`) so each product's keys stay isolated:
 
 ```json
 {
@@ -206,7 +208,7 @@ Point the client at the binary. Stdio is the default transport. If your client u
 
 ## Available tools
 
-Sixteen tools across three vendor families. Tool names match the TS references one-to-one.
+Twenty-one tools across four vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*` tools are a native addition with no TS port.
 
 ### Bitbucket (`bb_*`)
 
@@ -265,7 +267,7 @@ All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` 
 
 ## CLI usage
 
-Three subcommand groups — one per vendor — keep the verbs unambiguous:
+Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom is MCP-only: there is no `zoom` CLI group, so `zoom_*` is reachable through an MCP client, not the command line.)
 
 ```bash
 # Bitbucket
