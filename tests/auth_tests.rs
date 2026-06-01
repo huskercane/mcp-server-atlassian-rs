@@ -147,6 +147,16 @@ fn basic_auth_header_bitbucket() {
 }
 
 #[test]
+fn auth_header_bearer_emits_bearer_scheme() {
+    // Zoom's resolved token uses the Bearer scheme, not Basic — and the token
+    // is passed through verbatim (no base64).
+    let creds = Credentials::Bearer {
+        token: "abc.def.ghi".into(),
+    };
+    assert_eq!(creds.auth_header(), "Bearer abc.def.ghi");
+}
+
+#[test]
 fn principal_returns_public_identifier() {
     let a = Credentials::AtlassianApiToken {
         email: "alice@example.com".into(),
@@ -156,8 +166,13 @@ fn principal_returns_public_identifier() {
         username: "bob".into(),
         password: "hunter2".into(),
     };
+    let c = Credentials::Bearer {
+        token: "abc.def.ghi".into(),
+    };
     assert_eq!(a.principal(), "alice@example.com");
     assert_eq!(b.principal(), "bob");
+    // Bearer has no principal and must never leak the token.
+    assert_eq!(c.principal(), "bearer");
 }
 
 // ---- keychain-aware resolution ----
@@ -205,11 +220,11 @@ fn keychain_sentinel_per_vendor_isolation() {
         .unwrap();
     match bb {
         Credentials::AtlassianApiToken { token, .. } => assert_eq!(token, "bb-tok"),
-        other @ Credentials::BitbucketAppPassword { .. } => panic!("unexpected: {other:?}"),
+        other => panic!("unexpected: {other:?}"),
     }
     match jira {
         Credentials::AtlassianApiToken { token, .. } => assert_eq!(token, "jira-tok"),
-        other @ Credentials::BitbucketAppPassword { .. } => panic!("unexpected: {other:?}"),
+        other => panic!("unexpected: {other:?}"),
     }
 }
 
@@ -320,7 +335,7 @@ fn plaintext_secret_takes_priority_over_keychain_lookup() {
         Credentials::AtlassianApiToken { token, .. } => {
             assert_eq!(token, "plaintext-from-config");
         }
-        other @ Credentials::BitbucketAppPassword { .. } => {
+        other => {
             panic!("expected api token kind, got {other:?}")
         }
     }
@@ -338,7 +353,7 @@ fn empty_plaintext_secret_falls_through() {
     let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
-        other @ Credentials::AtlassianApiToken { .. } => {
+        other => {
             panic!("expected fallback to app password, got {other:?}")
         }
     }
@@ -368,7 +383,7 @@ fn keychain_backend_error_on_implicit_falls_through() {
     let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
-        other @ Credentials::AtlassianApiToken { .. } => {
+        other => {
             panic!("expected app password fallback, got {other:?}")
         }
     }

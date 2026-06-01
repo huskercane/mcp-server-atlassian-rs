@@ -242,7 +242,9 @@ fn normalize_url_with_base(base: &str, path: &str) -> String {
 }
 
 fn validate_auth(credentials: &Credentials) -> Result<HeaderValue, McpError> {
-    let raw = credentials.basic_auth_header();
+    // Scheme-agnostic: `auth_header()` emits Basic for the Atlassian
+    // variants and Bearer for Zoom's resolved token.
+    let raw = credentials.auth_header();
     HeaderValue::from_str(&raw).map_err(|_| auth_invalid("Invalid authentication header"))
 }
 

@@ -2,6 +2,8 @@
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
+The same binary also exposes **Zoom Cloud** (`zoom_*`) — a native addition (not a TS port) that reuses the generic-verb proxy design. Unlike the Atlassian vendors it authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization).
+
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
 ## Why a Rust port
@@ -9,7 +11,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, and Confluence — instead of running three Node processes side-by-side, you get one MCP server exposing all 16 tools (six `bb_*`, five `jira_*`, five `conf_*`).
+- One binary serves Bitbucket, Jira, Confluence, and Zoom — instead of running separate Node processes side-by-side, you get one MCP server exposing all 21 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`).
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -56,6 +58,9 @@ Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or 
 | `ATLASSIAN_BITBUCKET_APP_PASSWORD` | Legacy fallback: App Password | bb only |
 | `BITBUCKET_DEFAULT_WORKSPACE` | Default workspace slug used when a tool/CLI call omits it | bb only |
 | `ATLASSIAN_SITE_NAME` | Atlassian site shortname (e.g. `mycompany` for `mycompany.atlassian.net`). **Required** before invoking any `jira_*` or `conf_*` tool; only checked at tool-call time, so a Bitbucket-only setup boots without it. Jira and Confluence point at the same Atlassian site, so populating it under either the `jira` or `confluence` section of `~/.mcp/configs.json` works for both — duplication is unnecessary. | jira + conf |
+| `ZOOM_ACCOUNT_ID` | Zoom Server-to-Server OAuth account ID. **Required** before invoking any `zoom_*` tool; only checked at tool-call time, so a non-Zoom setup boots without it. | zoom only |
+| `ZOOM_CLIENT_ID` | Zoom S2S OAuth app client ID. | zoom only |
+| `ZOOM_CLIENT_SECRET` | Zoom S2S OAuth app client secret. | zoom only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
@@ -80,11 +85,18 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
     "environments": {
       "ATLASSIAN_SITE_NAME": "mycompany"
     }
+  },
+  "zoom": {
+    "environments": {
+      "ZOOM_ACCOUNT_ID": "abc123...",
+      "ZOOM_CLIENT_ID": "client-id...",
+      "ZOOM_CLIENT_SECRET": "client-secret..."
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -232,6 +244,20 @@ Jira paths pass through verbatim — supply the full `/rest/api/3/...` path. Req
 | `conf_delete` | destructive, idempotent | DELETE any endpoint |
 
 Confluence paths pass through verbatim — supply the full `/wiki/api/v2/...` (preferred) or `/wiki/rest/api/...` (CQL search) path. Shares `ATLASSIAN_SITE_NAME` with Jira; missing site name surfaces as an authentication error at call time. Confluence treats 403 as `API_ERROR/Access denied` (not `auth_invalid` like Jira), preserving the upstream TS asymmetry.
+
+### Zoom (`zoom_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `zoom_get` | read-only, idempotent | GET any Zoom API v2 endpoint (schedule, meeting details, users, "search") |
+| `zoom_post` | mutating | POST to any endpoint (e.g. create a meeting) |
+| `zoom_put` | mutating, idempotent | PUT to any endpoint (e.g. end a meeting, update settings) |
+| `zoom_patch` | mutating | PATCH any endpoint (e.g. reschedule a meeting) |
+| `zoom_delete` | destructive, idempotent | DELETE any endpoint (e.g. cancel a meeting) |
+
+Zoom paths pass through verbatim relative to the `https://api.zoom.us/v2` base — supply e.g. `/users/me/meetings` (no version segment). There is **no separate search tool**: listing and searching are just `zoom_get` against the right path (`/users/me/meetings`, `/contacts?search_key=…`, `/users`, …). Authenticates with Server-to-Server OAuth; credentials (`ZOOM_ACCOUNT_ID` + `ZOOM_CLIENT_ID` + `ZOOM_CLIENT_SECRET`) are read from the `zoom` config section / environment (plaintext — the OS-keychain sentinel is Atlassian-only). Missing credentials surface as an authentication error at call time, so a non-Zoom deployment boots without them. The bearer is cached per server instance and renewed 60s before expiry.
+
+> **Starting a meeting** is not a REST action: `zoom_post /users/me/meetings` returns a `start_url` the host opens to launch the Zoom client. **Reminders** are likewise not an API call — drive them from your scheduler (e.g. a cron/loop agent that polls `zoom_get /users/me/meetings`), not from this server.
 
 ### Shared inputs
 

@@ -53,6 +53,12 @@ pub const VENDOR_JIRA: &str = "jira";
 /// Canonical vendor name for Confluence.
 pub const VENDOR_CONFLUENCE: &str = "confluence";
 
+/// Canonical vendor name for Zoom. Unlike the Atlassian vendors, Zoom does
+/// not share the `ATLASSIAN_*` credential model: it authenticates via
+/// Server-to-Server OAuth (`ZOOM_ACCOUNT_ID` + `ZOOM_CLIENT_ID` +
+/// `ZOOM_CLIENT_SECRET`) and the server auto-renews the short-lived bearer.
+pub const VENDOR_ZOOM: &str = "zoom";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -410,11 +416,16 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "@aashari/mcp-server-atlassian-confluence".to_string(),
         "mcp-server-atlassian-confluence".to_string(),
     ];
+    let zoom_aliases = vec![
+        "zoom".to_string(),
+        "mcp-server-zoom".to_string(),
+    ];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
         (VENDOR_JIRA, jira_aliases),
         (VENDOR_CONFLUENCE, confluence_aliases),
+        (VENDOR_ZOOM, zoom_aliases),
     ]
 }
 

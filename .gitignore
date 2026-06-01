@@ -35,3 +35,6 @@ flamegraph.svg
 # OS
 .DS_Store
 Thumbs.db
+
+# Per-user local Claude Code settings (may contain secrets) — never commit
+.claude/settings.local.json

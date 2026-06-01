@@ -10,6 +10,7 @@ use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
+use mcp_server_atlassian::vendor::zoom::ZoomVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
 use std::collections::HashMap;
@@ -22,6 +23,7 @@ fn server_info_reports_expected_identity() {
         BitbucketVendor::new(),
         JiraVendor::new(),
         ConfluenceVendor::new(),
+        ZoomVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

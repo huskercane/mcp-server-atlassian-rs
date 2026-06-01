@@ -40,12 +40,14 @@ use crate::config::Config;
 use crate::constants::{PACKAGE_NAME, VERSION};
 use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, handle_write};
 use crate::controllers::handle_clone;
+use crate::controllers::zoom::ZoomContext;
 use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
 use crate::vendor::confluence::ConfluenceVendor;
 use crate::vendor::jira::JiraVendor;
+use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{CloneArgs, ReadArgs, WriteArgs};
 
@@ -65,6 +67,7 @@ struct ServerState {
     bitbucket_vendor: BitbucketVendor,
     jira_vendor: JiraVendor,
     confluence_vendor: ConfluenceVendor,
+    zoom_vendor: ZoomVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -86,6 +89,7 @@ impl AtlassianServer {
             BitbucketVendor::new(),
             JiraVendor::new(),
             ConfluenceVendor::new(),
+            ZoomVendor::new(),
         ))
     }
 
@@ -98,6 +102,7 @@ impl AtlassianServer {
         bitbucket_vendor: BitbucketVendor,
         jira_vendor: JiraVendor,
         confluence_vendor: ConfluenceVendor,
+        zoom_vendor: ZoomVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -106,6 +111,7 @@ impl AtlassianServer {
                 bitbucket_vendor,
                 jira_vendor,
                 confluence_vendor,
+                zoom_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -118,7 +124,10 @@ impl AtlassianServer {
     /// Naming this method `tool_router` (the macro's default) lets
     /// `#[tool_handler]` find it without a custom `router = …` attr.
     fn tool_router() -> ToolRouter<Self> {
-        Self::bitbucket_router() + Self::jira_router() + Self::confluence_router()
+        Self::bitbucket_router()
+            + Self::jira_router()
+            + Self::confluence_router()
+            + Self::zoom_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -155,6 +164,18 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.confluence_vendor,
+        )
+    }
+
+    /// Zoom-specific context. Unlike the Atlassian vendors, Zoom carries its
+    /// own credential lifecycle (Server-to-Server OAuth bearer), so it uses a
+    /// dedicated [`ZoomContext`] rather than the vendor-neutral
+    /// [`HandleContext`].
+    fn zoom_ctx(&self) -> ZoomContext<'_> {
+        ZoomContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.zoom_vendor,
         )
     }
 }
@@ -388,6 +409,78 @@ impl AtlassianServer {
     }
 }
 
+// ============================================================================
+// Zoom tools
+// ============================================================================
+
+#[tool_router(router = zoom_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/zoom_get.md")]
+    #[tool(
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn zoom_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_zoom(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/zoom_post.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn zoom_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_zoom(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/zoom_put.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn zoom_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_zoom(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/zoom_patch.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true,
+        ),
+    )]
+    async fn zoom_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_zoom(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/zoom_delete.md")]
+    #[tool(
+        annotations(
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = true,
+        ),
+    )]
+    async fn zoom_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_zoom(self, HttpMethod::Delete, &args).await)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
@@ -481,6 +574,34 @@ async fn run_write_confluence(
     args: &WriteArgs,
 ) -> CallToolResult {
     match handle_write(&server.confluence_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_zoom(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match crate::controllers::zoom::handle_read(&server.zoom_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_zoom(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match crate::controllers::zoom::handle_write(&server.zoom_ctx(), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])

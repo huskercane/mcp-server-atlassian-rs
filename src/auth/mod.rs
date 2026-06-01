@@ -34,6 +34,16 @@ pub enum Credentials {
     /// Bitbucket-specific fallback; resolution returns this only when the
     /// vendor is `bitbucket`.
     BitbucketAppPassword { username: String, password: String },
+
+    /// A pre-resolved OAuth 2.0 bearer token, emitted as
+    /// `Authorization: Bearer <token>`. Unlike the two Atlassian variants,
+    /// this is **never** produced by [`Self::resolve_with_for`] — the shared
+    /// Atlassian resolver stays free of OAuth concerns. It is minted by a
+    /// vendor that owns its own token lifecycle (currently Zoom's
+    /// Server-to-Server OAuth provider, which exchanges static client
+    /// credentials for a short-lived token and auto-renews it) and handed to
+    /// the transport purely as an auth carrier.
+    Bearer { token: String },
 }
 
 /// Process-wide [`OsKeychain`] instance. Reused across all credential
@@ -139,9 +149,26 @@ impl Credentials {
         Ok(None)
     }
 
+    /// Full `Authorization` header value for this credential. This is the
+    /// single dispatch point the transport uses: Basic for the two
+    /// Atlassian variants, Bearer for [`Self::Bearer`]. New auth schemes
+    /// should be added here rather than at the transport layer.
+    pub fn auth_header(&self) -> String {
+        match self {
+            Self::Bearer { token } => format!("Bearer {token}"),
+            Self::AtlassianApiToken { .. } | Self::BitbucketAppPassword { .. } => {
+                format!("Basic {}", self.basic_auth_payload())
+            }
+        }
+    }
+
     /// `Authorization: Basic <base64>` header value.
+    ///
+    /// Retained as a thin, back-compatible wrapper over [`Self::auth_header`]
+    /// for the two Basic variants (and existing tests). Prefer
+    /// [`Self::auth_header`] in new code — it is scheme-agnostic.
     pub fn basic_auth_header(&self) -> String {
-        format!("Basic {}", self.basic_auth_payload())
+        self.auth_header()
     }
 
     /// Base64-encoded `user:secret` payload without the `Basic ` prefix.
@@ -151,16 +178,22 @@ impl Credentials {
             Self::BitbucketAppPassword { username, password } => {
                 format!("{username}:{password}")
             }
+            // Bearer carries an opaque token, not a `user:secret` pair, and
+            // is routed through `auth_header()` above. This branch keeps the
+            // match total; it is unreachable for a `Bearer` in practice.
+            Self::Bearer { .. } => String::new(),
         };
         STANDARD.encode(raw.as_bytes())
     }
 
-    /// Identifier part (email or username), useful for log lines without
-    /// leaking the secret.
+    /// Identifier part, useful for log lines without leaking the secret.
+    /// Bearer tokens have no principal, so a neutral `"bearer"` label is
+    /// returned rather than any part of the token.
     pub fn principal(&self) -> &str {
         match self {
             Self::AtlassianApiToken { email, .. } => email,
             Self::BitbucketAppPassword { username, .. } => username,
+            Self::Bearer { .. } => "bearer",
         }
     }
 }

@@ -1,8 +1,8 @@
-//! Vendor abstraction for Atlassian product APIs.
+//! Vendor abstraction for proxied REST APIs.
 //!
 //! This crate exposes generic HTTP wrapper tools (GET/POST/PUT/PATCH/DELETE)
-//! over multiple Atlassian REST APIs that share auth, transport, and output
-//! conventions but differ in:
+//! over multiple REST APIs — the three Atlassian products plus Zoom — that
+//! share transport and output conventions but differ in:
 //!
 //! - **Base URL** — fixed for Bitbucket, derived from `ATLASSIAN_SITE_NAME`
 //!   for Jira, etc.
@@ -28,6 +28,7 @@
 pub mod bitbucket;
 pub mod confluence;
 pub mod jira;
+pub mod zoom;
 
 use reqwest::StatusCode;
 

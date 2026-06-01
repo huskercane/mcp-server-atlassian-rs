@@ -125,7 +125,35 @@ pub async fn handle_request(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
+    // Atlassian credential resolution (Basic). Vendors with a different auth
+    // lifecycle (e.g. Zoom's OAuth bearer) resolve their own credentials and
+    // call [`dispatch_with_creds`] directly.
     let creds = Credentials::require_for_async(ctx.config, ctx.vendor.name()).await?;
+    dispatch_with_creds(ctx, &creds, method, path, query_params, body, jq, output_format).await
+}
+
+/// Dispatch a request with caller-supplied credentials. Factored out of
+/// [`handle_request`] so a vendor that owns its own credential lifecycle can
+/// inject a resolved [`Credentials`] (e.g. a [`Credentials::Bearer`] minted by
+/// Zoom's token provider) without going through the shared Atlassian resolver.
+///
+/// Everything downstream of auth — path normalisation, query encoding,
+/// transport dispatch, vendor error classification, and output rendering — is
+/// identical across vendors and lives here.
+// Mirrors `handle_request`'s parameter list (already at the 7-arg limit) plus
+// the injected `creds`; bundling them into a struct would add churn without
+// improving the call sites.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_with_creds(
+    ctx: &HandleContext<'_>,
+    creds: &Credentials,
+    method: HttpMethod,
+    path: &str,
+    query_params: Option<&QueryParams>,
+    body: Option<Value>,
+    jq: Option<&str>,
+    output_format: OutputFormat,
+) -> Result<ControllerResponse, McpError> {
     let normalized = normalize_and_append(ctx.vendor, path, query_params);
     debug!(
         %normalized,
@@ -140,7 +168,7 @@ pub async fn handle_request(
         ..RequestOptions::default()
     };
     let response: TransportResponse =
-        fetch(ctx.client, ctx.vendor, &creds, ctx.config, &normalized, opts).await?;
+        fetch(ctx.client, ctx.vendor, creds, ctx.config, &normalized, opts).await?;
 
     Ok(render_response(&response, jq, output_format))
 }
