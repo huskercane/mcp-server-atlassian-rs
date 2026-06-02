@@ -31,7 +31,7 @@ pub use crate::vendor::bitbucket::error as bitbucket_error;
 
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderValue};
+use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
 use tracing::debug;
@@ -39,9 +39,7 @@ use tracing::debug;
 use crate::auth::Credentials;
 use crate::config::Config;
 use crate::constants::{data_limits::MAX_RESPONSE_SIZE, network_timeouts::DEFAULT_REQUEST};
-use crate::error::{
-    McpError, OriginalError, api_error, auth_invalid, unexpected,
-};
+use crate::error::{McpError, OriginalError, api_error, auth_invalid, unexpected};
 use crate::vendor::Vendor;
 use crate::vendor::bitbucket::BitbucketVendor;
 
@@ -108,7 +106,11 @@ pub enum ResponseBody {
 
 impl ResponseBody {
     pub fn as_json(&self) -> Option<&Value> {
-        if let Self::Json(v) = self { Some(v) } else { None }
+        if let Self::Json(v) = self {
+            Some(v)
+        } else {
+            None
+        }
     }
 
     pub fn as_text(&self) -> Option<&str> {
@@ -140,11 +142,19 @@ pub async fn fetch(
     let url = normalize_url_with_base(&base, path);
     let method = options.method.unwrap_or(HttpMethod::Get);
 
-    let auth_header = validate_auth(credentials)?;
+    let (auth_name, auth_header) = validate_auth(credentials)?;
     let timeout = resolve_timeout(config, options.timeout);
 
     let request_body_for_log = options.body.clone();
-    let req = build_request(client, method, &url, &auth_header, &options, timeout);
+    let req = build_request(
+        client,
+        method,
+        &url,
+        &auth_name,
+        &auth_header,
+        &options,
+        timeout,
+    );
 
     debug!(
         %url,
@@ -166,6 +176,17 @@ pub async fn fetch(
     }
 
     let body = classify_body(response).await?;
+
+    // Some APIs (notably Slack's Web API) return `200 OK` with an
+    // application-level error envelope in the body (`{"ok": false, ...}`). Give
+    // the vendor a chance to reclassify such a "success" as a typed error
+    // before we treat the body as data or persist it. No-op for vendors whose
+    // HTTP status already reflects failure.
+    if let ResponseBody::Json(value) = &body
+        && let Some(err) = vendor.classify_success_json(value)
+    {
+        return Err(err);
+    }
 
     let raw_path = if let ResponseBody::Json(value) = &body {
         raw_response::save(
@@ -241,11 +262,16 @@ fn normalize_url_with_base(base: &str, path: &str) -> String {
     format!("{base}{suffix}")
 }
 
-fn validate_auth(credentials: &Credentials) -> Result<HeaderValue, McpError> {
-    // Scheme-agnostic: `auth_header()` emits Basic for the Atlassian
-    // variants and Bearer for Zoom's resolved token.
+fn validate_auth(credentials: &Credentials) -> Result<(HeaderName, HeaderValue), McpError> {
+    // Scheme-agnostic: `auth_header()` emits Basic for the Atlassian variants,
+    // Bearer for Zoom's resolved token, and a bare key for a custom-header API
+    // key. `auth_header_name()` picks the header that value rides in —
+    // `Authorization` for everything except `ApiKeyHeader`.
+    let name = credentials.auth_header_name()?;
     let raw = credentials.auth_header();
-    HeaderValue::from_str(&raw).map_err(|_| auth_invalid("Invalid authentication header"))
+    let value =
+        HeaderValue::from_str(&raw).map_err(|_| auth_invalid("Invalid authentication header"))?;
+    Ok((name, value))
 }
 
 fn resolve_timeout(config: &Config, override_timeout: Option<Duration>) -> Duration {
@@ -267,6 +293,7 @@ fn build_request(
     client: &Client,
     method: HttpMethod,
     url: &str,
+    auth_name: &HeaderName,
     auth: &HeaderValue,
     options: &RequestOptions,
     timeout: Duration,
@@ -274,7 +301,7 @@ fn build_request(
     let mut req = client
         .request(method.as_reqwest_method(), url)
         .timeout(timeout)
-        .header(AUTHORIZATION, auth.clone())
+        .header(auth_name.clone(), auth.clone())
         .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
         .header(ACCEPT, HeaderValue::from_static("application/json"));
 
@@ -362,7 +389,10 @@ fn map_reqwest_error(err: &reqwest::Error, url: &str) -> McpError {
             Some(OriginalError::String(err.to_string())),
         );
     }
-    unexpected(err.to_string(), Some(OriginalError::String(err.to_string())))
+    unexpected(
+        err.to_string(),
+        Some(OriginalError::String(err.to_string())),
+    )
 }
 
 /// Exposed for callers that just want a well-formed auth header (e.g. tests

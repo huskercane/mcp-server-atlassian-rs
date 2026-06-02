@@ -496,9 +496,7 @@ pub fn migrate_with(
                     keychain_fp = fingerprint(existing),
                     "--force: overwriting existing keychain entry"
                 );
-                if let Err(e) =
-                    backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value)
-                {
+                if let Err(e) = backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value) {
                     rollback(&applied, backend);
                     return Err(unexpected(format!("keychain set failed: {e}"), None));
                 }
@@ -521,9 +519,7 @@ pub fn migrate_with(
             }
             (_, PlannedKind::WriteFromPlaintext) => {
                 // Either no prior or non-conflict; do the write.
-                if let Err(e) =
-                    backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value)
-                {
+                if let Err(e) = backend.set(plan.kind, &plan.vendor, &plan.principal, &plan.value) {
                     rollback(&applied, backend);
                     return Err(unexpected(format!("keychain set failed: {e}"), None));
                 }
@@ -652,7 +648,10 @@ fn print_migrate_summary(outcome: &MigrateOutcome) {
             outcome.migrated.len()
         );
         for rec in &outcome.migrated {
-            println!("  - {} for vendor {} principal {}", rec.kind, rec.vendor, rec.principal);
+            println!(
+                "  - {} for vendor {} principal {}",
+                rec.kind, rec.vendor, rec.principal
+            );
         }
     }
     for skip in &outcome.skipped {
@@ -832,16 +831,14 @@ fn plan_candidate(
             kind: candidate.kind,
             vendor: canonical.to_owned(),
         })),
-        (Some(principal), Some("keychain")) => {
-            Ok(CandidateOutcome::Migrate(PlannedAction {
-                kind: candidate.kind,
-                vendor: canonical.to_owned(),
-                principal: principal.to_owned(),
-                secret_key: candidate.secret_key,
-                value: String::new(),
-                action: PlannedKind::VerifySentinel,
-            }))
-        }
+        (Some(principal), Some("keychain")) => Ok(CandidateOutcome::Migrate(PlannedAction {
+            kind: candidate.kind,
+            vendor: canonical.to_owned(),
+            principal: principal.to_owned(),
+            secret_key: candidate.secret_key,
+            value: String::new(),
+            action: PlannedKind::VerifySentinel,
+        })),
         (Some(principal), Some(secret)) => Ok(CandidateOutcome::Migrate(PlannedAction {
             kind: candidate.kind,
             vendor: canonical.to_owned(),
@@ -883,7 +880,10 @@ fn rewrite_vendor_aliases_to_sentinel(json: &mut Value, secret_key: &str, alias_
         if let Some(Value::String(s)) = env.get(secret_key)
             && !s.is_empty()
         {
-            env.insert(secret_key.to_string(), Value::String("keychain".to_string()));
+            env.insert(
+                secret_key.to_string(),
+                Value::String("keychain".to_string()),
+            );
         }
     }
 }
@@ -901,10 +901,7 @@ fn verify_set(backend: &dyn KeychainBackend, plan: &PlannedAction) -> Result<(),
              backend appears to be a stub",
             None,
         )),
-        Err(e) => Err(unexpected(
-            format!("keychain readback failed: {e}"),
-            None,
-        )),
+        Err(e) => Err(unexpected(format!("keychain readback failed: {e}"), None)),
     }
 }
 

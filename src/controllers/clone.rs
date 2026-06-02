@@ -119,10 +119,7 @@ async fn resolve_workspace(
 
 fn validate_slug(slug: &str) -> Result<(), McpError> {
     if slug.is_empty() {
-        return Err(unexpected(
-            "Repository slug is required".to_owned(),
-            None,
-        ));
+        return Err(unexpected("Repository slug is required".to_owned(), None));
     }
     if !slug_is_valid(slug) {
         return Err(unexpected(

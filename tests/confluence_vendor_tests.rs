@@ -79,8 +79,7 @@ fn base_url_falls_back_to_jira_section_when_confluence_section_absent() {
         .unwrap(),
     )
     .unwrap();
-    let config =
-        Config::load_from_sources(Some(&global_path), None, &HashMap::new());
+    let config = Config::load_from_sources(Some(&global_path), None, &HashMap::new());
 
     let vendor = ConfluenceVendor::new();
     assert_eq!(
@@ -105,8 +104,7 @@ fn base_url_does_not_fall_back_to_bitbucket_section() {
         .unwrap(),
     )
     .unwrap();
-    let config =
-        Config::load_from_sources(Some(&global_path), None, &HashMap::new());
+    let config = Config::load_from_sources(Some(&global_path), None, &HashMap::new());
 
     let vendor = ConfluenceVendor::new();
     let err = vendor.base_url(&config).unwrap_err();
@@ -279,7 +277,10 @@ fn parse_v2_skips_duplicate_detail_when_already_in_title() {
     // that already contains the detail string must not be doubled-up.
     let body = r#"{"title":"Bad Request: foo is required","detail":"foo is required"}"#;
     let parsed = parse_error_body(body);
-    assert_eq!(parsed.message.as_deref(), Some("Bad Request: foo is required"));
+    assert_eq!(
+        parsed.message.as_deref(),
+        Some("Bad Request: foo is required")
+    );
 }
 
 #[test]

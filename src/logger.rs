@@ -262,7 +262,9 @@ fn sweep_retention(
             continue;
         };
         if !name.starts_with(&prefix)
-            || path.extension().is_none_or(|e| !e.eq_ignore_ascii_case("log"))
+            || path
+                .extension()
+                .is_none_or(|e| !e.eq_ignore_ascii_case("log"))
         {
             continue;
         }
@@ -275,15 +277,15 @@ fn sweep_retention(
     }
 
     // Age pass.
-    candidates.retain(|(path, modified, _size)| {
-        match now.duration_since(*modified) {
+    candidates.retain(
+        |(path, modified, _size)| match now.duration_since(*modified) {
             Ok(age) if age > max_age => {
                 let _ = std::fs::remove_file(path);
                 false
             }
             _ => true,
-        }
-    });
+        },
+    );
 
     // Size pass: oldest first. The kept file counts toward the cap so that
     // `max_total_bytes` reflects total dir size, not just deletable bytes.
@@ -405,7 +407,10 @@ mod tests {
         let s = "token=ATATT3xFfGF0RH9I_DgF2g4zYZ_wbQkXe-Wk0N2c0vg0XKHOESubWbHmhPE6Fifsy=08F068BE";
         let out = r.redact(s);
         assert!(!out.contains("ATATT3xFfGF0"), "token leaked: {out}");
-        assert!(out.contains(REDACTION_PLACEHOLDER), "placeholder missing: {out}");
+        assert!(
+            out.contains(REDACTION_PLACEHOLDER),
+            "placeholder missing: {out}"
+        );
     }
 
     #[test]
@@ -463,9 +468,7 @@ mod tests {
                 inner: &mut buf,
                 redactor: r,
             };
-            let _ = w.write_all(
-                b"line with ATATT3xFfGF0abc-DEF=AAAA1111 trailing\n",
-            );
+            let _ = w.write_all(b"line with ATATT3xFfGF0abc-DEF=AAAA1111 trailing\n");
         }
         let out = String::from_utf8(buf).unwrap();
         assert!(!out.contains("ATATT3xFfGF0"), "leaked: {out}");
@@ -489,22 +492,19 @@ mod tests {
         let old = now - days(8);
         let young = now - days(2);
 
-        let kept = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
+        let kept = dir
+            .path()
+            .join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
         let stale = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.old.log"));
-        let recent = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.recent.log"));
+        let recent = dir
+            .path()
+            .join(format!("{UNSCOPED_PACKAGE_NAME}.recent.log"));
 
         touch(&kept, now, 10);
         touch(&stale, old, 10);
         touch(&recent, young, 10);
 
-        sweep_retention(
-            dir.path(),
-            &kept,
-            days(7),
-            10 * 1024 * 1024,
-            now,
-        )
-        .unwrap();
+        sweep_retention(dir.path(), &kept, days(7), 10 * 1024 * 1024, now).unwrap();
 
         assert!(kept.exists(), "current session file deleted");
         assert!(!stale.exists(), "stale file not deleted");
@@ -528,14 +528,7 @@ mod tests {
         touch(&newest, now - one_day, 100);
 
         // 4 files * 100B = 400B; cap at 250B → must drop the two oldest.
-        sweep_retention(
-            dir.path(),
-            &kept,
-            days(7),
-            250,
-            now,
-        )
-        .unwrap();
+        sweep_retention(dir.path(), &kept, days(7), 250, now).unwrap();
 
         assert!(kept.exists(), "current session file deleted");
         assert!(!oldest.exists(), "oldest not pruned for size");
@@ -549,22 +542,19 @@ mod tests {
         let now = SystemTime::now();
         let old = now - days(30);
 
-        let kept = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
+        let kept = dir
+            .path()
+            .join(format!("{UNSCOPED_PACKAGE_NAME}.session.log"));
         let unrelated = dir.path().join("some-other-tool.log");
-        let no_ext = dir.path().join(format!("{UNSCOPED_PACKAGE_NAME}.session.bak"));
+        let no_ext = dir
+            .path()
+            .join(format!("{UNSCOPED_PACKAGE_NAME}.session.bak"));
 
         touch(&kept, now, 10);
         touch(&unrelated, old, 10);
         touch(&no_ext, old, 10);
 
-        sweep_retention(
-            dir.path(),
-            &kept,
-            days(7),
-            10 * 1024 * 1024,
-            now,
-        )
-        .unwrap();
+        sweep_retention(dir.path(), &kept, days(7), 10 * 1024 * 1024, now).unwrap();
 
         assert!(unrelated.exists(), "unrelated file deleted");
         assert!(no_ext.exists(), "non-.log file deleted");

@@ -89,7 +89,10 @@ impl ReapingSessionManager {
     }
 
     async fn bump(&self, id: &SessionId) {
-        self.last_seen.write().await.insert(id.clone(), Instant::now());
+        self.last_seen
+            .write()
+            .await
+            .insert(id.clone(), Instant::now());
     }
 
     async fn forget(&self, id: &SessionId) {

@@ -3,13 +3,14 @@
 
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::tools::AtlassianServer;
-use mcp_server_atlassian::tools::args::{
-    OutputFormatArg, QueryParams, ReadArgs, WriteArgs,
-};
+use mcp_server_atlassian::tools::args::{OutputFormatArg, QueryParams, ReadArgs, WriteArgs};
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
+use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
 use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
+use mcp_server_atlassian::vendor::postman::PostmanVendor;
+use mcp_server_atlassian::vendor::slack::SlackVendor;
 use mcp_server_atlassian::vendor::zoom::ZoomVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
@@ -24,6 +25,9 @@ fn server_info_reports_expected_identity() {
         JiraVendor::new(),
         ConfluenceVendor::new(),
         ZoomVendor::new(),
+        CircleCiVendor::new(),
+        SlackVendor::new(),
+        PostmanVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(
@@ -47,7 +51,10 @@ fn read_args_uses_camel_case_json() {
     }))
     .unwrap();
     assert_eq!(args.path, "/workspaces");
-    assert_eq!(args.query_params.as_ref().unwrap().get("pagelen").unwrap(), "25");
+    assert_eq!(
+        args.query_params.as_ref().unwrap().get("pagelen").unwrap(),
+        "25"
+    );
     assert_eq!(args.jq.as_deref(), Some("values[*].slug"));
     assert_eq!(args.output_format, Some(OutputFormatArg::Json));
 }

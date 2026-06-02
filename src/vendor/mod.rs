@@ -1,8 +1,8 @@
 //! Vendor abstraction for proxied REST APIs.
 //!
 //! This crate exposes generic HTTP wrapper tools (GET/POST/PUT/PATCH/DELETE)
-//! over multiple REST APIs — the three Atlassian products plus Zoom — that
-//! share transport and output conventions but differ in:
+//! over multiple REST APIs — the three Atlassian products plus Zoom and
+//! `CircleCI` — that share transport and output conventions but differ in:
 //!
 //! - **Base URL** — fixed for Bitbucket, derived from `ATLASSIAN_SITE_NAME`
 //!   for Jira, etc.
@@ -26,8 +26,11 @@
 //! error at tool-call time rather than crashing the process at boot.
 
 pub mod bitbucket;
+pub mod circleci;
 pub mod confluence;
 pub mod jira;
+pub mod postman;
+pub mod slack;
 pub mod zoom;
 
 use reqwest::StatusCode;
@@ -56,4 +59,18 @@ pub trait Vendor: Send + Sync {
     /// Convert a non-2xx response (status + body text) into the typed
     /// [`McpError`] for this vendor's error envelope shape(s).
     fn classify_error(&self, status: StatusCode, body: &str) -> McpError;
+
+    /// Inspect a **successful** (2xx) JSON body for an application-level error
+    /// the HTTP status did not signal. Slack's Web API is the motivating case:
+    /// it returns `200 OK` with `{"ok": false, "error": "..."}` for logical
+    /// failures, so the status-based [`classify_error`](Vendor::classify_error)
+    /// never fires. Returning `Some(err)` reclassifies the response as that
+    /// error; the transport then surfaces it instead of the body.
+    ///
+    /// The default is a no-op: a 2xx status is taken at face value. Only called
+    /// for JSON bodies (text / empty / `204` responses skip it). Implementors
+    /// must keep it pure and cheap — it runs on every successful JSON response.
+    fn classify_success_json(&self, _value: &serde_json::Value) -> Option<McpError> {
+        None
+    }
 }

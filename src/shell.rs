@@ -39,11 +39,7 @@ impl ShellOutput {
 /// - `file`: path or command name to execute (looked up on `PATH`).
 /// - `args`: program arguments passed verbatim; no shell expansion.
 /// - `operation`: short human-readable description used in error messages.
-pub async fn execute(
-    file: &str,
-    args: &[&str],
-    operation: &str,
-) -> Result<ShellOutput, McpError> {
+pub async fn execute(file: &str, args: &[&str], operation: &str) -> Result<ShellOutput, McpError> {
     execute_with_timeout(file, args, operation, DEFAULT_TIMEOUT).await
 }
 
@@ -72,12 +68,8 @@ pub async fn execute_with_timeout(
         }
     };
 
-    let output = io_result.map_err(|err| {
-        unexpected(
-            format!("Failed to {operation}: {err}"),
-            None,
-        )
-    })?;
+    let output =
+        io_result.map_err(|err| unexpected(format!("Failed to {operation}: {err}"), None))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
@@ -92,14 +84,11 @@ pub async fn execute_with_timeout(
     } else if !stdout.trim().is_empty() {
         stdout.trim().to_owned()
     } else {
-        output
-            .status
-            .code()
-            .map_or_else(|| "terminated by signal".to_owned(), |c| format!("exit code {c}"))
+        output.status.code().map_or_else(
+            || "terminated by signal".to_owned(),
+            |c| format!("exit code {c}"),
+        )
     };
 
-    Err(unexpected(
-        format!("Failed to {operation}: {detail}"),
-        None,
-    ))
+    Err(unexpected(format!("Failed to {operation}: {detail}"), None))
 }

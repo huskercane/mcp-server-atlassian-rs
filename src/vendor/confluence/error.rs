@@ -34,7 +34,6 @@ use std::fmt::Write as _;
 use reqwest::StatusCode;
 use serde_json::Value;
 
-
 use crate::error::{McpError, OriginalError, api_error, auth_invalid};
 
 /// Map a non-ok HTTP status + body to the correct [`McpError`] factory,

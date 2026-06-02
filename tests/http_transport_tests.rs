@@ -160,7 +160,9 @@ async fn body_over_1mb_is_rejected_with_413() {
     let client = reqwest::Client::new();
     // 1 MB + 1 byte payload (still valid JSON).
     let padding: String = "a".repeat(1_000_002);
-    let body = format!("{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":{{\"pad\":\"{padding}\"}}}}");
+    let body = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"x\",\"params\":{{\"pad\":\"{padding}\"}}}}"
+    );
     // The server enforces the limit mid-stream and closes the connection.
     // On Linux/macOS reqwest finishes reading the 413 response; on Windows
     // the RST arrives first and surfaces as a connection-aborted error.
@@ -237,7 +239,11 @@ async fn cors_preflight_mirrors_origin() {
         .send()
         .await
         .expect("OPTIONS /mcp");
-    assert!(resp.status().is_success(), "preflight status {}", resp.status());
+    assert!(
+        resp.status().is_success(),
+        "preflight status {}",
+        resp.status()
+    );
     let allow_origin = resp
         .headers()
         .get("access-control-allow-origin")

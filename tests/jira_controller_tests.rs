@@ -42,7 +42,10 @@ async fn get_pipeline_passes_jira_path_through_unchanged() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/rest/api/3/myself"))
-        .and(header("authorization", "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r"))
+        .and(header(
+            "authorization",
+            "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r",
+        ))
         .respond_with(
             ResponseTemplate::new(200)
                 .set_body_json(json!({"accountId": "abc-123", "displayName": "Alice"})),

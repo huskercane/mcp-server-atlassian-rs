@@ -8,9 +8,7 @@ use std::time::Duration;
 use mcp_server_atlassian::auth::Credentials;
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::transport::{
-    HttpMethod, RequestOptions, ResponseBody, build_client,
-};
+use mcp_server_atlassian::transport::{HttpMethod, RequestOptions, ResponseBody, build_client};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
@@ -23,10 +21,8 @@ async fn call_mock(
     mock_server: &MockServer,
     path_suffix: &str,
     options: RequestOptions,
-) -> Result<
-    mcp_server_atlassian::transport::TransportResponse,
-    mcp_server_atlassian::error::McpError,
-> {
+) -> Result<mcp_server_atlassian::transport::TransportResponse, mcp_server_atlassian::error::McpError>
+{
     let client = build_client().unwrap();
     let creds = Credentials::AtlassianApiToken {
         email: "alice@example.com".into(),
@@ -37,15 +33,7 @@ async fn call_mock(
     // Swap out the base host by using the full URL via path=…; the transport
     // normalises leading '/' only, it doesn't override the host. We use the
     // override_url helper below.
-    override_url::fetch(
-        mock_server,
-        &client,
-        &creds,
-        &config,
-        path_suffix,
-        options,
-    )
-    .await
+    override_url::fetch(mock_server, &client, &creds, &config, path_suffix, options).await
 }
 
 /// Thin shim that replaces the hard-coded `api.bitbucket.org` base URL with
@@ -79,13 +67,14 @@ async fn get_json_response_is_classified_and_persisted() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/workspaces"))
-        .and(header("authorization", "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r"))
+        .and(header(
+            "authorization",
+            "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r",
+        ))
         .and(header("accept", "application/json"))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(json!({
-                "values": [{"slug":"acme"}]
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "values": [{"slug":"acme"}]
+        })))
         .mount(&server)
         .await;
 
@@ -247,12 +236,10 @@ async fn auth_failure_maps_to_auth_invalid() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/2.0/private"))
-        .respond_with(
-            ResponseTemplate::new(401).set_body_json(json!({
-                "type":"error",
-                "error":{"message":"bad credentials"}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(401).set_body_json(json!({
+            "type":"error",
+            "error":{"message":"bad credentials"}
+        })))
         .mount(&server)
         .await;
 

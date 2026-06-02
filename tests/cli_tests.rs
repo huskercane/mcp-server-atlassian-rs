@@ -259,27 +259,82 @@ fn conf_does_not_expose_clone_subcommand() {
 #[test]
 fn output_format_json_accepted_on_bb_and_jira_verbs() {
     for verb_args in [
-        vec!["bb", "get", "--path", "/workspaces", "--output-format", "json"],
-        vec!["bb", "delete", "--path", "/workspaces/x", "--output-format", "json"],
         vec![
-            "bb", "post", "--path", "/x", "--body", "{}", "--output-format", "json",
-        ],
-        vec!["jira", "get", "--path", "/rest/api/3/myself", "--output-format", "json"],
-        vec![
-            "jira", "delete", "--path", "/rest/api/3/issue/X", "--output-format", "json",
-        ],
-        vec![
-            "jira", "post", "--path", "/rest/api/3/issue", "--body", "{}", "--output-format",
+            "bb",
+            "get",
+            "--path",
+            "/workspaces",
+            "--output-format",
             "json",
         ],
         vec![
-            "conf", "get", "--path", "/wiki/api/v2/spaces", "--output-format", "json",
+            "bb",
+            "delete",
+            "--path",
+            "/workspaces/x",
+            "--output-format",
+            "json",
         ],
         vec![
-            "conf", "delete", "--path", "/wiki/api/v2/pages/1", "--output-format", "json",
+            "bb",
+            "post",
+            "--path",
+            "/x",
+            "--body",
+            "{}",
+            "--output-format",
+            "json",
         ],
         vec![
-            "conf", "post", "--path", "/wiki/api/v2/pages", "--body", "{}", "--output-format",
+            "jira",
+            "get",
+            "--path",
+            "/rest/api/3/myself",
+            "--output-format",
+            "json",
+        ],
+        vec![
+            "jira",
+            "delete",
+            "--path",
+            "/rest/api/3/issue/X",
+            "--output-format",
+            "json",
+        ],
+        vec![
+            "jira",
+            "post",
+            "--path",
+            "/rest/api/3/issue",
+            "--body",
+            "{}",
+            "--output-format",
+            "json",
+        ],
+        vec![
+            "conf",
+            "get",
+            "--path",
+            "/wiki/api/v2/spaces",
+            "--output-format",
+            "json",
+        ],
+        vec![
+            "conf",
+            "delete",
+            "--path",
+            "/wiki/api/v2/pages/1",
+            "--output-format",
+            "json",
+        ],
+        vec![
+            "conf",
+            "post",
+            "--path",
+            "/wiki/api/v2/pages",
+            "--body",
+            "{}",
+            "--output-format",
             "json",
         ],
     ] {
@@ -312,9 +367,7 @@ fn output_format_rejects_unknown_value() {
     .unwrap_err();
     let msg = err.render().to_string().to_lowercase();
     assert!(
-        msg.contains("xml")
-            || msg.contains("invalid value")
-            || msg.contains("possible values"),
+        msg.contains("xml") || msg.contains("invalid value") || msg.contains("possible values"),
         "expected unknown value error; got: {msg}"
     );
 }

@@ -9,7 +9,9 @@
 use clap::Subcommand;
 
 use crate::cli::api::{ReadOpts, WriteOpts, parse_object, parse_query_params};
-use crate::controllers::api::{BitbucketContext, ControllerResponse, HandleContext, handle_request};
+use crate::controllers::api::{
+    BitbucketContext, ControllerResponse, HandleContext, handle_request,
+};
 use crate::controllers::handle_clone;
 use crate::error::McpError;
 use crate::tools::args::CloneArgs;

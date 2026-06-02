@@ -129,10 +129,7 @@ fn basic_auth_header_atlassian() {
         email: "alice@example.com".into(),
         token: "s3cret".into(),
     };
-    let expected = format!(
-        "Basic {}",
-        STANDARD.encode(b"alice@example.com:s3cret")
-    );
+    let expected = format!("Basic {}", STANDARD.encode(b"alice@example.com:s3cret"));
     assert_eq!(creds.basic_auth_header(), expected);
 }
 
@@ -184,10 +181,17 @@ fn keychain_sentinel_hit_expands_to_real_token() {
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, V, "alice@example.com", "real-token-from-os")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        V,
+        "alice@example.com",
+        "real-token-from-os",
+    )
+    .unwrap();
 
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -207,10 +211,20 @@ fn keychain_sentinel_per_vendor_isolation() {
         ("ATLASSIAN_API_TOKEN", "keychain"),
     ]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "bb-tok")
-        .unwrap();
-    kc.set(SecretKind::ApiToken, VENDOR_JIRA, "alice@example.com", "jira-tok")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "bb-tok",
+    )
+    .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_JIRA,
+        "alice@example.com",
+        "jira-tok",
+    )
+    .unwrap();
 
     let bb = Credentials::resolve_with_for(&cfg, &kc, VENDOR_BITBUCKET)
         .unwrap()
@@ -257,10 +271,17 @@ fn keychain_sentinel_with_missing_principal_is_hard_error() {
 fn keychain_implicit_fallback_hit_expands_when_secret_absent() {
     let cfg = cfg(&[("ATLASSIAN_USER_EMAIL", "alice@example.com")]);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, V, "alice@example.com", "from-implicit")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        V,
+        "alice@example.com",
+        "from-implicit",
+    )
+    .unwrap();
 
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::AtlassianApiToken {
@@ -279,7 +300,9 @@ fn keychain_implicit_miss_falls_through_to_next_kind() {
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-secret"),
     ]);
     let kc = empty_kc();
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::BitbucketAppPassword {
@@ -310,7 +333,9 @@ fn keychain_sentinel_works_for_app_password_kind() {
     kc.set(SecretKind::AppPassword, V, "bobby", "real-app-password")
         .unwrap();
 
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     assert_eq!(
         creds,
         Credentials::BitbucketAppPassword {
@@ -330,7 +355,9 @@ fn plaintext_secret_takes_priority_over_keychain_lookup() {
     kc.set(SecretKind::ApiToken, V, "alice@example.com", "ignored")
         .unwrap();
 
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     match creds {
         Credentials::AtlassianApiToken { token, .. } => {
             assert_eq!(token, "plaintext-from-config");
@@ -350,7 +377,9 @@ fn empty_plaintext_secret_falls_through() {
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-pass"),
     ]);
     let kc = empty_kc();
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
         other => {
@@ -380,7 +409,9 @@ fn keychain_backend_error_on_implicit_falls_through() {
         ("ATLASSIAN_BITBUCKET_APP_PASSWORD", "bb-pass"),
     ]);
     let kc = InMemoryKeychain::with_failure("kc down");
-    let creds = Credentials::resolve_with_for(&cfg, &kc, V).unwrap().unwrap();
+    let creds = Credentials::resolve_with_for(&cfg, &kc, V)
+        .unwrap()
+        .unwrap();
     match creds {
         Credentials::BitbucketAppPassword { .. } => {}
         other => {
@@ -398,7 +429,8 @@ fn require_propagates_keychain_specific_errors() {
     let kc = empty_kc();
     let err = Credentials::resolve_with_for(&cfg, &kc, V).unwrap_err();
     assert!(
-        !err.message.contains("Authentication credentials are missing"),
+        !err.message
+            .contains("Authentication credentials are missing"),
         "got generic message instead of keychain-specific: {}",
         err.message
     );
@@ -425,17 +457,12 @@ fn implicit_failure_breadcrumb_dedupes_per_triple() {
         fn delete(&self, _: SecretKind, _: &str, _: &str) -> KeychainResult<()> {
             unreachable!()
         }
-        fn note_implicit_failure(
-            &self,
-            kind: SecretKind,
-            vendor: &str,
-            principal: &str,
-        ) -> bool {
-            let inserted = self
-                .seen
-                .lock()
-                .unwrap()
-                .insert((kind, vendor.to_owned(), principal.to_owned()));
+        fn note_implicit_failure(&self, kind: SecretKind, vendor: &str, principal: &str) -> bool {
+            let inserted =
+                self.seen
+                    .lock()
+                    .unwrap()
+                    .insert((kind, vendor.to_owned(), principal.to_owned()));
             if inserted {
                 *self.warn_calls.lock().unwrap() += 1;
             }
@@ -455,7 +482,10 @@ fn implicit_failure_breadcrumb_dedupes_per_triple() {
     let _ = Credentials::resolve_with_for(&cfg, &backend, V);
 
     let warns = *backend.warn_calls.lock().unwrap();
-    assert_eq!(warns, 1, "expected exactly one warn-worthy event, got {warns}");
+    assert_eq!(
+        warns, 1,
+        "expected exactly one warn-worthy event, got {warns}"
+    );
 }
 
 #[tokio::test]

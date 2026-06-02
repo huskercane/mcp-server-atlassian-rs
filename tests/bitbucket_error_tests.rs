@@ -2,8 +2,7 @@
 //! classifier and, at the same time, the body parser used by transport.
 
 use mcp_server_atlassian::error::{
-    DetectedError, ErrorCode, ErrorContext, OriginalError, api_error, detect_error_type,
-    unexpected,
+    DetectedError, ErrorCode, ErrorContext, OriginalError, api_error, detect_error_type, unexpected,
 };
 use mcp_server_atlassian::transport::bitbucket_error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
@@ -189,7 +188,10 @@ fn parse_body_handles_non_json() {
 
 #[test]
 fn classify_401_produces_auth_invalid() {
-    let err = classify(StatusCode::UNAUTHORIZED, r#"{"error":{"message":"bad cred"}}"#);
+    let err = classify(
+        StatusCode::UNAUTHORIZED,
+        r#"{"error":{"message":"bad cred"}}"#,
+    );
     assert_eq!(err.status_code, Some(401));
     assert!(err.message.contains("Authentication failed"));
     assert!(err.message.contains("bad cred"));

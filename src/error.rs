@@ -110,9 +110,7 @@ impl McpError {
     /// Matches TS constructor logic in `McpError`.
     pub fn mcp_code(&self) -> McpErrorCode {
         match self.kind {
-            ErrorKind::AuthMissing | ErrorKind::AuthInvalid => {
-                McpErrorCode::AuthenticationRequired
-            }
+            ErrorKind::AuthMissing | ErrorKind::AuthInvalid => McpErrorCode::AuthenticationRequired,
             ErrorKind::ApiError => match self.status_code {
                 Some(404) => McpErrorCode::NotFound,
                 Some(429) => McpErrorCode::RateLimitExceeded,
@@ -352,7 +350,10 @@ pub fn format_cli_error(err: &McpError) -> String {
         lines.push("```".to_owned());
     }
 
-    if std::env::var("DEBUG").ok().is_none_or(|v| !v.contains("mcp:")) {
+    if std::env::var("DEBUG")
+        .ok()
+        .is_none_or(|v| !v.contains("mcp:"))
+    {
         lines.push(
             "For more detailed error information, run with DEBUG=mcp:* environment variable."
                 .to_owned(),
@@ -382,7 +383,10 @@ fn extract_vendor_error(value: &Value) -> Option<Vec<String>> {
     None
 }
 
-pub fn format_error_for_mcp_resource(err: &McpError, uri: impl Into<String>) -> ResourceErrorResponse {
+pub fn format_error_for_mcp_resource(
+    err: &McpError,
+    uri: impl Into<String>,
+) -> ResourceErrorResponse {
     ResourceErrorResponse {
         contents: vec![ResourceContent {
             uri: uri.into(),
@@ -456,7 +460,9 @@ pub fn detect_error_type(err: &McpError, _ctx: &ErrorContext) -> DetectedError {
 
     // Pull request ID validation errors
     if err.message.contains("Invalid pull request ID")
-        || err.message.contains("Pull request ID must be a positive integer")
+        || err
+            .message
+            .contains("Pull request ID must be a positive integer")
     {
         return DetectedError {
             code: ErrorCode::ValidationError,

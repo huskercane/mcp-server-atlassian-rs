@@ -61,7 +61,9 @@ pub fn truncate_for_ai(content: &str, raw_response_path: Option<&Path>) -> Strin
         );
     }
 
-    out.push_str("- Consider refining your request with more specific filters or selecting fewer fields\n");
+    out.push_str(
+        "- Consider refining your request with more specific filters or selecting fewer fields\n",
+    );
     out.push_str("- For paginated data, use smaller page sizes or specific identifiers\n");
     out.push_str("- When searching, use more targeted queries to reduce result sets");
 

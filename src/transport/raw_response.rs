@@ -42,7 +42,14 @@ pub async fn save(
     let filename = generate_filename();
     let path = dir.join(filename);
 
-    let content = build_content(url, method, request_body, response_data, status_code, duration);
+    let content = build_content(
+        url,
+        method,
+        request_body,
+        response_data,
+        status_code,
+        duration,
+    );
 
     match fs::write(&path, content.as_bytes()).await {
         Ok(()) => {

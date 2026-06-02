@@ -30,14 +30,9 @@ async fn missing_binary_yields_error() {
 
 #[tokio::test]
 async fn timeout_kills_long_running_command() {
-    let err = execute_with_timeout(
-        "sleep",
-        &["10"],
-        "sleep test",
-        Duration::from_millis(50),
-    )
-    .await
-    .unwrap_err();
+    let err = execute_with_timeout("sleep", &["10"], "sleep test", Duration::from_millis(50))
+        .await
+        .unwrap_err();
     assert!(err.message.contains("timed out"));
 }
 

@@ -59,6 +59,24 @@ pub const VENDOR_CONFLUENCE: &str = "confluence";
 /// `ZOOM_CLIENT_SECRET`) and the server auto-renews the short-lived bearer.
 pub const VENDOR_ZOOM: &str = "zoom";
 
+/// Canonical vendor name for `CircleCI`. Like Zoom, `CircleCI` does not share
+/// the `ATLASSIAN_*` credential model: it authenticates with a single personal
+/// API token (`CIRCLECI_TOKEN`) sent as `Authorization: Bearer <token>` — the
+/// scheme `CircleCI`'s v2 API documents as recommended.
+pub const VENDOR_CIRCLECI: &str = "circleci";
+
+/// Canonical vendor name for Slack. Authenticates with a single bot/user OAuth
+/// token (`SLACK_TOKEN`, typically `xoxb-…`) sent as `Authorization: Bearer
+/// <token>` — the same carrier as Zoom/CircleCI. Slack's Web API is unusual in
+/// that logical failures arrive as `200 OK` with `{"ok": false, "error": …}`;
+/// that is handled in the vendor's success-body classifier, not here.
+pub const VENDOR_SLACK: &str = "slack";
+
+/// Canonical vendor name for Postman. Authenticates with an API key
+/// (`POSTMAN_API_KEY`) sent in the custom `X-API-Key` header rather than
+/// `Authorization` — see [`crate::auth::Credentials::ApiKeyHeader`].
+pub const VENDOR_POSTMAN: &str = "postman";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -299,10 +317,7 @@ fn load_dotenv(path: &Path) -> std::io::Result<HashMap<String, String>> {
 /// internal loader uses [`extract_all_vendor_sections`] instead. Exposed for
 /// tests; production code should prefer [`global::read_all_vendors`] via
 /// [`Config::load_from_sources`].
-pub fn extract_environments_for(
-    root: &Value,
-    package_name: &str,
-) -> HashMap<String, String> {
+pub fn extract_environments_for(root: &Value, package_name: &str) -> HashMap<String, String> {
     let keys = candidate_keys(package_name);
     for key in &keys {
         if let Some(env) = read_environments_at(root, key) {
@@ -416,16 +431,23 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "@aashari/mcp-server-atlassian-confluence".to_string(),
         "mcp-server-atlassian-confluence".to_string(),
     ];
-    let zoom_aliases = vec![
-        "zoom".to_string(),
-        "mcp-server-zoom".to_string(),
+    let zoom_aliases = vec!["zoom".to_string(), "mcp-server-zoom".to_string()];
+    let circleci_aliases = vec![
+        "circleci".to_string(),
+        "circle-ci".to_string(),
+        "mcp-server-circleci".to_string(),
     ];
+    let slack_aliases = vec!["slack".to_string(), "mcp-server-slack".to_string()];
+    let postman_aliases = vec!["postman".to_string(), "mcp-server-postman".to_string()];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
         (VENDOR_JIRA, jira_aliases),
         (VENDOR_CONFLUENCE, confluence_aliases),
         (VENDOR_ZOOM, zoom_aliases),
+        (VENDOR_CIRCLECI, circleci_aliases),
+        (VENDOR_SLACK, slack_aliases),
+        (VENDOR_POSTMAN, postman_aliases),
     ]
 }
 

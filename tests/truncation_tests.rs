@@ -61,5 +61,8 @@ fn truncates_at_newline_when_one_is_nearby() {
     let body = &out[..body_end];
     // The final line of the kept body must be a complete run of 'a's (i.e. the
     // cut happened at the newline, not mid-word).
-    assert!(body.ends_with(&"a".repeat(100)), "cut should align to newline");
+    assert!(
+        body.ends_with(&"a".repeat(100)),
+        "cut should align to newline"
+    );
 }

@@ -71,7 +71,10 @@ fn extract_via_short_key() {
         }
     });
     let entries = extract_environments_for(&doc, PKG);
-    assert_eq!(entries.get("ATLASSIAN_API_TOKEN").unwrap(), "short-key-token");
+    assert_eq!(
+        entries.get("ATLASSIAN_API_TOKEN").unwrap(),
+        "short-key-token"
+    );
 }
 
 #[test]
@@ -110,7 +113,10 @@ fn extract_via_unscoped_name() {
         }
     });
     let entries = extract_environments_for(&doc, PKG);
-    assert_eq!(entries.get("ATLASSIAN_API_TOKEN").unwrap(), "unscoped-token");
+    assert_eq!(
+        entries.get("ATLASSIAN_API_TOKEN").unwrap(),
+        "unscoped-token"
+    );
 }
 
 #[test]
@@ -349,10 +355,7 @@ fn vendor_specific_keys_stay_isolated() {
     // `get` still resolves them because each is unambiguous (only one
     // vendor defines it). Call sites *should* still prefer `get_for`, but
     // the rule does not punish unambiguous singletons.
-    assert_eq!(
-        cfg.get("BITBUCKET_DEFAULT_WORKSPACE"),
-        Some("myws")
-    );
+    assert_eq!(cfg.get("BITBUCKET_DEFAULT_WORKSPACE"), Some("myws"));
     assert_eq!(cfg.get("ATLASSIAN_SITE_NAME"), Some("mysite"));
 }
 
@@ -453,7 +456,9 @@ fn ts_bitbucket_package_aliases_resolve_to_bitbucket_section() {
         }
     });
     let map = extract_all_vendor_sections(&doc, PKG);
-    let bb = map.get(VENDOR_BITBUCKET).expect("bitbucket section resolved");
+    let bb = map
+        .get(VENDOR_BITBUCKET)
+        .expect("bitbucket section resolved");
     assert_eq!(
         bb.get("BITBUCKET_DEFAULT_WORKSPACE").map(String::as_str),
         Some("from-ts-bitbucket")
@@ -474,7 +479,9 @@ fn confluence_aliases_resolve_to_confluence_section() {
         }
     });
     let map = extract_all_vendor_sections(&doc, PKG);
-    let conf = map.get(VENDOR_CONFLUENCE).expect("confluence section resolved");
+    let conf = map
+        .get(VENDOR_CONFLUENCE)
+        .expect("confluence section resolved");
     assert_eq!(
         conf.get("ATLASSIAN_SITE_NAME").map(String::as_str),
         Some("from-ts-conf-scoped")
@@ -486,7 +493,9 @@ fn confluence_aliases_resolve_to_confluence_section() {
         }
     });
     let map = extract_all_vendor_sections(&doc, PKG);
-    let conf = map.get(VENDOR_CONFLUENCE).expect("confluence section resolved");
+    let conf = map
+        .get(VENDOR_CONFLUENCE)
+        .expect("confluence section resolved");
     assert_eq!(
         conf.get("ATLASSIAN_SITE_NAME").map(String::as_str),
         Some("from-ts-conf-unscoped")
@@ -529,10 +538,7 @@ fn get_for_with_fallback_reads_primary_then_fallback_section() {
     );
     // Plain `get_for` (no fallback) does NOT cross sections — preserves
     // the strict isolation guarantee for callers that explicitly opt in.
-    assert_eq!(
-        cfg.get_for(VENDOR_CONFLUENCE, "ATLASSIAN_SITE_NAME"),
-        None
-    );
+    assert_eq!(cfg.get_for(VENDOR_CONFLUENCE, "ATLASSIAN_SITE_NAME"), None);
     assert_eq!(
         cfg.get_for(VENDOR_JIRA, "ATLASSIAN_SITE_NAME"),
         Some("shared-site")
@@ -722,10 +728,7 @@ fn resolve_returns_ambiguous_when_vendor_sections_disagree() {
             let pairs: Vec<(&str, &str)> = values.iter().map(|(v, x)| (*v, *x)).collect();
             assert_eq!(
                 pairs,
-                vec![
-                    (VENDOR_BITBUCKET, "bb-token"),
-                    (VENDOR_JIRA, "jira-token"),
-                ]
+                vec![(VENDOR_BITBUCKET, "bb-token"), (VENDOR_JIRA, "jira-token"),]
             );
         }
         other => panic!("expected Ambiguous, got {other:?}"),

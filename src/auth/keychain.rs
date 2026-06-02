@@ -180,11 +180,7 @@ mod backend {
             .map_err(|e| KeychainError::Backend(e.to_string()))
     }
 
-    pub fn get(
-        kind: SecretKind,
-        vendor: &str,
-        principal: &str,
-    ) -> KeychainResult<Option<String>> {
+    pub fn get(kind: SecretKind, vendor: &str, principal: &str) -> KeychainResult<Option<String>> {
         match entry(kind, vendor, principal)?.get_password() {
             Ok(s) => Ok(Some(s)),
             Err(keyring::Error::NoEntry) => Ok(None),
@@ -391,7 +387,10 @@ mod tests {
             SecretKind::parse("ATLASSIAN_API_TOKEN"),
             Some(SecretKind::ApiToken)
         );
-        assert_eq!(SecretKind::parse("app-password"), Some(SecretKind::AppPassword));
+        assert_eq!(
+            SecretKind::parse("app-password"),
+            Some(SecretKind::AppPassword)
+        );
         assert_eq!(
             SecretKind::parse("ATLASSIAN_BITBUCKET_APP_PASSWORD"),
             Some(SecretKind::AppPassword)
@@ -403,8 +402,13 @@ mod tests {
     fn in_memory_roundtrip() {
         let kc = InMemoryKeychain::new();
         assert!(kc.is_empty());
-        kc.set(SecretKind::ApiToken, "bitbucket", "alice@example.com", "secret-1")
-            .unwrap();
+        kc.set(
+            SecretKind::ApiToken,
+            "bitbucket",
+            "alice@example.com",
+            "secret-1",
+        )
+        .unwrap();
         assert_eq!(
             kc.get(SecretKind::ApiToken, "bitbucket", "alice@example.com")
                 .unwrap()
@@ -451,10 +455,20 @@ mod tests {
     #[test]
     fn in_memory_distinguishes_vendors_for_same_principal() {
         let kc = InMemoryKeychain::new();
-        kc.set(SecretKind::ApiToken, "bitbucket", "same@example.com", "bb-token")
-            .unwrap();
-        kc.set(SecretKind::ApiToken, "jira", "same@example.com", "jira-token")
-            .unwrap();
+        kc.set(
+            SecretKind::ApiToken,
+            "bitbucket",
+            "same@example.com",
+            "bb-token",
+        )
+        .unwrap();
+        kc.set(
+            SecretKind::ApiToken,
+            "jira",
+            "same@example.com",
+            "jira-token",
+        )
+        .unwrap();
         assert_eq!(
             kc.get(SecretKind::ApiToken, "bitbucket", "same@example.com")
                 .unwrap()

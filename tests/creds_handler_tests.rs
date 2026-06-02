@@ -233,15 +233,22 @@ fn migrate_is_idempotent_when_already_migrated() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "stored-token")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "stored-token",
+    )
+    .unwrap();
 
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
     assert!(outcome.migrated.is_empty());
-    assert!(outcome
-        .skipped
-        .iter()
-        .any(|s| matches!(s, MigrateSkip::AlreadyMigrated { .. })));
+    assert!(
+        outcome
+            .skipped
+            .iter()
+            .any(|s| matches!(s, MigrateSkip::AlreadyMigrated { .. }))
+    );
     let after = read_config(&path);
     assert_eq!(
         env_value(&after, "bitbucket", "ATLASSIAN_API_TOKEN"),
@@ -264,8 +271,13 @@ fn migrate_sentinel_with_empty_keychain_entry_is_hard_error() {
         }),
     );
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "",
+    )
+    .unwrap();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(
@@ -370,8 +382,13 @@ fn migrate_alias_conflict_sentinel_vs_plaintext_is_hard_error() {
     });
     write_config(&path, &original);
     let kc = InMemoryKeychain::new();
-    kc.set(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com", "stored")
-        .unwrap();
+    kc.set(
+        SecretKind::ApiToken,
+        VENDOR_BITBUCKET,
+        "alice@example.com",
+        "stored",
+    )
+    .unwrap();
 
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("alias conflict"), "{}", err.message);
@@ -549,7 +566,11 @@ fn migrate_non_string_secret_value_is_hard_error() {
     let kc = InMemoryKeychain::new();
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("number"), "{}", err.message);
-    assert!(err.message.contains("ATLASSIAN_API_TOKEN"), "{}", err.message);
+    assert!(
+        err.message.contains("ATLASSIAN_API_TOKEN"),
+        "{}",
+        err.message
+    );
 }
 
 // ---- stale-clobber guard ------------------------------------------------
@@ -641,10 +662,12 @@ fn migrate_in_sync_skips_keychain_write_but_rewrites_file() {
     .unwrap();
 
     let outcome = creds::migrate_with(&kc, &path, false).unwrap();
-    assert!(outcome
-        .skipped
-        .iter()
-        .any(|s| matches!(s, MigrateSkip::InSync { .. })));
+    assert!(
+        outcome
+            .skipped
+            .iter()
+            .any(|s| matches!(s, MigrateSkip::InSync { .. }))
+    );
     assert_eq!(
         kc.get(SecretKind::ApiToken, VENDOR_BITBUCKET, "alice@example.com")
             .unwrap()
@@ -802,7 +825,11 @@ fn migrate_errors_when_file_does_not_exist() {
     let path = make_path(&dir, "nonexistent.json");
     let kc = InMemoryKeychain::new();
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
-    assert!(err.message.contains("nothing to migrate"), "{}", err.message);
+    assert!(
+        err.message.contains("nothing to migrate"),
+        "{}",
+        err.message
+    );
 }
 
 #[test]

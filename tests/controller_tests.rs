@@ -45,7 +45,10 @@ async fn get_pipeline_normalizes_path_and_appends_query() {
         .and(path("/2.0/workspaces"))
         .and(query_param("pagelen", "25"))
         .and(query_param("page", "2"))
-        .and(header("authorization", "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r"))
+        .and(header(
+            "authorization",
+            "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "values": [{"slug":"a"},{"slug":"b"}]
         })))

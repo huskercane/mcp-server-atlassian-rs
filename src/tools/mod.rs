@@ -32,21 +32,29 @@ use reqwest::Client;
 use rmcp::{
     ErrorData as RmcpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo},
+    model::{
+        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+    },
     tool, tool_handler, tool_router,
 };
 
 use crate::config::Config;
 use crate::constants::{PACKAGE_NAME, VERSION};
 use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, handle_write};
+use crate::controllers::circleci::CircleCiContext;
 use crate::controllers::handle_clone;
+use crate::controllers::postman::PostmanContext;
+use crate::controllers::slack::SlackContext;
 use crate::controllers::zoom::ZoomContext;
 use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
+use crate::vendor::circleci::CircleCiVendor;
 use crate::vendor::confluence::ConfluenceVendor;
 use crate::vendor::jira::JiraVendor;
+use crate::vendor::postman::PostmanVendor;
+use crate::vendor::slack::SlackVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{CloneArgs, ReadArgs, WriteArgs};
@@ -68,6 +76,9 @@ struct ServerState {
     jira_vendor: JiraVendor,
     confluence_vendor: ConfluenceVendor,
     zoom_vendor: ZoomVendor,
+    circleci_vendor: CircleCiVendor,
+    slack_vendor: SlackVendor,
+    postman_vendor: PostmanVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -90,12 +101,20 @@ impl AtlassianServer {
             JiraVendor::new(),
             ConfluenceVendor::new(),
             ZoomVendor::new(),
+            CircleCiVendor::new(),
+            SlackVendor::new(),
+            PostmanVendor::new(),
         ))
     }
 
     /// Build a server from caller-supplied components. Useful when tests or
     /// embedders want to pre-configure the `Config` or point any vendor
     /// at a mock URL via `with_base_url`.
+    // One owned vendor per product — the arg list grows by one with each new
+    // vendor. Bundling them into a struct would just move the same fields
+    // around without removing any, so the lint is suppressed rather than
+    // worked around.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_components(
         config: Config,
         client: Client,
@@ -103,6 +122,9 @@ impl AtlassianServer {
         jira_vendor: JiraVendor,
         confluence_vendor: ConfluenceVendor,
         zoom_vendor: ZoomVendor,
+        circleci_vendor: CircleCiVendor,
+        slack_vendor: SlackVendor,
+        postman_vendor: PostmanVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -112,6 +134,9 @@ impl AtlassianServer {
                 jira_vendor,
                 confluence_vendor,
                 zoom_vendor,
+                circleci_vendor,
+                slack_vendor,
+                postman_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -128,6 +153,9 @@ impl AtlassianServer {
             + Self::jira_router()
             + Self::confluence_router()
             + Self::zoom_router()
+            + Self::circleci_router()
+            + Self::slack_router()
+            + Self::postman_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -178,6 +206,40 @@ impl AtlassianServer {
             &self.state.zoom_vendor,
         )
     }
+
+    /// CircleCI-specific context. Like Zoom, CircleCI carries its own
+    /// credential lookup (a static Bearer token from config), so it uses a
+    /// dedicated [`CircleCiContext`] rather than the vendor-neutral
+    /// [`HandleContext`].
+    fn circleci_ctx(&self) -> CircleCiContext<'_> {
+        CircleCiContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.circleci_vendor,
+        )
+    }
+
+    /// Slack-specific context. Like CircleCI, Slack carries its own credential
+    /// lookup (a static OAuth token from config), so it uses a dedicated
+    /// [`SlackContext`] rather than the vendor-neutral [`HandleContext`].
+    fn slack_ctx(&self) -> SlackContext<'_> {
+        SlackContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.slack_vendor,
+        )
+    }
+
+    /// Postman-specific context. Carries its own credential lookup (a static
+    /// API key from config) and is the one vendor that authenticates via a
+    /// custom `X-API-Key` header, so it uses a dedicated [`PostmanContext`].
+    fn postman_ctx(&self) -> PostmanContext<'_> {
+        PostmanContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.postman_vendor,
+        )
+    }
 }
 
 // ============================================================================
@@ -187,80 +249,86 @@ impl AtlassianServer {
 #[tool_router(router = bitbucket_router)]
 impl AtlassianServer {
     #[doc = include_str!("descriptions/bb_get.md")]
-    #[tool(
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn bb_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_bb(self, HttpMethod::Get, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_post.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn bb_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_bb(self, HttpMethod::Post, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_put.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn bb_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_bb(self, HttpMethod::Put, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_patch.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn bb_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_bb(self, HttpMethod::Patch, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_delete.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn bb_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_bb(self, HttpMethod::Delete, &args).await)
     }
 
     #[doc = include_str!("descriptions/bb_clone.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn bb_clone(&self, Parameters(args): Parameters<CloneArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn bb_clone(
+        &self,
+        Parameters(args): Parameters<CloneArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_clone(self, &args).await)
     }
 }
@@ -272,67 +340,72 @@ impl AtlassianServer {
 #[tool_router(router = jira_router)]
 impl AtlassianServer {
     #[doc = include_str!("descriptions/jira_get.md")]
-    #[tool(
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn jira_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn jira_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_jira(self, HttpMethod::Get, &args).await)
     }
 
     #[doc = include_str!("descriptions/jira_post.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn jira_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn jira_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_jira(self, HttpMethod::Post, &args).await)
     }
 
     #[doc = include_str!("descriptions/jira_put.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn jira_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn jira_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_jira(self, HttpMethod::Put, &args).await)
     }
 
     #[doc = include_str!("descriptions/jira_patch.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn jira_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn jira_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_jira(self, HttpMethod::Patch, &args).await)
     }
 
     #[doc = include_str!("descriptions/jira_delete.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn jira_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn jira_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_jira(self, HttpMethod::Delete, &args).await)
     }
 }
@@ -344,67 +417,72 @@ impl AtlassianServer {
 #[tool_router(router = confluence_router)]
 impl AtlassianServer {
     #[doc = include_str!("descriptions/conf_get.md")]
-    #[tool(
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn conf_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn conf_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_confluence(self, HttpMethod::Get, &args).await)
     }
 
     #[doc = include_str!("descriptions/conf_post.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn conf_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn conf_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_confluence(self, HttpMethod::Post, &args).await)
     }
 
     #[doc = include_str!("descriptions/conf_put.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn conf_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn conf_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_confluence(self, HttpMethod::Put, &args).await)
     }
 
     #[doc = include_str!("descriptions/conf_patch.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn conf_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn conf_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_confluence(self, HttpMethod::Patch, &args).await)
     }
 
     #[doc = include_str!("descriptions/conf_delete.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn conf_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn conf_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_confluence(self, HttpMethod::Delete, &args).await)
     }
 }
@@ -416,68 +494,304 @@ impl AtlassianServer {
 #[tool_router(router = zoom_router)]
 impl AtlassianServer {
     #[doc = include_str!("descriptions/zoom_get.md")]
-    #[tool(
-        annotations(
-            read_only_hint = true,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn zoom_get(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn zoom_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_zoom(self, HttpMethod::Get, &args).await)
     }
 
     #[doc = include_str!("descriptions/zoom_post.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn zoom_post(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn zoom_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_zoom(self, HttpMethod::Post, &args).await)
     }
 
     #[doc = include_str!("descriptions/zoom_put.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn zoom_put(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn zoom_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_zoom(self, HttpMethod::Put, &args).await)
     }
 
     #[doc = include_str!("descriptions/zoom_patch.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = false,
-            open_world_hint = true,
-        ),
-    )]
-    async fn zoom_patch(&self, Parameters(args): Parameters<WriteArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn zoom_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_write_zoom(self, HttpMethod::Patch, &args).await)
     }
 
     #[doc = include_str!("descriptions/zoom_delete.md")]
-    #[tool(
-        annotations(
-            read_only_hint = false,
-            destructive_hint = true,
-            idempotent_hint = true,
-            open_world_hint = true,
-        ),
-    )]
-    async fn zoom_delete(&self, Parameters(args): Parameters<ReadArgs>) -> Result<CallToolResult, RmcpError> {
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn zoom_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
         Ok(run_read_zoom(self, HttpMethod::Delete, &args).await)
+    }
+}
+
+// ============================================================================
+// CircleCI tools
+// ============================================================================
+
+#[tool_router(router = circleci_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/circleci_get.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn circleci_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_circleci(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/circleci_post.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn circleci_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_circleci(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/circleci_put.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn circleci_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_circleci(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/circleci_patch.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn circleci_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_circleci(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/circleci_delete.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn circleci_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_circleci(self, HttpMethod::Delete, &args).await)
+    }
+}
+
+// ============================================================================
+// Slack tools
+// ============================================================================
+
+#[tool_router(router = slack_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/slack_get.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn slack_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_slack(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/slack_post.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn slack_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_slack(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/slack_put.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn slack_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_slack(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/slack_patch.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn slack_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_slack(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/slack_delete.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn slack_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_slack(self, HttpMethod::Delete, &args).await)
+    }
+}
+
+// ============================================================================
+// Postman tools
+// ============================================================================
+
+#[tool_router(router = postman_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/postman_get.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn postman_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_postman(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/postman_post.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn postman_post(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_postman(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/postman_put.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn postman_put(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_postman(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/postman_patch.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn postman_patch(
+        &self,
+        Parameters(args): Parameters<WriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_postman(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/postman_delete.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn postman_delete(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_postman(self, HttpMethod::Delete, &args).await)
     }
 }
 
@@ -602,6 +916,90 @@ async fn run_write_zoom(
     args: &WriteArgs,
 ) -> CallToolResult {
     match crate::controllers::zoom::handle_write(&server.zoom_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_circleci(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match crate::controllers::circleci::handle_read(&server.circleci_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_circleci(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match crate::controllers::circleci::handle_write(&server.circleci_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_slack(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match crate::controllers::slack::handle_read(&server.slack_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_slack(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match crate::controllers::slack::handle_write(&server.slack_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_postman(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &ReadArgs,
+) -> CallToolResult {
+    match crate::controllers::postman::handle_read(&server.postman_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_postman(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &WriteArgs,
+) -> CallToolResult {
+    match crate::controllers::postman::handle_write(&server.postman_ctx(), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])

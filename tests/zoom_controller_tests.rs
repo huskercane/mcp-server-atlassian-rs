@@ -257,8 +257,7 @@ async fn rotating_client_secret_invalidates_cached_token() {
     // the same vendor instance must force a fresh exchange — it must never keep
     // serving a bearer minted with the old secret.
     let server = MockServer::start().await;
-    let basic =
-        |secret: &str| format!("Basic {}", STANDARD.encode(format!("client-1:{secret}")));
+    let basic = |secret: &str| format!("Basic {}", STANDARD.encode(format!("client-1:{secret}")));
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
         .and(header("authorization", basic("secret-1").as_str()))
@@ -317,10 +316,7 @@ async fn expired_token_is_refreshed() {
     // A 1s lifetime collapses (after the 60s skew clamp) to the 1s floor;
     // sleeping past it forces a second exchange on the next call.
     let server = MockServer::start().await;
-    token_mock("short-tok", 1)
-        .expect(2)
-        .mount(&server)
-        .await;
+    token_mock("short-tok", 1).expect(2).mount(&server).await;
     Mock::given(method("GET"))
         .and(path("/users/me"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": "me"})))

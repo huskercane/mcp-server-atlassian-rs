@@ -2,7 +2,7 @@
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
-The same binary also exposes **Zoom Cloud** (`zoom_*`) — a native addition (not a TS port) that reuses the generic-verb proxy design. Unlike the Atlassian vendors it authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization).
+The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), and **Postman** (`postman_*`) — native additions (not TS ports) that reuse the generic-verb proxy design. Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`.
 
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
@@ -11,7 +11,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, and Zoom — instead of running separate Node processes side-by-side, you get one MCP server exposing all 21 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`).
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, and Postman — instead of running separate Node processes side-by-side, you get one MCP server exposing all 36 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`).
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -50,6 +50,12 @@ Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or 
 
 Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Server OAuth app](https://developers.zoom.us/docs/internal-apps/s2s-oauth/) and use its account ID, client ID, and client secret (`ZOOM_*` below). These never go through the OS keychain — they are read as plaintext from the `zoom` config section or environment.
 
+CircleCI is also separate: create a [personal API token](https://circleci.com/docs/managing-api-tokens/) (CircleCI → User Settings → Personal API Tokens) and set it as `CIRCLECI_TOKEN` (below). Like Zoom, it is read as plaintext from the `circleci` config section or environment and never goes through the OS keychain.
+
+Slack is separate too: create a Slack app, install it to your workspace, and copy its bot token (`xoxb-…`) or user token (`xoxp-…`) into `SLACK_TOKEN` (below). The token's [scopes](https://api.slack.com/scopes) gate what the `slack_*` tools can do. Read as plaintext from the `slack` config section or environment; never goes through the OS keychain.
+
+Postman is separate too: create an [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) (Postman → Account Settings → API Keys) and set it as `POSTMAN_API_KEY` (below). Unlike every other vendor it is sent in the `X-API-Key` header, not `Authorization`. Read as plaintext from the `postman` config section or environment; never goes through the OS keychain.
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -63,11 +69,14 @@ Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Se
 | `ZOOM_ACCOUNT_ID` | Zoom Server-to-Server OAuth account ID. **Required** before invoking any `zoom_*` tool; only checked at tool-call time, so a non-Zoom setup boots without it. | zoom only |
 | `ZOOM_CLIENT_ID` | Zoom S2S OAuth app client ID. | zoom only |
 | `ZOOM_CLIENT_SECRET` | Zoom S2S OAuth app client secret. | zoom only |
+| `CIRCLECI_TOKEN` | CircleCI personal API token, sent as `Authorization: Bearer`. **Required** before invoking any `circleci_*` tool; only checked at tool-call time, so a non-CircleCI setup boots without it. | circleci only |
+| `SLACK_TOKEN` | Slack bot/user OAuth token (`xoxb-…` / `xoxp-…`), sent as `Authorization: Bearer`. **Required** before invoking any `slack_*` tool; only checked at tool-call time, so a non-Slack setup boots without it. | slack only |
+| `POSTMAN_API_KEY` | Postman API key, sent in the `X-API-Key` header (not `Authorization`). **Required** before invoking any `postman_*` tool; only checked at tool-call time, so a non-Postman setup boots without it. | postman only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`) so each product's keys stay isolated:
 
 ```json
 {
@@ -94,11 +103,26 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
       "ZOOM_CLIENT_ID": "client-id...",
       "ZOOM_CLIENT_SECRET": "client-secret..."
     }
+  },
+  "circleci": {
+    "environments": {
+      "CIRCLECI_TOKEN": "CCIPRJ_..."
+    }
+  },
+  "slack": {
+    "environments": {
+      "SLACK_TOKEN": "xoxb-..."
+    }
+  },
+  "postman": {
+    "environments": {
+      "POSTMAN_API_KEY": "PMAK-..."
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -208,7 +232,7 @@ Point the client at the binary. Stdio is the default transport. If your client u
 
 ## Available tools
 
-Twenty-one tools across four vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*` tools are a native addition with no TS port.
+Thirty-six tools across seven vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, and `postman_*` tools are native additions with no TS port.
 
 ### Bitbucket (`bb_*`)
 
@@ -261,13 +285,73 @@ Zoom paths pass through verbatim relative to the `https://api.zoom.us/v2` base �
 
 > **Starting a meeting** is not a REST action: `zoom_post /users/me/meetings` returns a `start_url` the host opens to launch the Zoom client. **Reminders** are likewise not an API call — drive them from your scheduler (e.g. a cron/loop agent that polls `zoom_get /users/me/meetings`), not from this server.
 
+### CircleCI (`circleci_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `circleci_get` | read-only, idempotent | GET any CircleCI API v2 endpoint (pipelines, workflows, jobs, insights, `/me`) |
+| `circleci_post` | mutating | POST to any endpoint (e.g. trigger a pipeline, cancel/rerun a workflow) |
+| `circleci_put` | mutating, idempotent | PUT to any endpoint (rarely used in v2) |
+| `circleci_patch` | mutating | PATCH any endpoint (e.g. update a scheduled pipeline) |
+| `circleci_delete` | destructive, idempotent | DELETE any endpoint (e.g. remove an env var, schedule, or context) |
+
+CircleCI paths pass through verbatim relative to the `https://circleci.com/api/v2` base — supply e.g. `/project/{project-slug}/pipeline` (no version segment), where `project-slug` is `<vcs>/<org>/<repo>` (e.g. `gh/acme/web`) or `circleci/<org-id>/<project-id>`. There is **no separate search tool**: listing is just `circleci_get` against the right path. Authenticates with a personal API token (`CIRCLECI_TOKEN`, read from the `circleci` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-CircleCI deployment boots without it. Pagination is token-based: pass a response's `next_page_token` back as the `page-token` query param.
+
+### Slack (`slack_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `slack_get` | read-only, idempotent | GET any Slack Web API method (`/conversations.list`, `/users.info`, `/auth.test`, …) |
+| `slack_post` | mutating | POST to any method (e.g. `/chat.postMessage`, `/conversations.create`, `/reactions.add`) |
+| `slack_put` | mutating, idempotent | PUT to any method (rarely used — Slack is GET/POST) |
+| `slack_patch` | mutating | PATCH any method (rarely used) |
+| `slack_delete` | destructive, idempotent | DELETE verb (rarely used — Slack deletes via POST methods like `/chat.delete`) |
+
+Slack endpoints are *methods* (`/conversations.list`), passed verbatim relative to the `https://slack.com/api` base. Almost everything is GET (query params) or POST (JSON body); the PUT/PATCH/DELETE verbs exist for completeness but Slack rarely uses them. Authenticates with a bot/user OAuth token (`SLACK_TOKEN`, read from the `slack` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-Slack deployment boots without it. **Slack's defining quirk:** the Web API returns `200 OK` even on logical failures, signalling the real outcome with `{"ok": false, "error": "<code>"}` in the body — this server inspects that envelope and reclassifies `ok: false` as a typed error (auth codes → authentication error, `ratelimited` → 429, `*_not_found` → 404), so a successful tool result always means `ok: true`. Pagination is cursor-based: read `response_metadata.next_cursor` and pass it back as the `cursor` query param.
+
+### Postman (`postman_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `postman_get` | read-only, idempotent | GET any Postman API endpoint (`/me`, `/workspaces`, `/collections`, `/environments`, …) |
+| `postman_post` | mutating | POST to any endpoint (e.g. create a collection, environment, or workspace) |
+| `postman_put` | mutating, idempotent | PUT to any endpoint (replace a collection / environment) |
+| `postman_patch` | mutating | PATCH any endpoint (e.g. rename a workspace) |
+| `postman_delete` | destructive, idempotent | DELETE any endpoint (remove a collection, environment, workspace, …) |
+
+Postman paths pass through verbatim relative to the `https://api.getpostman.com` base — supply e.g. `/collections` or `/collections/{uid}` (item endpoints take a `uid` of the form `{ownerId}-{guid}`). Authenticates with an API key (`POSTMAN_API_KEY`, read from the `postman` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`X-API-Key`** header rather than `Authorization` — Postman is the only vendor here that authenticates outside the standard auth header. Missing the key surfaces as an authentication error at call time, so a non-Postman deployment boots without it. Most write payloads are wrapped in a top-level resource key (`{"collection": {…}}`, `{"environment": {…}}`).
+
 ### Shared inputs
 
 All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative).
 
+## Cross-vendor workflows
+
+This server ships **primitives, not orchestration**: it exposes raw HTTP verbs per vendor, and the *agent* chains them. There is no `do_everything(PROJ-123)` tool. The recipes below spell out the path patterns an agent needs, because the links *between* systems (Jira→PR, PR→build) are not stored anywhere — they're matched by issue-dev-panel data and by branch/commit.
+
+### From a Jira key to its PR, review state, and build
+
+Given `PROJ-123`:
+
+1. **Read the issue + get its numeric id.** `jira_get /rest/api/3/issue/PROJ-123` with `jq: "{id: id, key: key, summary: fields.summary, status: fields.status.name}"`. The dev-panel API in the next step needs the **numeric** `id`, not the key.
+2. **Find linked branches/PRs** (requires the Bitbucket–Jira integration to be enabled). `jira_get /rest/dev-status/latest/issue/detail` with `queryParams: {"issueId": "<numeric id>", "applicationType": "bitbucket", "dataType": "pullrequest"}` → returns `detail[].pullRequests[]` with each PR's `id`, `url`, `status`, and `source.branch`. Use `dataType: "branch"` for branches or `"repository"` for commits.
+3. **Read the PR and its review state.** `bb_get /repositories/{workspace}/{repo}/pullrequests/{pr-id}` for the PR; `bb_get .../pullrequests/{pr-id}/activity` for approvals and review activity.
+4. **Write a comment back.** `bb_post /repositories/{workspace}/{repo}/pullrequests/{pr-id}/comments` with `body: {"content": {"raw": "Build is green ✅"}}`.
+5. **Check build status for the PR's branch.** CircleCI is keyed by branch, not by PR: `circleci_get /project/{slug}/pipeline` with `queryParams: {"branch": "<source.branch from step 2>"}` → take the latest pipeline `id` → `circleci_get /pipeline/{id}/workflow` → `circleci_get /workflow/{workflow-id}/job`. Each job carries `status` and `job_number`. (`{slug}` is `<vcs>/<org>/<repo>`, e.g. `gh/acme/web`.)
+
+### Why did the build fail?
+
+From the failed job's `job_number` (step 5 above):
+
+- **Which step / how it failed:** `circleci_get /project/{slug}/job/{job-number}` → job status, duration, executor.
+- **Failed test details:** `circleci_get /project/{slug}/{job-number}/tests` → `items[]` with `name`, `result`, `message`, `file` — the cleanest "reason" **when the job stores test results** (`store_test_results`).
+- **Raw step logs are out of scope here.** They live behind CircleCI's older v1.1 API or per-step S3 `output_url`s — neither sits under the fixed `…/api/v2` base this tool targets, so fetch those outside the server if you need full log text.
+
+> These chains are only as reliable as the underlying setup: step 2 needs the Jira↔Bitbucket app installed, and steps 5–6 assume the repo actually builds on CircleCI for that branch. The agent infers the PR→pipeline link from the branch name; it is not a stored relationship.
+
 ## CLI usage
 
-Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom is MCP-only: there is no `zoom` CLI group, so `zoom_*` is reachable through an MCP client, not the command line.)
+Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom, CircleCI, Slack, and Postman are MCP-only: there is no `zoom`, `circleci`, `slack`, or `postman` CLI group, so `zoom_*`, `circleci_*`, `slack_*`, and `postman_*` are reachable through an MCP client, not the command line.)
 
 ```bash
 # Bitbucket

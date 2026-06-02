@@ -74,8 +74,7 @@ fn base_url_falls_back_to_confluence_section_when_jira_section_absent() {
         .unwrap(),
     )
     .unwrap();
-    let config =
-        Config::load_from_sources(Some(&global_path), None, &HashMap::new());
+    let config = Config::load_from_sources(Some(&global_path), None, &HashMap::new());
 
     let vendor = JiraVendor::new();
     assert_eq!(
@@ -115,8 +114,14 @@ fn with_base_url_resolves_without_any_config() {
 #[test]
 fn normalize_path_adds_leading_slash_only() {
     let vendor = JiraVendor::new();
-    assert_eq!(vendor.normalize_path("rest/api/3/myself"), "/rest/api/3/myself");
-    assert_eq!(vendor.normalize_path("/rest/api/3/myself"), "/rest/api/3/myself");
+    assert_eq!(
+        vendor.normalize_path("rest/api/3/myself"),
+        "/rest/api/3/myself"
+    );
+    assert_eq!(
+        vendor.normalize_path("/rest/api/3/myself"),
+        "/rest/api/3/myself"
+    );
 }
 
 #[test]
@@ -169,7 +174,8 @@ fn classify_403_maps_to_auth_invalid_per_ts_parity() {
     assert_eq!(err.kind, ErrorKind::AuthInvalid);
     assert_eq!(err.status_code, Some(403));
     assert!(
-        err.message.starts_with("Insufficient permissions. Jira API: "),
+        err.message
+            .starts_with("Insufficient permissions. Jira API: "),
         "got: {}",
         err.message
     );
@@ -231,10 +237,13 @@ fn parse_canonical_envelope_with_messages_only() {
     let body = r#"{"errorMessages":["Issue does not exist"],"errors":{}}"#;
     let parsed = parse_error_body(body);
     assert_eq!(parsed.message.as_deref(), Some("Issue does not exist"));
-    matches_json(parsed.original.as_ref(), &json!({
-        "errorMessages": ["Issue does not exist"],
-        "errors": {}
-    }));
+    matches_json(
+        parsed.original.as_ref(),
+        &json!({
+            "errorMessages": ["Issue does not exist"],
+            "errors": {}
+        }),
+    );
 }
 
 #[test]

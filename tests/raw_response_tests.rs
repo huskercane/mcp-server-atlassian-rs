@@ -39,7 +39,8 @@ async fn writes_file_under_tmp_mcp() {
     // `YYYY-MM-DDTHH:MM:SS.mmmZ`, giving a digits/dashes/T/Z alphabet.
     let stem = file_name.trim_end_matches(".txt");
     assert!(
-        stem.chars().all(|c| c.is_ascii_hexdigit() || c == '-' || c == 'T' || c == 'Z'),
+        stem.chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-' || c == 'T' || c == 'Z'),
         "unexpected filename chars in {stem}"
     );
 

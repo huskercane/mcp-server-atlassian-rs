@@ -91,7 +91,11 @@ fn ensure_mcp_error_from_string_handles_strings() {
 #[test]
 fn get_deep_original_returns_deepest_in_chain() {
     let deepest = json!({ "message": "Root cause" });
-    let level3 = api_error("Level 3", Some(500), Some(OriginalError::Json(deepest.clone())));
+    let level3 = api_error(
+        "Level 3",
+        Some(500),
+        Some(OriginalError::Json(deepest.clone())),
+    );
     let level2 = api_error(
         "Level 2",
         Some(500),
@@ -179,7 +183,11 @@ fn format_for_tool_includes_nested_error_details() {
         "message": "API quota exceeded",
         "type": "RateLimitError"
     });
-    let mid = api_error("Rate limit exceeded", Some(429), Some(OriginalError::Json(deep)));
+    let mid = api_error(
+        "Rate limit exceeded",
+        Some(429),
+        Some(OriginalError::Json(deep)),
+    );
     let top = api_error(
         "API error",
         Some(429),

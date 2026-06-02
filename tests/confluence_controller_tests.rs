@@ -38,7 +38,10 @@ async fn get_pipeline_passes_confluence_path_through_unchanged() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/wiki/api/v2/spaces"))
-        .and(header("authorization", "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r"))
+        .and(header(
+            "authorization",
+            "Basic YWxpY2VAZXhhbXBsZS5jb206dG9r",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "results": [
                 {"id": "1", "key": "DEV", "name": "Engineering"}

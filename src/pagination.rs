@@ -125,7 +125,9 @@ fn extract_cursor(obj: &serde_json::Map<String, Value>) -> Option<ResponsePagina
     })
 }
 
-fn default_when_results_present(obj: &serde_json::Map<String, Value>) -> Option<ResponsePagination> {
+fn default_when_results_present(
+    obj: &serde_json::Map<String, Value>,
+) -> Option<ResponsePagination> {
     let count = obj
         .get("results")
         .or_else(|| obj.get("values"))
@@ -187,7 +189,11 @@ pub fn validate_page_size(requested: Option<u32>) -> u32 {
     match requested {
         Some(n) if n > 0 && n <= MAX_PAGE_SIZE => n,
         Some(n) if n > MAX_PAGE_SIZE => {
-            warn!(requested = n, max = MAX_PAGE_SIZE, "clamping requested page size");
+            warn!(
+                requested = n,
+                max = MAX_PAGE_SIZE,
+                "clamping requested page size"
+            );
             MAX_PAGE_SIZE
         }
         _ => DEFAULT_PAGE_SIZE,
@@ -202,7 +208,9 @@ pub fn validate_pagination_limits(pagination: &ResponsePagination) -> bool {
     if item_count > MAX_PAGE_SIZE || page_size > MAX_PAGE_SIZE {
         warn!(
             item_count,
-            page_size, max = MAX_PAGE_SIZE, "response exceeds page-size limit"
+            page_size,
+            max = MAX_PAGE_SIZE,
+            "response exceeds page-size limit"
         );
         return false;
     }

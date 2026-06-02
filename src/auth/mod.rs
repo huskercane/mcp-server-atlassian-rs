@@ -15,9 +15,10 @@
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
+use reqwest::header::{AUTHORIZATION, HeaderName};
 
 use crate::config::Config;
-use crate::error::{McpError, auth_missing};
+use crate::error::{McpError, auth_invalid, auth_missing};
 
 pub mod keychain;
 
@@ -44,6 +45,15 @@ pub enum Credentials {
     /// credentials for a short-lived token and auto-renews it) and handed to
     /// the transport purely as an auth carrier.
     Bearer { token: String },
+
+    /// An API key carried in a **custom request header** rather than the
+    /// standard `Authorization` header — e.g. Postman's `X-API-Key: <key>`.
+    /// Like [`Self::Bearer`], it is never produced by the shared Atlassian
+    /// resolver; a vendor that owns this scheme mints it from config and hands
+    /// it to the transport. `header_name` is the header the value is sent
+    /// under (canonicalised to a [`HeaderName`] at dispatch time); `key` is the
+    /// raw secret, emitted verbatim with no scheme prefix.
+    ApiKeyHeader { header_name: String, key: String },
 }
 
 /// Process-wide [`OsKeychain`] instance. Reused across all credential
@@ -92,10 +102,7 @@ impl Credentials {
         tokio::task::spawn_blocking(move || Self::require_for(&cfg, &vendor))
             .await
             .map_err(|e| {
-                crate::error::unexpected(
-                    format!("credential resolution task panicked: {e}"),
-                    None,
-                )
+                crate::error::unexpected(format!("credential resolution task panicked: {e}"), None)
             })?
     }
 
@@ -149,16 +156,36 @@ impl Credentials {
         Ok(None)
     }
 
-    /// Full `Authorization` header value for this credential. This is the
-    /// single dispatch point the transport uses: Basic for the two
-    /// Atlassian variants, Bearer for [`Self::Bearer`]. New auth schemes
-    /// should be added here rather than at the transport layer.
+    /// Header **value** for this credential. This is the single dispatch point
+    /// the transport uses for the value: Basic for the two Atlassian variants,
+    /// Bearer for [`Self::Bearer`], and the raw key for [`Self::ApiKeyHeader`].
+    /// The header *name* this value is sent under is given by
+    /// [`auth_header_name`](Self::auth_header_name). New auth schemes should be
+    /// added here rather than at the transport layer.
     pub fn auth_header(&self) -> String {
         match self {
             Self::Bearer { token } => format!("Bearer {token}"),
+            // A custom-header API key has no scheme prefix — the value is the
+            // bare secret (e.g. `X-API-Key: <key>`).
+            Self::ApiKeyHeader { key, .. } => key.clone(),
             Self::AtlassianApiToken { .. } | Self::BitbucketAppPassword { .. } => {
                 format!("Basic {}", self.basic_auth_payload())
             }
+        }
+    }
+
+    /// The request header name this credential's value is sent under. Every
+    /// scheme except [`Self::ApiKeyHeader`] uses the standard `Authorization`
+    /// header; `ApiKeyHeader` uses its caller-supplied custom name (e.g.
+    /// `X-API-Key`). Returns an [`auth_invalid`] error if a custom header name
+    /// is not a syntactically valid HTTP header.
+    pub fn auth_header_name(&self) -> Result<HeaderName, McpError> {
+        match self {
+            Self::ApiKeyHeader { header_name, .. } => {
+                HeaderName::from_bytes(header_name.as_bytes())
+                    .map_err(|_| auth_invalid(format!("Invalid auth header name: {header_name:?}")))
+            }
+            _ => Ok(AUTHORIZATION),
         }
     }
 
@@ -178,10 +205,11 @@ impl Credentials {
             Self::BitbucketAppPassword { username, password } => {
                 format!("{username}:{password}")
             }
-            // Bearer carries an opaque token, not a `user:secret` pair, and
-            // is routed through `auth_header()` above. This branch keeps the
-            // match total; it is unreachable for a `Bearer` in practice.
-            Self::Bearer { .. } => String::new(),
+            // Bearer and ApiKeyHeader carry an opaque token/key, not a
+            // `user:secret` pair, and are routed through `auth_header()` above.
+            // These branches keep the match total; they are unreachable for
+            // those variants in practice.
+            Self::Bearer { .. } | Self::ApiKeyHeader { .. } => String::new(),
         };
         STANDARD.encode(raw.as_bytes())
     }
@@ -194,6 +222,7 @@ impl Credentials {
             Self::AtlassianApiToken { email, .. } => email,
             Self::BitbucketAppPassword { username, .. } => username,
             Self::Bearer { .. } => "bearer",
+            Self::ApiKeyHeader { .. } => "api-key",
         }
     }
 }

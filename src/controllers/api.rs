@@ -129,7 +129,17 @@ pub async fn handle_request(
     // lifecycle (e.g. Zoom's OAuth bearer) resolve their own credentials and
     // call [`dispatch_with_creds`] directly.
     let creds = Credentials::require_for_async(ctx.config, ctx.vendor.name()).await?;
-    dispatch_with_creds(ctx, &creds, method, path, query_params, body, jq, output_format).await
+    dispatch_with_creds(
+        ctx,
+        &creds,
+        method,
+        path,
+        query_params,
+        body,
+        jq,
+        output_format,
+    )
+    .await
 }
 
 /// Dispatch a request with caller-supplied credentials. Factored out of

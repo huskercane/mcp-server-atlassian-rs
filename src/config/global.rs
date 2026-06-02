@@ -16,10 +16,7 @@ pub fn default_path() -> Option<PathBuf> {
 ///
 /// This is the single-vendor (back-compat) reader. The internal Config loader
 /// uses [`read_all_vendors`] to capture every recognised vendor section.
-pub fn read(
-    path: &Path,
-    package_name: &str,
-) -> Result<HashMap<String, String>, std::io::Error> {
+pub fn read(path: &Path, package_name: &str) -> Result<HashMap<String, String>, std::io::Error> {
     let bytes = std::fs::read(path)?;
     let root: Value = serde_json::from_slice(&bytes)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
