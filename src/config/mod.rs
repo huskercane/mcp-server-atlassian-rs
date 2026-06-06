@@ -77,6 +77,12 @@ pub const VENDOR_SLACK: &str = "slack";
 /// `Authorization` — see [`crate::auth::Credentials::ApiKeyHeader`].
 pub const VENDOR_POSTMAN: &str = "postman";
 
+/// Canonical vendor name for edX / Open edX discussion APIs. Authenticates
+/// with a bearer token (`EDX_ACCESS_TOKEN`) and defaults to the edx.org LMS
+/// base (`https://courses.edx.org`), with `EDX_API_BASE` available for Open
+/// edX instances or tests.
+pub const VENDOR_EDX: &str = "edx";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -439,6 +445,12 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
     ];
     let slack_aliases = vec!["slack".to_string(), "mcp-server-slack".to_string()];
     let postman_aliases = vec!["postman".to_string(), "mcp-server-postman".to_string()];
+    let edx_aliases = vec![
+        "edx".to_string(),
+        "openedx".to_string(),
+        "open-edx".to_string(),
+        "mcp-server-edx".to_string(),
+    ];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
@@ -448,6 +460,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_CIRCLECI, circleci_aliases),
         (VENDOR_SLACK, slack_aliases),
         (VENDOR_POSTMAN, postman_aliases),
+        (VENDOR_EDX, edx_aliases),
     ]
 }
 

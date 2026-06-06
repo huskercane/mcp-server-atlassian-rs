@@ -42,6 +42,7 @@ use crate::config::Config;
 use crate::constants::{PACKAGE_NAME, VERSION};
 use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, handle_write};
 use crate::controllers::circleci::CircleCiContext;
+use crate::controllers::edx::EdxContext;
 use crate::controllers::handle_clone;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
@@ -52,12 +53,17 @@ use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
 use crate::vendor::circleci::CircleCiVendor;
 use crate::vendor::confluence::ConfluenceVendor;
+use crate::vendor::edx::EdxVendor;
 use crate::vendor::jira::JiraVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
-use args::{CloneArgs, ReadArgs, WriteArgs};
+use args::{
+    CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs,
+    EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs, ReadArgs,
+    WriteArgs,
+};
 
 #[derive(Clone)]
 pub struct AtlassianServer {
@@ -79,6 +85,7 @@ struct ServerState {
     circleci_vendor: CircleCiVendor,
     slack_vendor: SlackVendor,
     postman_vendor: PostmanVendor,
+    edx_vendor: EdxVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -104,6 +111,7 @@ impl AtlassianServer {
             CircleCiVendor::new(),
             SlackVendor::new(),
             PostmanVendor::new(),
+            EdxVendor::new(),
         ))
     }
 
@@ -125,6 +133,7 @@ impl AtlassianServer {
         circleci_vendor: CircleCiVendor,
         slack_vendor: SlackVendor,
         postman_vendor: PostmanVendor,
+        edx_vendor: EdxVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -137,6 +146,7 @@ impl AtlassianServer {
                 circleci_vendor,
                 slack_vendor,
                 postman_vendor,
+                edx_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -156,6 +166,7 @@ impl AtlassianServer {
             + Self::circleci_router()
             + Self::slack_router()
             + Self::postman_router()
+            + Self::edx_discussion_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -238,6 +249,14 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.postman_vendor,
+        )
+    }
+
+    fn edx_ctx(&self) -> EdxContext<'_> {
+        EdxContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.edx_vendor,
         )
     }
 }
@@ -330,6 +349,97 @@ impl AtlassianServer {
         Parameters(args): Parameters<CloneArgs>,
     ) -> Result<CallToolResult, RmcpError> {
         Ok(run_clone(self, &args).await)
+    }
+}
+
+// ============================================================================
+// edX discussion tools
+// ============================================================================
+
+#[tool_router(router = edx_discussion_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/edx_discussion_course.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_course(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionCourseArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_course(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/edx_discussion_topics.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_topics(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionTopicsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_topics(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/edx_discussion_threads.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_threads(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionThreadsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_threads(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/edx_discussion_thread_create.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_thread_create(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionThreadCreateArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_thread_create(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/edx_discussion_comments.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_comments(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionCommentsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_comments(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/edx_discussion_comment_create.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn edx_discussion_comment_create(
+        &self,
+        Parameters(args): Parameters<EdxDiscussionCommentCreateArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_edx_discussion_comment_create(self, &args).await)
     }
 }
 
@@ -1008,14 +1118,76 @@ async fn run_write_postman(
     }
 }
 
-async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
-    match handle_clone(&server.bitbucket_typed_ctx(), args).await {
-        Ok(resp) => {
-            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
-            CallToolResult::success(vec![Content::text(text)])
-        }
+async fn run_edx_discussion_course(
+    server: &AtlassianServer,
+    args: &EdxDiscussionCourseArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::course(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
         Err(err) => error_to_result(&err),
     }
+}
+
+async fn run_edx_discussion_topics(
+    server: &AtlassianServer,
+    args: &EdxDiscussionTopicsArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::topics(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_edx_discussion_threads(
+    server: &AtlassianServer,
+    args: &EdxDiscussionThreadsArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::threads(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_edx_discussion_thread_create(
+    server: &AtlassianServer,
+    args: &EdxDiscussionThreadCreateArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::create_thread(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_edx_discussion_comments(
+    server: &AtlassianServer,
+    args: &EdxDiscussionCommentsArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::comments(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_edx_discussion_comment_create(
+    server: &AtlassianServer,
+    args: &EdxDiscussionCommentCreateArgs,
+) -> CallToolResult {
+    match crate::controllers::edx::create_comment(&server.edx_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
+    match handle_clone(&server.bitbucket_typed_ctx(), args).await {
+        Ok(resp) => success_response(resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+fn success_response(resp: crate::controllers::ControllerResponse) -> CallToolResult {
+    let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+    CallToolResult::success(vec![Content::text(text)])
 }
 
 fn error_to_result(err: &crate::error::McpError) -> CallToolResult {

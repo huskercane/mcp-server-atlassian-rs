@@ -28,6 +28,7 @@
 pub mod bitbucket;
 pub mod circleci;
 pub mod confluence;
+pub mod edx;
 pub mod jira;
 pub mod postman;
 pub mod slack;

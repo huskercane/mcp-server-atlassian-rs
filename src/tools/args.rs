@@ -118,3 +118,222 @@ pub struct WriteArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<OutputFormatArg>,
 }
+
+/// Shared optional output controls for typed edX discussion read tools.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionOutputArgs {
+    /// JMESPath expression to filter/transform the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `edx_discussion_course`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionCourseArgs {
+    /// Course key, e.g. "course-v1:edX+DemoX+Demo_Course".
+    pub course_id: String,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}
+
+/// Arguments for `edx_discussion_topics`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionTopicsArgs {
+    /// Course key, e.g. "course-v1:edX+DemoX+Demo_Course".
+    pub course_id: String,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}
+
+/// Arguments for `edx_discussion_threads`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionThreadsArgs {
+    /// Course key. Required by the edX Discussion API.
+    pub course_id: String,
+
+    /// Retrieve threads only within this topic. Mutually exclusive with
+    /// `following` and `textSearch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+
+    /// Retrieve only threads the user is following.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub following: Option<bool>,
+
+    /// Retrieve only unread threads or unanswered question threads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<EdxDiscussionThreadView>,
+
+    /// Full-text search query for matching threads/comments. Mutually
+    /// exclusive with `topicId` and `following`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text_search: Option<String>,
+
+    /// Order threads by last activity, comment count, or vote count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<EdxDiscussionThreadOrderBy>,
+
+    /// Sort direction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_direction: Option<EdxDiscussionOrderDirection>,
+
+    /// Number of threads per page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    /// Page number to retrieve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdxDiscussionThreadView {
+    Unread,
+    Unanswered,
+}
+
+impl EdxDiscussionThreadView {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unread => "unread",
+            Self::Unanswered => "unanswered",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EdxDiscussionThreadOrderBy {
+    LastActivityAt,
+    CommentCount,
+    VoteCount,
+}
+
+impl EdxDiscussionThreadOrderBy {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::LastActivityAt => "last_activity_at",
+            Self::CommentCount => "comment_count",
+            Self::VoteCount => "vote_count",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EdxDiscussionOrderDirection {
+    Asc,
+    Desc,
+}
+
+impl EdxDiscussionOrderDirection {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+/// Arguments for `edx_discussion_thread_create`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionThreadCreateArgs {
+    /// Course key.
+    pub course_id: String,
+
+    /// Topic ID to create the thread in.
+    pub topic_id: String,
+
+    /// Thread type: "discussion" or "question".
+    #[serde(rename = "type")]
+    pub thread_type: EdxDiscussionThreadType,
+
+    /// Thread title.
+    pub title: String,
+
+    /// Raw body. May contain Markdown, HTML, and MathJax markup supported by
+    /// the edX discussion service.
+    pub raw_body: String,
+
+    /// Optional cohort/group ID. Privileged roles may set this explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_id: Option<i64>,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum EdxDiscussionThreadType {
+    Discussion,
+    Question,
+}
+
+impl EdxDiscussionThreadType {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Discussion => "discussion",
+            Self::Question => "question",
+        }
+    }
+}
+
+/// Arguments for `edx_discussion_comments`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionCommentsArgs {
+    /// Thread ID whose comments/responses should be listed.
+    pub thread_id: String,
+
+    /// Retrieve only endorsed or non-endorsed comments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endorsed: Option<bool>,
+
+    /// Number of comments per page.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    /// Page number to retrieve.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}
+
+/// Arguments for `edx_discussion_comment_create`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct EdxDiscussionCommentCreateArgs {
+    /// Thread ID to respond to. Omit only when creating a child comment under
+    /// `parentId`, if the target Open edX instance supports that form.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+
+    /// Parent comment ID for a nested comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+
+    /// Raw body. May contain Markdown, HTML, and MathJax markup supported by
+    /// the edX discussion service.
+    pub raw_body: String,
+
+    #[serde(default, flatten)]
+    pub output: EdxDiscussionOutputArgs,
+}

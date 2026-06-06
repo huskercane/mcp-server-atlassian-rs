@@ -2,7 +2,7 @@
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
-The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), and **Postman** (`postman_*`) — native additions (not TS ports) that reuse the generic-verb proxy design. Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`.
+The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), **Postman** (`postman_*`), and **edX/Open edX discussions** (`edx_discussion_*`) — native additions (not TS ports). Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`. edX discussion tools use a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`.
 
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
@@ -11,7 +11,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, and Postman — instead of running separate Node processes side-by-side, you get one MCP server exposing all 36 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`).
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, and edX discussions — instead of running separate Node processes side-by-side, you get one MCP server exposing all 42 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`).
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -56,6 +56,8 @@ Slack is separate too: create a Slack app, install it to your workspace, and cop
 
 Postman is separate too: create an [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) (Postman → Account Settings → API Keys) and set it as `POSTMAN_API_KEY` (below). Unlike every other vendor it is sent in the `X-API-Key` header, not `Authorization`. Read as plaintext from the `postman` config section or environment; never goes through the OS keychain.
 
+edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access the target course discussions. The default LMS base is `https://courses.edx.org`; set `EDX_API_BASE` for another Open edX instance. Discussion endpoints still enforce course enrollment/forum-role access and course discussion availability.
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -72,11 +74,13 @@ Postman is separate too: create an [API key](https://learning.postman.com/docs/d
 | `CIRCLECI_TOKEN` | CircleCI personal API token, sent as `Authorization: Bearer`. **Required** before invoking any `circleci_*` tool; only checked at tool-call time, so a non-CircleCI setup boots without it. | circleci only |
 | `SLACK_TOKEN` | Slack bot/user OAuth token (`xoxb-…` / `xoxp-…`), sent as `Authorization: Bearer`. **Required** before invoking any `slack_*` tool; only checked at tool-call time, so a non-Slack setup boots without it. | slack only |
 | `POSTMAN_API_KEY` | Postman API key, sent in the `X-API-Key` header (not `Authorization`). **Required** before invoking any `postman_*` tool; only checked at tool-call time, so a non-Postman setup boots without it. | postman only |
+| `EDX_ACCESS_TOKEN` | edX/Open edX bearer token for discussion API requests. **Required** before invoking any `edx_discussion_*` tool; only checked at tool-call time, so a non-edX setup boots without it. | edx only |
+| `EDX_API_BASE` | Optional LMS base URL for edX/Open edX discussion APIs. Defaults to `https://courses.edx.org`; set this for another Open edX host. | edx only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`) so each product's keys stay isolated:
 
 ```json
 {
@@ -118,11 +122,17 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
     "environments": {
       "POSTMAN_API_KEY": "PMAK-..."
     }
+  },
+  "edx": {
+    "environments": {
+      "EDX_ACCESS_TOKEN": "eyJ...",
+      "EDX_API_BASE": "https://courses.edx.org"
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
