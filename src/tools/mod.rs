@@ -44,6 +44,7 @@ use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, hand
 use crate::controllers::circleci::CircleCiContext;
 use crate::controllers::edx::EdxContext;
 use crate::controllers::handle_clone;
+use crate::controllers::newrelic::NewRelicContext;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
 use crate::controllers::zoom::ZoomContext;
@@ -55,14 +56,15 @@ use crate::vendor::circleci::CircleCiVendor;
 use crate::vendor::confluence::ConfluenceVendor;
 use crate::vendor::edx::EdxVendor;
 use crate::vendor::jira::JiraVendor;
+use crate::vendor::newrelic::NewRelicVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{
     CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs,
-    EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs, ReadArgs,
-    WriteArgs,
+    EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs,
+    NewRelicQueryArgs, ReadArgs, WriteArgs,
 };
 
 #[derive(Clone)]
@@ -86,6 +88,7 @@ struct ServerState {
     slack_vendor: SlackVendor,
     postman_vendor: PostmanVendor,
     edx_vendor: EdxVendor,
+    newrelic_vendor: NewRelicVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -112,6 +115,7 @@ impl AtlassianServer {
             SlackVendor::new(),
             PostmanVendor::new(),
             EdxVendor::new(),
+            NewRelicVendor::new(),
         ))
     }
 
@@ -134,6 +138,7 @@ impl AtlassianServer {
         slack_vendor: SlackVendor,
         postman_vendor: PostmanVendor,
         edx_vendor: EdxVendor,
+        newrelic_vendor: NewRelicVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -147,6 +152,7 @@ impl AtlassianServer {
                 slack_vendor,
                 postman_vendor,
                 edx_vendor,
+                newrelic_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -167,6 +173,7 @@ impl AtlassianServer {
             + Self::slack_router()
             + Self::postman_router()
             + Self::edx_discussion_router()
+            + Self::newrelic_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -257,6 +264,17 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.edx_vendor,
+        )
+    }
+
+    /// New Relic-specific context. Carries its own credential lookup (a static
+    /// User API key from config) and authenticates via the custom `API-Key`
+    /// header, so it uses a dedicated [`NewRelicContext`].
+    fn newrelic_ctx(&self) -> NewRelicContext<'_> {
+        NewRelicContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.newrelic_vendor,
         )
     }
 }
@@ -905,6 +923,27 @@ impl AtlassianServer {
     }
 }
 
+// ============================================================================
+// New Relic tools
+// ============================================================================
+
+#[tool_router(router = newrelic_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/newrelic_query.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn newrelic_query(
+        &self,
+        Parameters(args): Parameters<NewRelicQueryArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_newrelic_query(self, &args).await)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
@@ -1114,6 +1153,16 @@ async fn run_write_postman(
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
         }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_newrelic_query(
+    server: &AtlassianServer,
+    args: &NewRelicQueryArgs,
+) -> CallToolResult {
+    match crate::controllers::newrelic::query(&server.newrelic_ctx(), args).await {
+        Ok(resp) => success_response(resp),
         Err(err) => error_to_result(&err),
     }
 }

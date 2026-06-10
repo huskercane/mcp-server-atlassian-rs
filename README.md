@@ -58,6 +58,8 @@ Postman is separate too: create an [API key](https://learning.postman.com/docs/d
 
 edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access the target course discussions. The default LMS base is `https://courses.edx.org`; set `EDX_API_BASE` for another Open edX instance. Discussion endpoints still enforce course enrollment/forum-role access and course discussion availability.
 
+New Relic is separate too: create a [User API key](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) (New Relic → user menu → API keys → User key) and set it as `NEW_RELIC_API_KEY`. Unlike every other vendor it is sent in the `API-Key` header, and its only API is **NerdGraph** (a single GraphQL endpoint), so the integration exposes one `newrelic_query` tool rather than five REST verbs. EU-region accounts must set `NEW_RELIC_REGION=eu`. Read as plaintext from the `newrelic` config section or environment; never goes through the OS keychain.
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -76,11 +78,14 @@ edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access th
 | `POSTMAN_API_KEY` | Postman API key, sent in the `X-API-Key` header (not `Authorization`). **Required** before invoking any `postman_*` tool; only checked at tool-call time, so a non-Postman setup boots without it. | postman only |
 | `EDX_ACCESS_TOKEN` | edX/Open edX bearer token for discussion API requests. **Required** before invoking any `edx_discussion_*` tool; only checked at tool-call time, so a non-edX setup boots without it. | edx only |
 | `EDX_API_BASE` | Optional LMS base URL for edX/Open edX discussion APIs. Defaults to `https://courses.edx.org`; set this for another Open edX host. | edx only |
+| `NEW_RELIC_API_KEY` | New Relic User API key, sent in the `API-Key` header (not `Authorization`). **Required** before invoking `newrelic_query`; only checked at tool-call time, so a non-New-Relic setup boots without it. | newrelic only |
+| `NEW_RELIC_REGION` | New Relic data-center region: `us` (default) or `eu`. EU accounts must set `eu`, which targets `https://api.eu.newrelic.com`. | newrelic only |
+| `NEW_RELIC_API_BASE` | Optional explicit NerdGraph base URL override (takes priority over `NEW_RELIC_REGION`). | newrelic only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`) so each product's keys stay isolated:
 
 ```json
 {
@@ -128,11 +133,17 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
       "EDX_ACCESS_TOKEN": "eyJ...",
       "EDX_API_BASE": "https://courses.edx.org"
     }
+  },
+  "newrelic": {
+    "environments": {
+      "NEW_RELIC_API_KEY": "NRAK-...",
+      "NEW_RELIC_REGION": "us"
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -331,9 +342,17 @@ Slack endpoints are *methods* (`/conversations.list`), passed verbatim relative 
 
 Postman paths pass through verbatim relative to the `https://api.getpostman.com` base — supply e.g. `/collections` or `/collections/{uid}` (item endpoints take a `uid` of the form `{ownerId}-{guid}`). Authenticates with an API key (`POSTMAN_API_KEY`, read from the `postman` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`X-API-Key`** header rather than `Authorization` — Postman is the only vendor here that authenticates outside the standard auth header. Missing the key surfaces as an authentication error at call time, so a non-Postman deployment boots without it. Most write payloads are wrapped in a top-level resource key (`{"collection": {…}}`, `{"environment": {…}}`).
 
+### New Relic (`newrelic_query`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `newrelic_query` | mutating, open-world | Run any NerdGraph (GraphQL) query against New Relic — NRQL queries, entity search, dashboards, alerts, account data |
+
+New Relic's only API is **NerdGraph**, a single GraphQL endpoint, so unlike the REST vendors there are no five verbs — just one tool that POSTs a GraphQL document (and optional `variables`) to `/graphql`. NRQL queries are run by wrapping them in NerdGraph, e.g. `{ actor { account(id: 123) { nrql(query: "SELECT count(*) FROM Transaction SINCE 1 hour ago") { results } } } }`. Find your account id with `{ actor { accounts { id name } } }`. Authenticates with a User API key (`NEW_RELIC_API_KEY`, read from the `newrelic` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`API-Key`** header. Missing the key surfaces as an authentication error at call time, so a non-New-Relic deployment boots without it. **NerdGraph's defining quirk:** query, validation, and most permission failures come back as `200 OK` with a top-level `errors` array — this server reclassifies a non-empty `errors` array as a typed error, so a successful tool result has no `errors`. EU-region accounts must set `NEW_RELIC_REGION=eu`. The `newrelic_query` tool is marked mutating because NerdGraph mutations (creating dashboards, alert policies, …) share the same endpoint as reads.
+
 ### Shared inputs
 
-All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative).
+All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exception is `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`.
 
 ## Cross-vendor workflows
 

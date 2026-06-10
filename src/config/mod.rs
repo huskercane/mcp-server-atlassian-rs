@@ -83,6 +83,14 @@ pub const VENDOR_POSTMAN: &str = "postman";
 /// edX instances or tests.
 pub const VENDOR_EDX: &str = "edx";
 
+/// Canonical vendor name for New Relic. Like the other non-Atlassian vendors it
+/// does not share the `ATLASSIAN_*` credential model: it authenticates with a
+/// User API key (`NEW_RELIC_API_KEY`) sent in the custom `API-Key` header — see
+/// [`crate::auth::Credentials::ApiKeyHeader`]. Its sole API is `NerdGraph` (a
+/// single `GraphQL` endpoint), and EU-region accounts select a different host via
+/// `NEW_RELIC_REGION=eu`.
+pub const VENDOR_NEWRELIC: &str = "newrelic";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -451,6 +459,11 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "open-edx".to_string(),
         "mcp-server-edx".to_string(),
     ];
+    let newrelic_aliases = vec![
+        "newrelic".to_string(),
+        "new-relic".to_string(),
+        "mcp-server-newrelic".to_string(),
+    ];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
@@ -461,6 +474,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_SLACK, slack_aliases),
         (VENDOR_POSTMAN, postman_aliases),
         (VENDOR_EDX, edx_aliases),
+        (VENDOR_NEWRELIC, newrelic_aliases),
     ]
 }
 

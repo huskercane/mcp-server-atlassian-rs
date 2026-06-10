@@ -119,6 +119,34 @@ pub struct WriteArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `newrelic_query`.
+///
+/// New Relic's only API is NerdGraph (a single GraphQL endpoint), so this is a
+/// bespoke tool rather than the five generic REST verbs the other vendors use.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NewRelicQueryArgs {
+    /// NerdGraph GraphQL document to execute. NRQL queries are run by wrapping
+    /// them here, e.g.
+    /// `{ actor { account(id: 123) { nrql(query: "SELECT count(*) FROM Transaction SINCE 1 hour ago") { results } } } }`.
+    pub query: String,
+
+    /// Optional GraphQL variables object, referenced by `$name` in `query`.
+    /// Example: `{"id": 1234567, "q": "SELECT average(duration) FROM Transaction"}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Value>,
+
+    /// JMESPath expression to filter/transform the response. IMPORTANT: always
+    /// use this to extract only needed fields and reduce token costs.
+    /// Example: "data.actor.account.nrql.results".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Shared optional output controls for typed edX discussion read tools.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -10,6 +10,7 @@ use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
 use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
 use mcp_server_atlassian::vendor::edx::EdxVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
+use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
 use mcp_server_atlassian::vendor::postman::PostmanVendor;
 use mcp_server_atlassian::vendor::slack::SlackVendor;
 use mcp_server_atlassian::vendor::zoom::ZoomVendor;
@@ -30,6 +31,7 @@ fn server_info_reports_expected_identity() {
         SlackVendor::new(),
         PostmanVendor::new(),
         EdxVendor::new(),
+        NewRelicVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(
