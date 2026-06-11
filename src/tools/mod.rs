@@ -1162,7 +1162,7 @@ async fn run_newrelic_query(
     args: &NewRelicQueryArgs,
 ) -> CallToolResult {
     match crate::controllers::newrelic::query(&server.newrelic_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1172,7 +1172,7 @@ async fn run_edx_discussion_course(
     args: &EdxDiscussionCourseArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::course(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1182,7 +1182,7 @@ async fn run_edx_discussion_topics(
     args: &EdxDiscussionTopicsArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::topics(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1192,7 +1192,7 @@ async fn run_edx_discussion_threads(
     args: &EdxDiscussionThreadsArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::threads(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1202,7 +1202,7 @@ async fn run_edx_discussion_thread_create(
     args: &EdxDiscussionThreadCreateArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::create_thread(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1212,7 +1212,7 @@ async fn run_edx_discussion_comments(
     args: &EdxDiscussionCommentsArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::comments(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1222,19 +1222,19 @@ async fn run_edx_discussion_comment_create(
     args: &EdxDiscussionCommentCreateArgs,
 ) -> CallToolResult {
     match crate::controllers::edx::create_comment(&server.edx_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
 async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
     match handle_clone(&server.bitbucket_typed_ctx(), args).await {
-        Ok(resp) => success_response(resp),
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
-fn success_response(resp: crate::controllers::ControllerResponse) -> CallToolResult {
+fn success_response(resp: &crate::controllers::ControllerResponse) -> CallToolResult {
     let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
     CallToolResult::success(vec![Content::text(text)])
 }
