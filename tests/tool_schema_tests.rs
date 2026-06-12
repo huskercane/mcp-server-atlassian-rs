@@ -9,6 +9,7 @@ use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
 use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
 use mcp_server_atlassian::vendor::edx::EdxVendor;
+use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
 use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
 use mcp_server_atlassian::vendor::postman::PostmanVendor;
@@ -32,6 +33,7 @@ fn server_info_reports_expected_identity() {
         PostmanVendor::new(),
         EdxVendor::new(),
         NewRelicVendor::new(),
+        GrafanaVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

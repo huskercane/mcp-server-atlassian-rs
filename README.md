@@ -2,7 +2,7 @@
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
-The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), **Postman** (`postman_*`), and **edX/Open edX discussions** (`edx_discussion_*`) — native additions (not TS ports). Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`. edX discussion tools use a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`.
+The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), **Postman** (`postman_*`), and **edX/Open edX discussions** (`edx_discussion_*`) — native additions (not TS ports). Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`. edX discussion tools use a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`. **New Relic** (`newrelic_query`) drives NerdGraph (a single GraphQL endpoint) with a User API key in the `API-Key` header. **Grafana** (`grafana_*`) reads logs by proxying [LogQL](https://grafana.com/docs/loki/latest/query/) to a [Loki](https://grafana.com/docs/loki/latest/) datasource through Grafana's [datasource proxy](https://grafana.com/docs/grafana/latest/developers/http_api/data_source/#data-source-proxy-calls), authenticated with a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) as a Bearer token; it works the same for self-hosted Grafana and Grafana Cloud (only `GRAFANA_URL` differs).
 
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
@@ -11,7 +11,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, and edX discussions — instead of running separate Node processes side-by-side, you get one MCP server exposing all 42 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`).
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, and Grafana — instead of running separate Node processes side-by-side, you get one MCP server exposing all 45 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`).
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -60,6 +60,8 @@ edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access th
 
 New Relic is separate too: create a [User API key](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) (New Relic → user menu → API keys → User key) and set it as `NEW_RELIC_API_KEY`. Unlike every other vendor it is sent in the `API-Key` header, and its only API is **NerdGraph** (a single GraphQL endpoint), so the integration exposes one `newrelic_query` tool rather than five REST verbs. EU-region accounts must set `NEW_RELIC_REGION=eu`. Read as plaintext from the `newrelic` config section or environment; never goes through the OS keychain.
 
+Grafana is separate too: create a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) (Grafana → Administration → Service accounts) and set it as `GRAFANA_TOKEN`, plus `GRAFANA_URL` for your instance base (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). The token is sent as `Authorization: Bearer`. "Reading logs from Grafana" runs a LogQL query against a Loki datasource via Grafana's datasource proxy, so you first discover the Loki datasource `uid` with `grafana_list_datasources`, then pass it to `grafana_query_logs`. Read as plaintext from the `grafana` config section or environment; never goes through the OS keychain.
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -81,11 +83,13 @@ New Relic is separate too: create a [User API key](https://docs.newrelic.com/doc
 | `NEW_RELIC_API_KEY` | New Relic User API key, sent in the `API-Key` header (not `Authorization`). **Required** before invoking `newrelic_query`; only checked at tool-call time, so a non-New-Relic setup boots without it. | newrelic only |
 | `NEW_RELIC_REGION` | New Relic data-center region: `us` (default) or `eu`. EU accounts must set `eu`, which targets `https://api.eu.newrelic.com`. | newrelic only |
 | `NEW_RELIC_API_BASE` | Optional explicit NerdGraph base URL override (takes priority over `NEW_RELIC_REGION`). | newrelic only |
+| `GRAFANA_URL` | Grafana instance base URL (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). **Required** before invoking any `grafana_*` tool; only checked at tool-call time, so a non-Grafana setup boots without it. | grafana only |
+| `GRAFANA_TOKEN` | Grafana service-account token (or API key), sent as `Authorization: Bearer`. **Required** before invoking any `grafana_*` tool; only checked at tool-call time. | grafana only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`) so each product's keys stay isolated:
 
 ```json
 {
@@ -139,11 +143,17 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
       "NEW_RELIC_API_KEY": "NRAK-...",
       "NEW_RELIC_REGION": "us"
     }
+  },
+  "grafana": {
+    "environments": {
+      "GRAFANA_URL": "https://myorg.grafana.net",
+      "GRAFANA_TOKEN": "glsa_..."
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -350,9 +360,18 @@ Postman paths pass through verbatim relative to the `https://api.getpostman.com`
 
 New Relic's only API is **NerdGraph**, a single GraphQL endpoint, so unlike the REST vendors there are no five verbs — just one tool that POSTs a GraphQL document (and optional `variables`) to `/graphql`. NRQL queries are run by wrapping them in NerdGraph, e.g. `{ actor { account(id: 123) { nrql(query: "SELECT count(*) FROM Transaction SINCE 1 hour ago") { results } } } }`. Find your account id with `{ actor { accounts { id name } } }`. Authenticates with a User API key (`NEW_RELIC_API_KEY`, read from the `newrelic` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`API-Key`** header. Missing the key surfaces as an authentication error at call time, so a non-New-Relic deployment boots without it. **NerdGraph's defining quirk:** query, validation, and most permission failures come back as `200 OK` with a top-level `errors` array — this server reclassifies a non-empty `errors` array as a typed error, so a successful tool result has no `errors`. EU-region accounts must set `NEW_RELIC_REGION=eu`. The `newrelic_query` tool is marked mutating because NerdGraph mutations (creating dashboards, alert policies, …) share the same endpoint as reads.
 
+### Grafana (`grafana_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `grafana_query_logs` | read-only, idempotent | Read logs by running a LogQL query against a Loki datasource via Grafana's datasource proxy |
+| `grafana_list_datasources` | read-only, idempotent | List configured datasources to discover a Loki datasource's `uid` |
+
+Grafana is a query/visualization layer, not a log store — "reading logs from Grafana" means running a **LogQL** query against a **Loki** datasource through Grafana's **datasource proxy** (`GET /api/datasources/proxy/uid/{uid}/loki/api/v1/query_range`). First call `grafana_list_datasources` and copy the `uid` of an entry whose `type` is `loki` (filter with `jq`: `[?type=='loki'].{name: name, uid: uid}`), then pass it to `grafana_query_logs` as `datasourceUid` along with a `query` (LogQL) and optional `start`/`end`/`limit`/`direction`/`step`. Authenticates with a service-account token (`GRAFANA_TOKEN`, read from the `grafana` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`; the instance base comes from `GRAFANA_URL`. Both are checked at call time, so a non-Grafana deployment boots without them. The same two tools work unchanged against self-hosted Grafana and Grafana Cloud. A bad LogQL query comes back from Loki as an HTTP error and is surfaced as a typed error.
+
 ### Shared inputs
 
-All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exception is `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`.
+All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exceptions are `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`, and the `grafana_*` tools, which take typed inputs (`datasourceUid`/`query`/range knobs for `grafana_query_logs`; no path for either) rather than a raw `path`.
 
 ## Cross-vendor workflows
 

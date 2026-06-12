@@ -33,7 +33,11 @@ fn vendor(server: &MockServer) -> NewRelicVendor {
     NewRelicVendor::with_base_url(server.uri())
 }
 
-fn args(graphql: &str, variables: Option<serde_json::Value>, jq: Option<&str>) -> NewRelicQueryArgs {
+fn args(
+    graphql: &str,
+    variables: Option<serde_json::Value>,
+    jq: Option<&str>,
+) -> NewRelicQueryArgs {
     NewRelicQueryArgs {
         query: graphql.to_string(),
         variables,
@@ -136,9 +140,7 @@ async fn errors_array_in_200_body_surfaces_as_error() {
     let vendor = vendor(&server);
     let ctx = NewRelicContext::new(&client, &config, &vendor);
 
-    let err = query(&ctx, &args("{ bad }", None, None))
-        .await
-        .unwrap_err();
+    let err = query(&ctx, &args("{ bad }", None, None)).await.unwrap_err();
 
     assert_eq!(err.kind, ErrorKind::ApiError);
     assert!(err.message.contains("NRQL Syntax Error"));

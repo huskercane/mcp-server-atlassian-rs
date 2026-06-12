@@ -43,6 +43,7 @@ use crate::constants::{PACKAGE_NAME, VERSION};
 use crate::controllers::api::{BitbucketContext, HandleContext, handle_read, handle_write};
 use crate::controllers::circleci::CircleCiContext;
 use crate::controllers::edx::EdxContext;
+use crate::controllers::grafana::GrafanaContext;
 use crate::controllers::handle_clone;
 use crate::controllers::newrelic::NewRelicContext;
 use crate::controllers::postman::PostmanContext;
@@ -55,6 +56,7 @@ use crate::vendor::bitbucket::BitbucketVendor;
 use crate::vendor::circleci::CircleCiVendor;
 use crate::vendor::confluence::ConfluenceVendor;
 use crate::vendor::edx::EdxVendor;
+use crate::vendor::grafana::GrafanaVendor;
 use crate::vendor::jira::JiraVendor;
 use crate::vendor::newrelic::NewRelicVendor;
 use crate::vendor::postman::PostmanVendor;
@@ -64,7 +66,7 @@ use crate::workspace::WorkspaceCache;
 use args::{
     CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs,
     EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs,
-    NewRelicQueryArgs, ReadArgs, WriteArgs,
+    GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs, ReadArgs, WriteArgs,
 };
 
 #[derive(Clone)]
@@ -89,6 +91,7 @@ struct ServerState {
     postman_vendor: PostmanVendor,
     edx_vendor: EdxVendor,
     newrelic_vendor: NewRelicVendor,
+    grafana_vendor: GrafanaVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -116,6 +119,7 @@ impl AtlassianServer {
             PostmanVendor::new(),
             EdxVendor::new(),
             NewRelicVendor::new(),
+            GrafanaVendor::new(),
         ))
     }
 
@@ -139,6 +143,7 @@ impl AtlassianServer {
         postman_vendor: PostmanVendor,
         edx_vendor: EdxVendor,
         newrelic_vendor: NewRelicVendor,
+        grafana_vendor: GrafanaVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -153,6 +158,7 @@ impl AtlassianServer {
                 postman_vendor,
                 edx_vendor,
                 newrelic_vendor,
+                grafana_vendor,
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -174,6 +180,7 @@ impl AtlassianServer {
             + Self::postman_router()
             + Self::edx_discussion_router()
             + Self::newrelic_router()
+            + Self::grafana_router()
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -275,6 +282,17 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.newrelic_vendor,
+        )
+    }
+
+    /// Grafana-specific context. Carries its own credential lookup (a static
+    /// service-account token from config) and authenticates via
+    /// `Authorization: Bearer`, so it uses a dedicated [`GrafanaContext`].
+    fn grafana_ctx(&self) -> GrafanaContext<'_> {
+        GrafanaContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.grafana_vendor,
         )
     }
 }
@@ -944,6 +962,41 @@ impl AtlassianServer {
     }
 }
 
+// ============================================================================
+// Grafana tools
+// ============================================================================
+
+#[tool_router(router = grafana_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/grafana_query_logs.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn grafana_query_logs(
+        &self,
+        Parameters(args): Parameters<GrafanaQueryLogsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_grafana_query_logs(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/grafana_list_datasources.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn grafana_list_datasources(
+        &self,
+        Parameters(args): Parameters<GrafanaListDatasourcesArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_grafana_list_datasources(self, &args).await)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
@@ -1157,11 +1210,28 @@ async fn run_write_postman(
     }
 }
 
-async fn run_newrelic_query(
-    server: &AtlassianServer,
-    args: &NewRelicQueryArgs,
-) -> CallToolResult {
+async fn run_newrelic_query(server: &AtlassianServer, args: &NewRelicQueryArgs) -> CallToolResult {
     match crate::controllers::newrelic::query(&server.newrelic_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_grafana_query_logs(
+    server: &AtlassianServer,
+    args: &GrafanaQueryLogsArgs,
+) -> CallToolResult {
+    match crate::controllers::grafana::query_logs(&server.grafana_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_grafana_list_datasources(
+    server: &AtlassianServer,
+    args: &GrafanaListDatasourcesArgs,
+) -> CallToolResult {
+    match crate::controllers::grafana::list_datasources(&server.grafana_ctx(), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }

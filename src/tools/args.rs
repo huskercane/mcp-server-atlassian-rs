@@ -147,6 +147,74 @@ pub struct NewRelicQueryArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `grafana_query_logs`.
+///
+/// Reads logs by running a LogQL query against a Loki datasource through
+/// Grafana's datasource proxy. The datasource UID identifies which Loki backend
+/// to query; discover it with `grafana_list_datasources`. Time-range and limit
+/// knobs map directly onto Loki's `query_range` parameters.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GrafanaQueryLogsArgs {
+    /// UID of the Loki datasource to query. Find it via
+    /// `grafana_list_datasources` (the `uid` field of a `type: "loki"` entry).
+    pub datasource_uid: String,
+
+    /// LogQL query, e.g. `{app="api"} |= "error"` or
+    /// `sum by (level) (count_over_time({app="api"}[5m]))`.
+    pub query: String,
+
+    /// Range start: RFC3339 (`2024-01-01T00:00:00Z`) or Unix nanoseconds.
+    /// Defaults to Loki's default window (last hour) when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start: Option<String>,
+
+    /// Range end: RFC3339 or Unix nanoseconds. Defaults to "now" when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end: Option<String>,
+
+    /// Max number of log lines to return (Loki defaults to 100). Keep this small
+    /// to reduce token costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+
+    /// Scan direction: `backward` (newest first, default) or `forward`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub direction: Option<String>,
+
+    /// Query resolution step for metric queries, e.g. `30s` or `1m`. Only
+    /// meaningful for LogQL metric queries; ignored for log selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<String>,
+
+    /// JMESPath expression to filter/transform the response. IMPORTANT: always
+    /// use this to extract only needed fields and reduce token costs.
+    /// Example: "data.result[*].values".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `grafana_list_datasources`.
+///
+/// Lists configured Grafana datasources so the caller can discover a Loki
+/// datasource's UID for `grafana_query_logs`. Filter to Loki entries with `jq`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GrafanaListDatasourcesArgs {
+    /// JMESPath expression to filter/transform the response. Example to find
+    /// Loki datasources: `[?type=='loki'].{name: name, uid: uid}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Shared optional output controls for typed edX discussion read tools.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

@@ -91,6 +91,14 @@ pub const VENDOR_EDX: &str = "edx";
 /// `NEW_RELIC_REGION=eu`.
 pub const VENDOR_NEWRELIC: &str = "newrelic";
 
+/// Canonical vendor name for Grafana. Like the other non-Atlassian vendors it
+/// does not share the `ATLASSIAN_*` credential model: it authenticates with a
+/// service-account token (`GRAFANA_TOKEN`) sent as `Authorization: Bearer` — see
+/// [`crate::auth::Credentials::Bearer`]. Its base URL is required config
+/// (`GRAFANA_URL`) since the same binary serves self-hosted and Grafana Cloud.
+/// Logs are read by proxying `LogQL` to a Loki datasource through Grafana.
+pub const VENDOR_GRAFANA: &str = "grafana";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -464,6 +472,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "new-relic".to_string(),
         "mcp-server-newrelic".to_string(),
     ];
+    let grafana_aliases = vec!["grafana".to_string(), "mcp-server-grafana".to_string()];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
@@ -475,6 +484,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_POSTMAN, postman_aliases),
         (VENDOR_EDX, edx_aliases),
         (VENDOR_NEWRELIC, newrelic_aliases),
+        (VENDOR_GRAFANA, grafana_aliases),
     ]
 }
 
