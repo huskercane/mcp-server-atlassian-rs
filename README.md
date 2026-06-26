@@ -1,6 +1,6 @@
 # mcp-server-atlassian (Rust port)
 
-Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
+Rust implementation of the Atlassian MCP servers — connects AI assistants (Codex, Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
 The same binary also exposes eight more products as **native additions** (not TS ports), each with its own auth model:
 
@@ -266,6 +266,34 @@ Restart your MCP client. The first time the server resolves the credential it lo
 - **Headless Linux**: build with `cargo build --release --no-default-features` to drop the keyring dep entirely. The CLI subcommands and sentinel resolution still compile but every keychain operation returns `KeychainError::Unavailable`. Keep using env vars / `~/.mcp/configs.json` plaintext in this mode.
 
 ## MCP client configuration
+
+### Codex
+
+Codex supports stdio MCP servers in both the CLI and IDE extension. Add this binary once and Codex can call the `bb_*`, `jira_*`, `conf_*`, and native vendor tools from your coding sessions.
+
+Using the Codex CLI:
+
+```bash
+codex mcp add atlassian \
+    --env ATLASSIAN_USER_EMAIL=your.email@company.com \
+    --env ATLASSIAN_API_TOKEN=ATATT... \
+    -- /absolute/path/to/mcp-atlassian
+```
+
+Or edit `~/.codex/config.toml` directly:
+
+```toml
+[mcp_servers.atlassian]
+command = "/absolute/path/to/mcp-atlassian"
+
+[mcp_servers.atlassian.env]
+ATLASSIAN_USER_EMAIL = "your.email@company.com"
+ATLASSIAN_API_TOKEN = "ATATT..."
+# Required before calling jira_* or conf_* tools:
+ATLASSIAN_SITE_NAME = "mycompany"
+```
+
+Codex also supports project-scoped MCP configuration in `.codex/config.toml` for trusted projects. Use `/mcp` inside the Codex TUI to confirm the server is loaded.
 
 ### Claude Desktop
 
