@@ -99,6 +99,15 @@ pub const VENDOR_NEWRELIC: &str = "newrelic";
 /// Logs are read by proxying `LogQL` to a Loki datasource through Grafana.
 pub const VENDOR_GRAFANA: &str = "grafana";
 
+/// Canonical vendor name for WRDS (Wharton Research Data Services). WRDS is the
+/// one vendor with no REST API: access is a direct **`PostgreSQL`** connection
+/// (`wrds-pgdata.wharton.upenn.edu:9737`, SSL required), so it does not use the
+/// `ATLASSIAN_*` credential model or the shared HTTP transport. Authentication
+/// is a WRDS username + password (`WRDS_USERNAME` / `WRDS_PASSWORD`); the host,
+/// port, and database default to the WRDS cloud values and are overridable
+/// (`WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME`) for tests or mirrors.
+pub const VENDOR_WRDS: &str = "wrds";
+
 /// Immutable configuration snapshot assembled from all three sources.
 ///
 /// Internally split into a vendor-neutral `shared` overlay (process env +
@@ -473,6 +482,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "mcp-server-newrelic".to_string(),
     ];
     let grafana_aliases = vec!["grafana".to_string(), "mcp-server-grafana".to_string()];
+    let wrds_aliases = vec!["wrds".to_string(), "mcp-server-wrds".to_string()];
 
     vec![
         (VENDOR_BITBUCKET, bitbucket_aliases),
@@ -485,6 +495,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_EDX, edx_aliases),
         (VENDOR_NEWRELIC, newrelic_aliases),
         (VENDOR_GRAFANA, grafana_aliases),
+        (VENDOR_WRDS, wrds_aliases),
     ]
 }
 

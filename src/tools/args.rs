@@ -215,6 +215,98 @@ pub struct GrafanaListDatasourcesArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `wrds_query`.
+///
+/// WRDS (Wharton Research Data Services) is a PostgreSQL database, so this tool
+/// runs a single read-only SQL `SELECT`. The session is forced read-only and the
+/// query is wrapped server-side, so only one `SELECT`/`VALUES` statement runs.
+#[cfg(feature = "wrds")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WrdsQueryArgs {
+    /// Read-only SQL SELECT to run against WRDS. Reference tables as
+    /// `library.table` (a WRDS library is a Postgres schema), e.g.
+    /// `SELECT permno, date, ret FROM crsp.dsf WHERE date >= '2023-01-01' LIMIT 100`.
+    /// Discover libraries/tables/columns with `wrds_list_libraries`,
+    /// `wrds_list_tables`, and `wrds_describe_table`.
+    pub sql: String,
+
+    /// Maximum rows to return (token-cost guard). Defaults to 1000; capped at
+    /// 100000. Always prefer a small limit and a tight `WHERE` clause — WRDS
+    /// tables can be enormous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
+
+    /// JMESPath expression to filter/transform the rows. IMPORTANT: always use
+    /// this to extract only needed fields and reduce token costs.
+    /// Example: "[*].{permno: permno, ret: ret}".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `wrds_list_libraries`.
+#[cfg(feature = "wrds")]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WrdsListLibrariesArgs {
+    /// JMESPath expression to filter/transform the response.
+    /// Example: "[*].library".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `wrds_list_tables`.
+#[cfg(feature = "wrds")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WrdsListTablesArgs {
+    /// WRDS library (Postgres schema) to list, e.g. "crsp", "comp", "ff".
+    /// Discover available libraries with `wrds_list_libraries`.
+    pub library: String,
+
+    /// Maximum rows to return. Defaults to 1000; capped at 100000.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_limit: Option<u32>,
+
+    /// JMESPath expression to filter/transform the response.
+    /// Example: "[*].table_name".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `wrds_describe_table`.
+#[cfg(feature = "wrds")]
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct WrdsDescribeTableArgs {
+    /// WRDS library (Postgres schema) containing the table, e.g. "crsp".
+    pub library: String,
+
+    /// Table or view name within the library, e.g. "dsf".
+    pub table: String,
+
+    /// JMESPath expression to filter/transform the response.
+    /// Example: "[*].{col: column_name, type: data_type}".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Shared optional output controls for typed edX discussion read tools.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

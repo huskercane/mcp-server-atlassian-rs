@@ -48,6 +48,8 @@ use crate::controllers::handle_clone;
 use crate::controllers::newrelic::NewRelicContext;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
+#[cfg(feature = "wrds")]
+use crate::controllers::wrds::WrdsContext;
 use crate::controllers::zoom::ZoomContext;
 use crate::error::format_error_for_mcp_tool;
 use crate::format::truncation::truncate_for_ai;
@@ -61,6 +63,8 @@ use crate::vendor::jira::JiraVendor;
 use crate::vendor::newrelic::NewRelicVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
+#[cfg(feature = "wrds")]
+use crate::vendor::wrds::WrdsVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{
@@ -68,6 +72,8 @@ use args::{
     EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs,
     GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs, ReadArgs, WriteArgs,
 };
+#[cfg(feature = "wrds")]
+use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
 
 #[derive(Clone)]
 pub struct AtlassianServer {
@@ -92,6 +98,13 @@ struct ServerState {
     edx_vendor: EdxVendor,
     newrelic_vendor: NewRelicVendor,
     grafana_vendor: GrafanaVendor,
+    /// WRDS (PostgreSQL) vendor. Feature-gated: a `--no-default-features` build
+    /// drops the Postgres dependency tree entirely, so this field and the
+    /// `wrds_*` tools simply don't exist. Constructed internally (it is cheap
+    /// and stateless apart from a lazily-built TLS config) so the public
+    /// `with_components` signature doesn't change with the feature.
+    #[cfg(feature = "wrds")]
+    wrds_vendor: WrdsVendor,
     /// Per-instance workspace cache. Lives here (not as a process-global
     /// singleton) so multi-server embedders never leak one account's
     /// default workspace into another's lookups.
@@ -159,6 +172,8 @@ impl AtlassianServer {
                 edx_vendor,
                 newrelic_vendor,
                 grafana_vendor,
+                #[cfg(feature = "wrds")]
+                wrds_vendor: WrdsVendor::new(),
                 workspace_cache: WorkspaceCache::new(),
             }),
             tool_router: Self::tool_router(),
@@ -171,7 +186,7 @@ impl AtlassianServer {
     /// Naming this method `tool_router` (the macro's default) lets
     /// `#[tool_handler]` find it without a custom `router = …` attr.
     fn tool_router() -> ToolRouter<Self> {
-        Self::bitbucket_router()
+        let router = Self::bitbucket_router()
             + Self::jira_router()
             + Self::confluence_router()
             + Self::zoom_router()
@@ -180,7 +195,11 @@ impl AtlassianServer {
             + Self::postman_router()
             + Self::edx_discussion_router()
             + Self::newrelic_router()
-            + Self::grafana_router()
+            + Self::grafana_router();
+        // WRDS tools only exist when the `wrds` feature is on (default).
+        #[cfg(feature = "wrds")]
+        let router = router + Self::wrds_router();
+        router
     }
 
     fn bitbucket_ctx(&self) -> HandleContext<'_> {
@@ -294,6 +313,13 @@ impl AtlassianServer {
             &self.state.config,
             &self.state.grafana_vendor,
         )
+    }
+
+    /// WRDS-specific context. WRDS is PostgreSQL, not HTTP, so this context
+    /// carries no `reqwest::Client` — just config and the Postgres vendor.
+    #[cfg(feature = "wrds")]
+    fn wrds_ctx(&self) -> WrdsContext<'_> {
+        WrdsContext::new(&self.state.config, &self.state.wrds_vendor)
     }
 }
 
@@ -997,6 +1023,70 @@ impl AtlassianServer {
     }
 }
 
+// ============================================================================
+// WRDS tools (feature = "wrds")
+// ============================================================================
+
+#[cfg(feature = "wrds")]
+#[tool_router(router = wrds_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/wrds_query.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn wrds_query(
+        &self,
+        Parameters(args): Parameters<WrdsQueryArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_wrds_query(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/wrds_list_libraries.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn wrds_list_libraries(
+        &self,
+        Parameters(args): Parameters<WrdsListLibrariesArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_wrds_list_libraries(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/wrds_list_tables.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn wrds_list_tables(
+        &self,
+        Parameters(args): Parameters<WrdsListTablesArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_wrds_list_tables(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/wrds_describe_table.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn wrds_describe_table(
+        &self,
+        Parameters(args): Parameters<WrdsDescribeTableArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_wrds_describe_table(self, &args).await)
+    }
+}
+
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
     fn get_info(&self) -> ServerInfo {
@@ -1232,6 +1322,47 @@ async fn run_grafana_list_datasources(
     args: &GrafanaListDatasourcesArgs,
 ) -> CallToolResult {
     match crate::controllers::grafana::list_datasources(&server.grafana_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+#[cfg(feature = "wrds")]
+async fn run_wrds_query(server: &AtlassianServer, args: &WrdsQueryArgs) -> CallToolResult {
+    match crate::controllers::wrds::query(&server.wrds_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+#[cfg(feature = "wrds")]
+async fn run_wrds_list_libraries(
+    server: &AtlassianServer,
+    args: &WrdsListLibrariesArgs,
+) -> CallToolResult {
+    match crate::controllers::wrds::list_libraries(&server.wrds_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+#[cfg(feature = "wrds")]
+async fn run_wrds_list_tables(
+    server: &AtlassianServer,
+    args: &WrdsListTablesArgs,
+) -> CallToolResult {
+    match crate::controllers::wrds::list_tables(&server.wrds_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+#[cfg(feature = "wrds")]
+async fn run_wrds_describe_table(
+    server: &AtlassianServer,
+    args: &WrdsDescribeTableArgs,
+) -> CallToolResult {
+    match crate::controllers::wrds::describe_table(&server.wrds_ctx(), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }

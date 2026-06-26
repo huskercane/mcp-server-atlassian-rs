@@ -1,11 +1,11 @@
 [package]
 name         = "mcp-server-atlassian"
-version      = "0.1.0"
+version      = "0.6.0"
 edition      = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
 description  = "Rust MCP server for Atlassian Bitbucket and Jira (Cloud). Ports of the TypeScript reference implementations."
 license      = "ISC"
-repository   = "https://github.com/aashari/mcp-server-atlassian-bitbucket"
+repository   = "https://github.com/huskercane/mcp-server-atlassian-rs"
 readme       = "../README.md"
 publish      = false
 
@@ -22,7 +22,18 @@ path = "src/main.rs"
 # for headless Linux (CI, SSH, containers): keyring + libsecret aren't useful
 # without a logged-in desktop session, and disabling avoids the libsecret
 # build dep entirely.
-default  = ["keychain"]
+default  = ["keychain", "wrds"]
+# `wrds` activates the WRDS (Wharton Research Data Services) integration. WRDS
+# has no REST API — it is a PostgreSQL database — so this is the one vendor that
+# does not ride the shared `reqwest`/`Vendor` HTTP path. The feature pulls in a
+# Postgres client (`tokio-postgres`) and its rustls TLS bridge
+# (`tokio-postgres-rustls`); the TLS stack itself (`rustls`, `aws-lc-rs`,
+# `rustls-native-certs`) is already linked via `reqwest`, so the marginal cost is
+# only the Postgres wire protocol. Build `--no-default-features --features
+# keychain` to drop the Postgres dependency tree entirely (headless / non-WRDS
+# deployments). At runtime the connection is lazy: nothing dials WRDS until a
+# `wrds_*` tool is actually called.
+wrds     = ["dep:tokio-postgres", "dep:tokio-postgres-rustls", "dep:rustls", "dep:rustls-native-certs"]
 # `dep:keyring` activates the optional `keyring` dep declared per-target below.
 # We pick an explicit credential-store feature on each OS — without one,
 # `keyring` falls back to a mock store that silently no-ops `set` and returns
@@ -54,6 +65,18 @@ schemars            = "=1.2.1"
 clap                = { version = "=4.6.1", features = ["derive", "env", "wrap_help"] }
 atomicwrites        = "0.4"
 rpassword           = "7"
+
+# --- WRDS (feature = "wrds") --------------------------------------------------
+# WRDS is PostgreSQL-only; these back the `wrds_*` tools. `with-serde_json-1`
+# lets Postgres do all type -> JSON conversion server-side (via `to_jsonb`), so
+# the client reads each result set as a single `serde_json::Value` and needs no
+# per-column type mapping. TLS reuses the already-linked rustls stack:
+# `rustls-native-certs` supplies the OS trust anchors; `aws-lc-rs` (rustls'
+# default provider, already in the tree via reqwest) supplies the crypto.
+tokio-postgres        = { version = "=0.7.18", optional = true, features = ["with-serde_json-1"] }
+tokio-postgres-rustls = { version = "=0.13.0", optional = true }
+rustls                = { version = "=0.23.39", optional = true }
+rustls-native-certs   = { version = "=0.8.3", optional = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { version = "3", optional = true, default-features = false, features = ["apple-native"] }

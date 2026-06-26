@@ -12,6 +12,8 @@ pub mod grafana;
 pub mod newrelic;
 pub mod postman;
 pub mod slack;
+#[cfg(feature = "wrds")]
+pub mod wrds;
 pub mod zoom;
 
 pub use api::{BitbucketContext, ControllerResponse, HandleContext, handle_request};
@@ -22,4 +24,6 @@ pub use grafana::GrafanaContext;
 pub use newrelic::NewRelicContext;
 pub use postman::PostmanContext;
 pub use slack::SlackContext;
+#[cfg(feature = "wrds")]
+pub use wrds::WrdsContext;
 pub use zoom::ZoomContext;

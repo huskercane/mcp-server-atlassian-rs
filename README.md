@@ -2,7 +2,7 @@
 
 Rust implementation of the Atlassian MCP servers — connects AI assistants (Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
 
-The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), **Postman** (`postman_*`), and **edX/Open edX discussions** (`edx_discussion_*`) — native additions (not TS ports). Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`. edX discussion tools use a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`. **New Relic** (`newrelic_query`) drives NerdGraph (a single GraphQL endpoint) with a User API key in the `API-Key` header. **Grafana** (`grafana_*`) reads logs by proxying [LogQL](https://grafana.com/docs/loki/latest/query/) to a [Loki](https://grafana.com/docs/loki/latest/) datasource through Grafana's [datasource proxy](https://grafana.com/docs/grafana/latest/developers/http_api/data_source/#data-source-proxy-calls), authenticated with a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) as a Bearer token; it works the same for self-hosted Grafana and Grafana Cloud (only `GRAFANA_URL` differs).
+The same binary also exposes **Zoom Cloud** (`zoom_*`), **CircleCI** (`circleci_*`), **Slack** (`slack_*`), **Postman** (`postman_*`), and **edX/Open edX discussions** (`edx_discussion_*`) — native additions (not TS ports). Zoom authenticates with [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): the server exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization). CircleCI authenticates with a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token — the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) documents as recommended. Slack uses a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token; its Web API is unusual in returning `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error. Postman is the one vendor that authenticates outside the `Authorization` header — its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`. edX discussion tools use a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`. **New Relic** (`newrelic_query`) drives NerdGraph (a single GraphQL endpoint) with a User API key in the `API-Key` header. **Grafana** (`grafana_*`) reads logs by proxying [LogQL](https://grafana.com/docs/loki/latest/query/) to a [Loki](https://grafana.com/docs/loki/latest/) datasource through Grafana's [datasource proxy](https://grafana.com/docs/grafana/latest/developers/http_api/data_source/#data-source-proxy-calls), authenticated with a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) as a Bearer token; it works the same for self-hosted Grafana and Grafana Cloud (only `GRAFANA_URL` differs). **WRDS** (`wrds_*`) is the one vendor with no REST API at all: [Wharton Research Data Services](https://wrds-www.wharton.upenn.edu/) is a **PostgreSQL** database (CRSP, Compustat, IBES, TAQ, …), so this integration connects directly to `wrds-pgdata.wharton.upenn.edu:9737` over SSL (the same access path the official [`wrds` Python package](https://pypi.org/project/wrds/) wraps) and exposes read-only SQL plus library/table/column discovery. Because it is PostgreSQL rather than HTTP, WRDS is the one vendor gated behind a Cargo feature (`wrds`, on by default) — build `--no-default-features` to drop the Postgres client entirely.
 
 This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
 
@@ -11,7 +11,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, and Grafana — instead of running separate Node processes side-by-side, you get one MCP server exposing all 45 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`).
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 49 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`, four `wrds_*`). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -35,7 +35,14 @@ cd mcp-server-atlassian-rs
 cargo build --release
 ```
 
-The binary lands at `target/release/mcp-atlassian`. Requires Rust 1.85 or later.
+The binary lands at `target/release/mcp-atlassian`. Requires Rust 1.96 or later (pinned in `rust-toolchain.toml`).
+
+By default the build includes the WRDS PostgreSQL integration (`wrds` feature). To build without it — dropping the `tokio-postgres` dependency tree entirely (headless / non-WRDS deployments, or to shrink the binary by ~0.5–1 MB):
+
+```bash
+cargo build --release --no-default-features --features keychain   # WRDS off, keychain on
+cargo build --release --no-default-features                        # WRDS off, keychain off (headless)
+```
 
 Optional checks:
 ```bash
@@ -62,6 +69,8 @@ New Relic is separate too: create a [User API key](https://docs.newrelic.com/doc
 
 Grafana is separate too: create a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) (Grafana → Administration → Service accounts) and set it as `GRAFANA_TOKEN`, plus `GRAFANA_URL` for your instance base (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). The token is sent as `Authorization: Bearer`. "Reading logs from Grafana" runs a LogQL query against a Loki datasource via Grafana's datasource proxy, so you first discover the Loki datasource `uid` with `grafana_list_datasources`, then pass it to `grafana_query_logs`. Read as plaintext from the `grafana` config section or environment; never goes through the OS keychain.
 
+WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read as plaintext from the `wrds` config section or environment; never goes through the OS keychain. Requires the binary to be built with the `wrds` feature (the default).
+
 ### Environment variables
 
 | Variable | Purpose | Vendor scope |
@@ -85,11 +94,17 @@ Grafana is separate too: create a [service-account token](https://grafana.com/do
 | `NEW_RELIC_API_BASE` | Optional explicit NerdGraph base URL override (takes priority over `NEW_RELIC_REGION`). | newrelic only |
 | `GRAFANA_URL` | Grafana instance base URL (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). **Required** before invoking any `grafana_*` tool; only checked at tool-call time, so a non-Grafana setup boots without it. | grafana only |
 | `GRAFANA_TOKEN` | Grafana service-account token (or API key), sent as `Authorization: Bearer`. **Required** before invoking any `grafana_*` tool; only checked at tool-call time. | grafana only |
+| `WRDS_USERNAME` | WRDS account username for the PostgreSQL connection. **Required** before invoking any `wrds_*` tool; only checked at tool-call time, so a non-WRDS setup boots without it. | wrds only |
+| `WRDS_PASSWORD` | WRDS account password. **Required** before invoking any `wrds_*` tool. | wrds only |
+| `WRDS_HOST` | WRDS Postgres host. Defaults to `wrds-pgdata.wharton.upenn.edu`; override for a mirror or local test DB. | wrds only |
+| `WRDS_PORT` | WRDS Postgres port. Defaults to `9737`. | wrds only |
+| `WRDS_DBNAME` | WRDS database name. Defaults to `wrds`. | wrds only |
+| `WRDS_SSLMODE` | TLS mode: `require` (default), `prefer`, or `disable` (local testing only). WRDS requires SSL. | wrds only |
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
 
 ```json
 {
@@ -149,11 +164,17 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
       "GRAFANA_URL": "https://myorg.grafana.net",
       "GRAFANA_TOKEN": "glsa_..."
     }
+  },
+  "wrds": {
+    "environments": {
+      "WRDS_USERNAME": "your-wrds-username",
+      "WRDS_PASSWORD": "your-wrds-password"
+    }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`, `WRDS_USERNAME`/`WRDS_PASSWORD`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -263,7 +284,7 @@ Point the client at the binary. Stdio is the default transport. If your client u
 
 ## Available tools
 
-Thirty-six tools across seven vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, and `postman_*` tools are native additions with no TS port.
+Forty-nine tools across eleven vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
 
 ### Bitbucket (`bb_*`)
 
@@ -369,9 +390,20 @@ New Relic's only API is **NerdGraph**, a single GraphQL endpoint, so unlike the 
 
 Grafana is a query/visualization layer, not a log store — "reading logs from Grafana" means running a **LogQL** query against a **Loki** datasource through Grafana's **datasource proxy** (`GET /api/datasources/proxy/uid/{uid}/loki/api/v1/query_range`). First call `grafana_list_datasources` and copy the `uid` of an entry whose `type` is `loki` (filter with `jq`: `[?type=='loki'].{name: name, uid: uid}`), then pass it to `grafana_query_logs` as `datasourceUid` along with a `query` (LogQL) and optional `start`/`end`/`limit`/`direction`/`step`. Authenticates with a service-account token (`GRAFANA_TOKEN`, read from the `grafana` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`; the instance base comes from `GRAFANA_URL`. Both are checked at call time, so a non-Grafana deployment boots without them. The same two tools work unchanged against self-hosted Grafana and Grafana Cloud. A bad LogQL query comes back from Loki as an HTTP error and is surfaced as a typed error.
 
+### WRDS (`wrds_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `wrds_query` | read-only, idempotent | Run a read-only SQL `SELECT` against WRDS (e.g. `SELECT permno, date, ret FROM crsp.dsf WHERE …`) |
+| `wrds_list_libraries` | read-only, idempotent | List the WRDS libraries (PostgreSQL schemas) your account can access |
+| `wrds_list_tables` | read-only, idempotent | List the tables/views inside one library |
+| `wrds_describe_table` | read-only, idempotent | Describe a table's columns (name, type, nullability) |
+
+WRDS ([Wharton Research Data Services](https://wrds-www.wharton.upenn.edu/)) is a **PostgreSQL** data platform for finance/accounting/economics research, not an HTTP API — so these tools connect directly to `wrds-pgdata.wharton.upenn.edu:9737` over SSL (the access path the official `wrds` Python package wraps). A WRDS "library" is a Postgres **schema** and a dataset is a `library.table` (e.g. `crsp.dsf`, `comp.funda`, `ff.factors_daily`). The typical flow is **discover then query**: `wrds_list_libraries` → `wrds_list_tables` → `wrds_describe_table` to learn exact column names, then `wrds_query` with a tight `WHERE` and small `rowLimit` (WRDS tables are huge). Authenticates with a WRDS username + password (`WRDS_USERNAME` / `WRDS_PASSWORD`, read from the `wrds` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only); missing credentials surface as an authentication error at call time, so a non-WRDS deployment boots without them. **Safety:** every session is forced read-only (`default_transaction_read_only = on`) with a statement timeout, and `wrds_query` wraps the caller's SQL in a subquery so only a single `SELECT`/`VALUES` can run — writes, DDL, and multi-statement bodies are rejected. PostgreSQL renders each result set to JSON server-side (`to_jsonb`), so `jq`/`outputFormat` behave exactly as they do for the HTTP vendors. These tools require the `wrds` Cargo feature (on by default); a `--no-default-features` build omits them.
+
 ### Shared inputs
 
-All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exceptions are `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`, and the `grafana_*` tools, which take typed inputs (`datasourceUid`/`query`/range knobs for `grafana_query_logs`; no path for either) rather than a raw `path`.
+All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exceptions are `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`; the `grafana_*` tools, which take typed inputs (`datasourceUid`/`query`/range knobs for `grafana_query_logs`; no path for either); and the `wrds_*` tools, which take typed inputs (`sql` + optional `rowLimit` for `wrds_query`; `library`/`table` for the discovery tools; no path) and still honour `jq`/`outputFormat`.
 
 ## Cross-vendor workflows
 
@@ -399,7 +431,7 @@ From the failed job's `job_number` (step 5 above):
 
 ## CLI usage
 
-Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom, CircleCI, Slack, and Postman are MCP-only: there is no `zoom`, `circleci`, `slack`, or `postman` CLI group, so `zoom_*`, `circleci_*`, `slack_*`, and `postman_*` are reachable through an MCP client, not the command line.)
+Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom, CircleCI, Slack, Postman, edX, New Relic, Grafana, and WRDS are MCP-only: there is no CLI group for them, so `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, and `wrds_*` are reachable through an MCP client, not the command line.)
 
 ```bash
 # Bitbucket

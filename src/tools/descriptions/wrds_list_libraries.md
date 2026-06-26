@@ -1,0 +1,1 @@
+List the WRDS libraries (PostgreSQL schemas) your WRDS account can access — e.g. `crsp`, `comp`, `ibes`, `ff`, `taqmsec`. A WRDS "library" is the top-level grouping of related datasets; pick one and pass it to `wrds_list_tables` to see the tables/views it contains. Access reflects your institution's WRDS subscriptions, so the list varies by account. Takes no required input.

@@ -34,6 +34,8 @@ pub mod jira;
 pub mod newrelic;
 pub mod postman;
 pub mod slack;
+#[cfg(feature = "wrds")]
+pub mod wrds;
 pub mod zoom;
 
 use reqwest::StatusCode;
