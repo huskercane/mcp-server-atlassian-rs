@@ -68,9 +68,10 @@ use crate::vendor::wrds::WrdsVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{
-    CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs,
-    EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs,
-    GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs, ReadArgs, WriteArgs,
+    CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
+    EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
+    EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
+    ReadArgs, WriteArgs,
 };
 #[cfg(feature = "wrds")]
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
@@ -756,6 +757,20 @@ impl AtlassianServer {
         Ok(run_read_circleci(self, HttpMethod::Get, &args).await)
     }
 
+    #[doc = include_str!("descriptions/circleci_logs.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn circleci_logs(
+        &self,
+        Parameters(args): Parameters<CircleCiLogsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_circleci_logs(self, &args).await)
+    }
+
     #[doc = include_str!("descriptions/circleci_post.md")]
     #[tool(annotations(
         read_only_hint = false,
@@ -1236,6 +1251,16 @@ async fn run_write_circleci(
     args: &WriteArgs,
 ) -> CallToolResult {
     match crate::controllers::circleci::handle_write(&server.circleci_ctx(), method, args).await {
+        Ok(resp) => {
+            let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
+            CallToolResult::success(vec![Content::text(text)])
+        }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_circleci_logs(server: &AtlassianServer, args: &CircleCiLogsArgs) -> CallToolResult {
+    match crate::controllers::circleci::handle_logs(&server.circleci_ctx(), args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])

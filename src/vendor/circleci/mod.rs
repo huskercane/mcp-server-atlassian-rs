@@ -30,6 +30,7 @@ use crate::vendor::Vendor;
 /// Production CircleCI REST base. Tests point [`CircleCiVendor::with_base_url`]
 /// at a wiremock instead.
 const DEFAULT_API_BASE: &str = "https://circleci.com/api/v2";
+const DEFAULT_LOG_API_BASE: &str = "https://circleci.com/api/v1.1";
 
 /// CircleCI v2 [`Vendor`] strategy.
 ///
@@ -54,6 +55,17 @@ impl CircleCiVendor {
         Self {
             base_url_override: Some(base_url.into()),
         }
+    }
+
+    /// Resolve the older API base used for build step log discovery.
+    ///
+    /// CircleCI's v2 API exposes workflow/job metadata, but raw step output is
+    /// still discovered via the older build details endpoint. Tests reuse the
+    /// same base override so one wiremock server can cover both surfaces.
+    pub fn log_base_url(&self) -> String {
+        self.base_url_override
+            .clone()
+            .unwrap_or_else(|| DEFAULT_LOG_API_BASE.to_owned())
     }
 
     /// Resolve the personal API token from the `circleci` config section. This

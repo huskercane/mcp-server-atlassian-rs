@@ -3,7 +3,9 @@
 
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::tools::AtlassianServer;
-use mcp_server_atlassian::tools::args::{OutputFormatArg, QueryParams, ReadArgs, WriteArgs};
+use mcp_server_atlassian::tools::args::{
+    CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs, WriteArgs,
+};
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
@@ -76,6 +78,19 @@ fn write_args_uses_camel_case_json() {
     .unwrap();
     assert_eq!(args.body, json!({"title": "new"}));
     assert_eq!(args.output_format, Some(OutputFormatArg::Toon));
+}
+
+#[test]
+fn circleci_logs_args_use_camel_case_json() {
+    let args: CircleCiLogsArgs = serde_json::from_value(json!({
+        "projectSlug": "gh/acme/web",
+        "jobNumber": 123,
+        "outputFormat": "json"
+    }))
+    .unwrap();
+    assert_eq!(args.project_slug, "gh/acme/web");
+    assert_eq!(args.job_number, 123);
+    assert_eq!(args.output_format, Some(OutputFormatArg::Json));
 }
 
 #[test]

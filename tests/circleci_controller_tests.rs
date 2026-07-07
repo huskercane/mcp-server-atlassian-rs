@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::circleci::{CircleCiContext, handle_request};
+use mcp_server_atlassian::controllers::circleci::{CircleCiContext, handle_logs, handle_request};
 use mcp_server_atlassian::error::ErrorKind;
 use mcp_server_atlassian::format::OutputFormat;
 use mcp_server_atlassian::transport::{HttpMethod, build_client};
@@ -148,6 +148,87 @@ async fn api_404_surfaces_circleci_error_envelope() {
     assert_eq!(err.status_code, Some(404));
     assert!(err.message.contains("Resource not found"));
     assert!(err.message.contains("Pipeline not found"));
+}
+
+#[tokio::test]
+async fn logs_fetches_build_details_and_flattens_action_output() {
+    let server = MockServer::start().await;
+    let output_url = format!("{}/output/0/0", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/project/github/acme/web/123"))
+        .and(query_param("circle-token", "tok-123"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "steps": [
+                {
+                    "name": "Run tests",
+                    "actions": [
+                        {
+                            "name": "cargo test",
+                            "status": "failed",
+                            "type": "test",
+                            "output_url": output_url
+                        }
+                    ]
+                }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    Mock::given(method("GET"))
+        .and(path("/output/0/0"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"message": "running 1 test\n", "time": "2026-07-07T20:31:50Z"},
+            {"message": "test redos_flag ... FAILED\n", "time": "2026-07-07T20:31:51Z"}
+        ])))
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let config = Config::from_map(creds());
+    let vendor = vendor(&server);
+    let ctx = CircleCiContext::new(&client, &config, &vendor);
+
+    let resp = handle_logs(
+        &ctx,
+        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+            project_slug: "gh/acme/web".into(),
+            job_number: 123,
+            output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(resp.content.contains("Run tests"));
+    assert!(resp.content.contains("cargo test"));
+    assert!(resp.content.contains("running 1 test"));
+    assert!(resp.content.contains("test redos_flag ... FAILED"));
+    assert!(!resp.content.contains("output_url"));
+    assert!(resp.raw_response_path.is_none());
+}
+
+#[tokio::test]
+async fn logs_rejects_non_vcs_project_slug() {
+    let client = build_client().unwrap();
+    let config = Config::from_map(creds());
+    let vendor = CircleCiVendor::with_base_url("http://127.0.0.1:0");
+    let ctx = CircleCiContext::new(&client, &config, &vendor);
+
+    let err = handle_logs(
+        &ctx,
+        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+            project_slug: "circleci/org-id/project-id".into(),
+            job_number: 123,
+            output_format: None,
+        },
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(err.kind, ErrorKind::ApiError);
+    assert!(err.message.contains("GitHub/Bitbucket"));
 }
 
 #[tokio::test]

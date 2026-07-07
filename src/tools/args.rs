@@ -69,6 +69,22 @@ pub struct ReadArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `circleci_logs`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CircleCiLogsArgs {
+    /// CircleCI project slug in v2 form: "gh/org/repo" or "bb/org/repo".
+    pub project_slug: String,
+
+    /// CircleCI job number from `/workflow/{workflow-id}/job`.
+    pub job_number: u64,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    /// TOON is optimized for LLMs with tabular arrays and minimal syntax.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Arguments for `bb_clone`.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

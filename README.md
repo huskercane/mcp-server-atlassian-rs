@@ -20,7 +20,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 49 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, five `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`, four `wrds_*`). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 50 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, six `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`, four `wrds_*`). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -321,7 +321,7 @@ Point the client at the binary. Stdio is the default transport. If your client u
 
 ## Available tools
 
-Forty-nine tools across eleven vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
+Fifty tools across eleven vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
 
 ### Bitbucket (`bb_*`)
 
@@ -379,12 +379,13 @@ Zoom paths pass through verbatim relative to the `https://api.zoom.us/v2` base �
 | Tool | Annotations | Use |
 |---|---|---|
 | `circleci_get` | read-only, idempotent | GET any CircleCI API v2 endpoint (pipelines, workflows, jobs, insights, `/me`) |
+| `circleci_logs` | read-only, idempotent | Fetch raw step logs for a job using its `job_number` |
 | `circleci_post` | mutating | POST to any endpoint (e.g. trigger a pipeline, cancel/rerun a workflow) |
 | `circleci_put` | mutating, idempotent | PUT to any endpoint (rarely used in v2) |
 | `circleci_patch` | mutating | PATCH any endpoint (e.g. update a scheduled pipeline) |
 | `circleci_delete` | destructive, idempotent | DELETE any endpoint (e.g. remove an env var, schedule, or context) |
 
-CircleCI paths pass through verbatim relative to the `https://circleci.com/api/v2` base — supply e.g. `/project/{project-slug}/pipeline` (no version segment), where `project-slug` is `<vcs>/<org>/<repo>` (e.g. `gh/acme/web`) or `circleci/<org-id>/<project-id>`. There is **no separate search tool**: listing is just `circleci_get` against the right path. Authenticates with a personal API token (`CIRCLECI_TOKEN`, read from the `circleci` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-CircleCI deployment boots without it. Pagination is token-based: pass a response's `next_page_token` back as the `page-token` query param.
+CircleCI paths pass through verbatim relative to the `https://circleci.com/api/v2` base — supply e.g. `/project/{project-slug}/pipeline` (no version segment), where `project-slug` is `<vcs>/<org>/<repo>` (e.g. `gh/acme/web`) or `circleci/<org-id>/<project-id>`. There is **no separate search tool**: listing is just `circleci_get` against the right path. Authenticates with a personal API token (`CIRCLECI_TOKEN`, read from the `circleci` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-CircleCI deployment boots without it. Pagination is token-based: pass a response's `next_page_token` back as the `page-token` query param. Raw logs are exposed through `circleci_logs`, which takes `projectSlug` plus a job `jobNumber`; it supports `gh/...` and `bb/...` slugs because CircleCI's older log-discovery endpoint is VCS-path based.
 
 ### Slack (`slack_*`)
 
@@ -462,7 +463,7 @@ From the failed job's `job_number` (step 5 above):
 
 - **Which step / how it failed:** `circleci_get /project/{slug}/job/{job-number}` → job status, duration, executor.
 - **Failed test details:** `circleci_get /project/{slug}/{job-number}/tests` → `items[]` with `name`, `result`, `message`, `file` — the cleanest "reason" **when the job stores test results** (`store_test_results`).
-- **Raw step logs are out of scope here.** They live behind CircleCI's older v1.1 API or per-step S3 `output_url`s — neither sits under the fixed `…/api/v2` base this tool targets, so fetch those outside the server if you need full log text.
+- **Raw step logs:** `circleci_logs` with `projectSlug` and `jobNumber` → flattened per-step action output. This uses CircleCI's older build-details API plus per-step `output_url`s because raw logs are not exposed by the v2 job endpoint.
 
 > These chains are only as reliable as the underlying setup: step 2 needs the Jira↔Bitbucket app installed, and steps 5–6 assume the repo actually builds on CircleCI for that branch. The agent infers the PR→pipeline link from the branch name; it is not a stored relationship.
 
