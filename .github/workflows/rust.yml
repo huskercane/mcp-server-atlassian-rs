@@ -38,8 +38,19 @@ jobs:
       # GitHub-hosted ubuntu-latest images already ship these, but
       # installing explicitly makes the dependency obvious for self-hosted
       # runners and locked-down forks.
+      #
+      # GitHub-hosted images ship third-party apt repos (packages.microsoft.com /
+      # azure-cli) whose CDN intermittently serves a corrupt InRelease, making
+      # `apt-get update` exit 100. We only need libsecret/libdbus from the Ubuntu
+      # archive, so drop those repos before updating to stay resilient to outages.
       if: runner.os == 'Linux'
-      run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev libdbus-1-dev
+      run: |
+        set -eu
+        sudo find /etc/apt/sources.list.d -type f \
+          -exec grep -qE 'packages\.microsoft\.com|azure-cli' {} \; \
+          -exec rm -vf {} \; 2>/dev/null || true
+        sudo apt-get update
+        sudo apt-get install -y libsecret-1-dev libdbus-1-dev
     - name: Build (default features)
       run: cargo build --verbose
     - name: Build (no default features) — headless / keychain-off

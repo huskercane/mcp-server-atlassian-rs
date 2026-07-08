@@ -63,8 +63,20 @@ jobs:
         # `keyring`'s sync-secret-service backend links libsecret + dbus.
         # Mirrors the install step in rust.yml so the release build sees
         # the same toolchain inputs as CI.
+        #
+        # GitHub-hosted images ship third-party apt repos (packages.microsoft.com /
+        # azure-cli) whose CDN intermittently serves a corrupt InRelease, making
+        # `apt-get update` exit 100 and taking the release down with it (this sank
+        # the v0.7.0 build). We only need libsecret/libdbus from the Ubuntu archive,
+        # so drop those repos before updating to stay resilient to their outages.
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev libdbus-1-dev
+        run: |
+          set -eu
+          sudo find /etc/apt/sources.list.d -type f \
+            -exec grep -qE 'packages\.microsoft\.com|azure-cli' {} \; \
+            -exec rm -vf {} \; 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y libsecret-1-dev libdbus-1-dev
 
       - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
