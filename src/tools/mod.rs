@@ -48,6 +48,7 @@ use crate::controllers::handle_clone;
 use crate::controllers::newrelic::NewRelicContext;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
+use crate::controllers::sonarqube::SonarqubeContext;
 #[cfg(feature = "wrds")]
 use crate::controllers::wrds::WrdsContext;
 use crate::controllers::zoom::ZoomContext;
@@ -63,6 +64,7 @@ use crate::vendor::jira::JiraVendor;
 use crate::vendor::newrelic::NewRelicVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
+use crate::vendor::sonarqube::SonarqubeVendor;
 #[cfg(feature = "wrds")]
 use crate::vendor::wrds::WrdsVendor;
 use crate::vendor::zoom::ZoomVendor;
@@ -71,7 +73,7 @@ use args::{
     CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
     EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    ReadArgs, WriteArgs,
+    ReadArgs, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, WriteArgs,
 };
 #[cfg(feature = "wrds")]
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
@@ -99,6 +101,7 @@ struct ServerState {
     edx_vendor: EdxVendor,
     newrelic_vendor: NewRelicVendor,
     grafana_vendor: GrafanaVendor,
+    sonarqube_vendor: SonarqubeVendor,
     /// WRDS (PostgreSQL) vendor. Feature-gated: a `--no-default-features` build
     /// drops the Postgres dependency tree entirely, so this field and the
     /// `wrds_*` tools simply don't exist. Constructed internally (it is cheap
@@ -134,6 +137,7 @@ impl AtlassianServer {
             EdxVendor::new(),
             NewRelicVendor::new(),
             GrafanaVendor::new(),
+            SonarqubeVendor::new(),
         ))
     }
 
@@ -158,6 +162,7 @@ impl AtlassianServer {
         edx_vendor: EdxVendor,
         newrelic_vendor: NewRelicVendor,
         grafana_vendor: GrafanaVendor,
+        sonarqube_vendor: SonarqubeVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -173,6 +178,7 @@ impl AtlassianServer {
                 edx_vendor,
                 newrelic_vendor,
                 grafana_vendor,
+                sonarqube_vendor,
                 #[cfg(feature = "wrds")]
                 wrds_vendor: WrdsVendor::new(),
                 workspace_cache: WorkspaceCache::new(),
@@ -196,7 +202,8 @@ impl AtlassianServer {
             + Self::postman_router()
             + Self::edx_discussion_router()
             + Self::newrelic_router()
-            + Self::grafana_router();
+            + Self::grafana_router()
+            + Self::sonarqube_router();
         // WRDS tools only exist when the `wrds` feature is on (default).
         #[cfg(feature = "wrds")]
         let router = router + Self::wrds_router();
@@ -313,6 +320,17 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.grafana_vendor,
+        )
+    }
+
+    /// SonarQube-specific context. Like CircleCI/Grafana, Sonar carries its own
+    /// credential lookup (a static user token from config) and authenticates via
+    /// `Authorization: Bearer`, so it uses a dedicated [`SonarqubeContext`].
+    fn sonarqube_ctx(&self) -> SonarqubeContext<'_> {
+        SonarqubeContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.sonarqube_vendor,
         )
     }
 
@@ -1039,6 +1057,55 @@ impl AtlassianServer {
 }
 
 // ============================================================================
+// SonarQube tools
+// ============================================================================
+
+#[tool_router(router = sonarqube_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/sonarqube_quality_gate.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn sonarqube_quality_gate(
+        &self,
+        Parameters(args): Parameters<SonarqubeQualityGateArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_sonarqube_quality_gate(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/sonarqube_search_issues.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn sonarqube_search_issues(
+        &self,
+        Parameters(args): Parameters<SonarqubeSearchIssuesArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_sonarqube_search_issues(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/sonarqube_get.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn sonarqube_get(
+        &self,
+        Parameters(args): Parameters<ReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_sonarqube_get(self, &args).await)
+    }
+}
+
+// ============================================================================
 // WRDS tools (feature = "wrds")
 // ============================================================================
 
@@ -1347,6 +1414,33 @@ async fn run_grafana_list_datasources(
     args: &GrafanaListDatasourcesArgs,
 ) -> CallToolResult {
     match crate::controllers::grafana::list_datasources(&server.grafana_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_sonarqube_quality_gate(
+    server: &AtlassianServer,
+    args: &SonarqubeQualityGateArgs,
+) -> CallToolResult {
+    match crate::controllers::sonarqube::quality_gate(&server.sonarqube_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_sonarqube_search_issues(
+    server: &AtlassianServer,
+    args: &SonarqubeSearchIssuesArgs,
+) -> CallToolResult {
+    match crate::controllers::sonarqube::search_issues(&server.sonarqube_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_sonarqube_get(server: &AtlassianServer, args: &ReadArgs) -> CallToolResult {
+    match crate::controllers::sonarqube::get(&server.sonarqube_ctx(), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }

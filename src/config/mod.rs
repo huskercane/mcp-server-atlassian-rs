@@ -99,6 +99,15 @@ pub const VENDOR_NEWRELIC: &str = "newrelic";
 /// Logs are read by proxying `LogQL` to a Loki datasource through Grafana.
 pub const VENDOR_GRAFANA: &str = "grafana";
 
+/// Canonical vendor name for `SonarQube` / `SonarCloud`. Like the other
+/// non-Atlassian vendors it does not share the `ATLASSIAN_*` credential model:
+/// it authenticates with a user token (`SONARQUBE_TOKEN`) sent as
+/// `Authorization: Bearer` — see [`crate::auth::Credentials::Bearer`]. Its base
+/// URL is required config (`SONARQUBE_URL`) since the same binary serves
+/// self-hosted `SonarQube` and `SonarCloud` (`https://sonarcloud.io`). The
+/// headline use is reading back *why* a CI quality gate failed.
+pub const VENDOR_SONARQUBE: &str = "sonarqube";
+
 /// Canonical vendor name for WRDS (Wharton Research Data Services). WRDS is the
 /// one vendor with no REST API: access is a direct **`PostgreSQL`** connection
 /// (`wrds-pgdata.wharton.upenn.edu:9737`, SSL required), so it does not use the
@@ -482,6 +491,12 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "mcp-server-newrelic".to_string(),
     ];
     let grafana_aliases = vec!["grafana".to_string(), "mcp-server-grafana".to_string()];
+    let sonarqube_aliases = vec![
+        "sonarqube".to_string(),
+        "sonar".to_string(),
+        "sonarcloud".to_string(),
+        "mcp-server-sonarqube".to_string(),
+    ];
     let wrds_aliases = vec!["wrds".to_string(), "mcp-server-wrds".to_string()];
 
     vec![
@@ -495,6 +510,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_EDX, edx_aliases),
         (VENDOR_NEWRELIC, newrelic_aliases),
         (VENDOR_GRAFANA, grafana_aliases),
+        (VENDOR_SONARQUBE, sonarqube_aliases),
         (VENDOR_WRDS, wrds_aliases),
     ]
 }

@@ -12,6 +12,7 @@ pub mod grafana;
 pub mod newrelic;
 pub mod postman;
 pub mod slack;
+pub mod sonarqube;
 #[cfg(feature = "wrds")]
 pub mod wrds;
 pub mod zoom;
@@ -24,6 +25,7 @@ pub use grafana::GrafanaContext;
 pub use newrelic::NewRelicContext;
 pub use postman::PostmanContext;
 pub use slack::SlackContext;
+pub use sonarqube::SonarqubeContext;
 #[cfg(feature = "wrds")]
 pub use wrds::WrdsContext;
 pub use zoom::ZoomContext;

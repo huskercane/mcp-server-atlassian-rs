@@ -231,6 +231,117 @@ pub struct GrafanaListDatasourcesArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `sonarqube_quality_gate`.
+///
+/// Reports the failing quality-gate conditions for a Sonar analysis — the "why
+/// did the CI build fail Sonar" call. The analysis is identified by exactly one
+/// of `analysisId`, `ceTaskId` (resolved to an `analysisId` server-side), or
+/// `projectKey` (+ optional `branch`/`pullRequest`).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarqubeQualityGateArgs {
+    /// Project key (as shown in Sonar). Combine with `branch` or `pullRequest`
+    /// to target a specific analysis; alone it reports the main branch's latest.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_key: Option<String>,
+
+    /// Branch name whose latest analysis to report. Mutually exclusive with
+    /// `pullRequest`. Requires `projectKey`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+
+    /// Pull-request id whose analysis to report. Mutually exclusive with
+    /// `branch`. Requires `projectKey`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<String>,
+
+    /// Analysis id (from `/api/project_analyses/search` or a prior `ceTaskId`
+    /// resolution). Used verbatim; takes precedence over the other selectors.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub analysis_id: Option<String>,
+
+    /// Scanner compute-engine task id — the `ceTaskId` printed in the CI log's
+    /// `report-task.txt`. Resolved to its `analysisId` via `/api/ce/task` first,
+    /// so you can go straight from a CircleCI log to the gate result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ce_task_id: Option<String>,
+
+    /// SonarCloud organization key. Required on SonarCloud; omit for
+    /// self-hosted SonarQube.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
+
+    /// JMESPath expression to filter/transform the response. IMPORTANT: always
+    /// use this to extract only needed fields and reduce token costs.
+    /// Example: "projectStatus.conditions[?status=='ERROR']".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `sonarqube_search_issues`.
+///
+/// Lists the individual issues (bugs / vulnerabilities / code smells) for a
+/// project, optionally scoped to a branch or PR — the specific lines behind a
+/// quality-gate failure.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SonarqubeSearchIssuesArgs {
+    /// Component keys to search, comma-separated. Usually a single project key,
+    /// e.g. "my-org_my-repo".
+    pub component_keys: String,
+
+    /// Restrict to a branch's issues. Mutually exclusive with `pullRequest`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+
+    /// Restrict to a pull request's issues. Mutually exclusive with `branch`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_request: Option<String>,
+
+    /// Comma-separated issue types to include: `BUG`, `VULNERABILITY`,
+    /// `CODE_SMELL`. Omit for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub types: Option<String>,
+
+    /// Comma-separated severities: `INFO`, `MINOR`, `MAJOR`, `CRITICAL`,
+    /// `BLOCKER`. Omit for all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub severities: Option<String>,
+
+    /// Comma-separated issue statuses, e.g. `OPEN,CONFIRMED,REOPENED`. Omit for
+    /// all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statuses: Option<String>,
+
+    /// Filter by resolution state: `false` for unresolved (open) issues only,
+    /// `true` for resolved ones. Omit for both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resolved: Option<bool>,
+
+    /// Page size (Sonar's `ps`, max 500). Keep small to reduce token costs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_size: Option<u32>,
+
+    /// SonarCloud organization key. Required on SonarCloud; omit for
+    /// self-hosted SonarQube.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub organization: Option<String>,
+
+    /// JMESPath expression to filter/transform the response. IMPORTANT: always
+    /// use this to extract only needed fields and reduce token costs.
+    /// Example: "issues[*].{rule: rule, msg: message, file: component, line: line}".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Arguments for `wrds_query`.
 ///
 /// WRDS (Wharton Research Data Services) is a PostgreSQL database, so this tool

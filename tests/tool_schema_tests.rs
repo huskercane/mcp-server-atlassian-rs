@@ -4,7 +4,8 @@
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::tools::AtlassianServer;
 use mcp_server_atlassian::tools::args::{
-    CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs, WriteArgs,
+    CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs, SonarqubeQualityGateArgs,
+    SonarqubeSearchIssuesArgs, WriteArgs,
 };
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
@@ -16,6 +17,7 @@ use mcp_server_atlassian::vendor::jira::JiraVendor;
 use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
 use mcp_server_atlassian::vendor::postman::PostmanVendor;
 use mcp_server_atlassian::vendor::slack::SlackVendor;
+use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
 use mcp_server_atlassian::vendor::zoom::ZoomVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
@@ -36,6 +38,7 @@ fn server_info_reports_expected_identity() {
         EdxVendor::new(),
         NewRelicVendor::new(),
         GrafanaVendor::new(),
+        SonarqubeVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(
@@ -91,6 +94,39 @@ fn circleci_logs_args_use_camel_case_json() {
     assert_eq!(args.project_slug, "gh/acme/web");
     assert_eq!(args.job_number, 123);
     assert_eq!(args.output_format, Some(OutputFormatArg::Json));
+}
+
+#[test]
+fn sonarqube_quality_gate_args_use_camel_case_json() {
+    let args: SonarqubeQualityGateArgs = serde_json::from_value(json!({
+        "projectKey": "my-org_my-repo",
+        "pullRequest": "42",
+        "ceTaskId": "AbCd-1234",
+        "outputFormat": "json"
+    }))
+    .unwrap();
+    assert_eq!(args.project_key.as_deref(), Some("my-org_my-repo"));
+    assert_eq!(args.pull_request.as_deref(), Some("42"));
+    assert_eq!(args.ce_task_id.as_deref(), Some("AbCd-1234"));
+    assert_eq!(args.output_format, Some(OutputFormatArg::Json));
+}
+
+#[test]
+fn sonarqube_search_issues_args_use_camel_case_json() {
+    let args: SonarqubeSearchIssuesArgs = serde_json::from_value(json!({
+        "componentKeys": "my-org_my-repo",
+        "pullRequest": "42",
+        "types": "BUG,VULNERABILITY",
+        "resolved": false,
+        "pageSize": 25,
+        "outputFormat": "json"
+    }))
+    .unwrap();
+    assert_eq!(args.component_keys, "my-org_my-repo");
+    assert_eq!(args.pull_request.as_deref(), Some("42"));
+    assert_eq!(args.types.as_deref(), Some("BUG,VULNERABILITY"));
+    assert_eq!(args.resolved, Some(false));
+    assert_eq!(args.page_size, Some(25));
 }
 
 #[test]
