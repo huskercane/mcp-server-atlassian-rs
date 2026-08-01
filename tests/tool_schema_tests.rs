@@ -18,6 +18,7 @@ use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
 use mcp_server_atlassian::vendor::postman::PostmanVendor;
 use mcp_server_atlassian::vendor::slack::SlackVendor;
 use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
+use mcp_server_atlassian::vendor::splunk::SplunkVendor;
 use mcp_server_atlassian::vendor::zoom::ZoomVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
@@ -39,6 +40,7 @@ fn server_info_reports_expected_identity() {
         NewRelicVendor::new(),
         GrafanaVendor::new(),
         SonarqubeVendor::new(),
+        SplunkVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

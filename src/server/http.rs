@@ -84,7 +84,13 @@ pub fn build_app_with_cancel(
                 .map_err(|e| std::io::Error::other(format!("AtlassianServer::new: {e}")))
         },
         Arc::clone(&manager),
-        StreamableHttpServerConfig::default().with_cancellation_token(cancel),
+        StreamableHttpServerConfig::default()
+            // Keep initialized sessions for older clients while requiring the
+            // self-contained protocol metadata mandated by MCP 2026-07-28 on
+            // stateless requests. rmcp routes modern requests statelessly even
+            // while legacy-session compatibility remains enabled.
+            .with_stateless_protocol_metadata_required(true)
+            .with_cancellation_token(cancel),
     );
 
     // Express `cors({ origin: true })` reflects the caller's Origin and mirrors

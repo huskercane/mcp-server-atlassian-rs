@@ -33,7 +33,8 @@ use rmcp::{
     ErrorData as RmcpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, Content, Implementation, ProtocolVersion, ServerCapabilities, ServerInfo,
+        CallToolResult, ContentBlock as Content, Implementation, ProtocolVersion,
+        ServerCapabilities, ServerInfo,
     },
     tool, tool_handler, tool_router,
 };
@@ -49,6 +50,7 @@ use crate::controllers::newrelic::NewRelicContext;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
 use crate::controllers::sonarqube::SonarqubeContext;
+use crate::controllers::splunk::SplunkContext;
 #[cfg(feature = "wrds")]
 use crate::controllers::wrds::WrdsContext;
 use crate::controllers::zoom::ZoomContext;
@@ -65,6 +67,7 @@ use crate::vendor::newrelic::NewRelicVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
 use crate::vendor::sonarqube::SonarqubeVendor;
+use crate::vendor::splunk::SplunkVendor;
 #[cfg(feature = "wrds")]
 use crate::vendor::wrds::WrdsVendor;
 use crate::vendor::zoom::ZoomVendor;
@@ -73,7 +76,8 @@ use args::{
     CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
     EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    ReadArgs, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, WriteArgs,
+    ReadArgs, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, SplunkCreateJobArgs,
+    SplunkJobResultsArgs, SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
 };
 #[cfg(feature = "wrds")]
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
@@ -102,6 +106,7 @@ struct ServerState {
     newrelic_vendor: NewRelicVendor,
     grafana_vendor: GrafanaVendor,
     sonarqube_vendor: SonarqubeVendor,
+    splunk_vendor: SplunkVendor,
     /// WRDS (PostgreSQL) vendor. Feature-gated: a `--no-default-features` build
     /// drops the Postgres dependency tree entirely, so this field and the
     /// `wrds_*` tools simply don't exist. Constructed internally (it is cheap
@@ -138,6 +143,7 @@ impl AtlassianServer {
             NewRelicVendor::new(),
             GrafanaVendor::new(),
             SonarqubeVendor::new(),
+            SplunkVendor::new(),
         ))
     }
 
@@ -163,6 +169,7 @@ impl AtlassianServer {
         newrelic_vendor: NewRelicVendor,
         grafana_vendor: GrafanaVendor,
         sonarqube_vendor: SonarqubeVendor,
+        splunk_vendor: SplunkVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -179,6 +186,7 @@ impl AtlassianServer {
                 newrelic_vendor,
                 grafana_vendor,
                 sonarqube_vendor,
+                splunk_vendor,
                 #[cfg(feature = "wrds")]
                 wrds_vendor: WrdsVendor::new(),
                 workspace_cache: WorkspaceCache::new(),
@@ -203,7 +211,8 @@ impl AtlassianServer {
             + Self::edx_discussion_router()
             + Self::newrelic_router()
             + Self::grafana_router()
-            + Self::sonarqube_router();
+            + Self::sonarqube_router()
+            + Self::splunk_router();
         // WRDS tools only exist when the `wrds` feature is on (default).
         #[cfg(feature = "wrds")]
         let router = router + Self::wrds_router();
@@ -331,6 +340,14 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.sonarqube_vendor,
+        )
+    }
+
+    fn splunk_ctx(&self) -> SplunkContext<'_> {
+        SplunkContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.splunk_vendor,
         )
     }
 
@@ -1106,6 +1123,69 @@ impl AtlassianServer {
 }
 
 // ============================================================================
+// Splunk tools
+// ============================================================================
+
+#[tool_router(router = splunk_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/splunk_search.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn splunk_search(
+        &self,
+        Parameters(args): Parameters<SplunkSearchArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_splunk_search(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/splunk_create_job.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn splunk_create_job(
+        &self,
+        Parameters(args): Parameters<SplunkCreateJobArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_splunk_create_job(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/splunk_job_results.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn splunk_job_results(
+        &self,
+        Parameters(args): Parameters<SplunkJobResultsArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_splunk_job_results(self, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/splunk_list_saved_searches.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn splunk_list_saved_searches(
+        &self,
+        Parameters(args): Parameters<SplunkListSavedSearchesArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_splunk_list_saved_searches(self, &args).await)
+    }
+}
+
+// ============================================================================
 // WRDS tools (feature = "wrds")
 // ============================================================================
 
@@ -1171,6 +1251,21 @@ impl AtlassianServer {
 
 #[tool_handler]
 impl ServerHandler for AtlassianServer {
+    async fn list_tools(
+        &self,
+        _request: Option<rmcp::model::PaginatedRequestParams>,
+        _context: rmcp::service::RequestContext<rmcp::RoleServer>,
+    ) -> Result<rmcp::model::ListToolsResult, RmcpError> {
+        let mut tools = self.tool_router.list_all();
+        // MCP 2026-07-28 recommends deterministic ordering so clients can
+        // reuse prompt caches. The list is build-static and principal-agnostic,
+        // making a short public cache safe.
+        tools.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(rmcp::model::ListToolsResult::with_all_items(tools)
+            .with_ttl_ms(300_000)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut implementation = Implementation::default();
         PACKAGE_NAME.clone_into(&mut implementation.name);
@@ -1441,6 +1536,43 @@ async fn run_sonarqube_search_issues(
 
 async fn run_sonarqube_get(server: &AtlassianServer, args: &ReadArgs) -> CallToolResult {
     match crate::controllers::sonarqube::get(&server.sonarqube_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_splunk_search(server: &AtlassianServer, args: &SplunkSearchArgs) -> CallToolResult {
+    match crate::controllers::splunk::search(&server.splunk_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_splunk_create_job(
+    server: &AtlassianServer,
+    args: &SplunkCreateJobArgs,
+) -> CallToolResult {
+    match crate::controllers::splunk::create_job(&server.splunk_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_splunk_job_results(
+    server: &AtlassianServer,
+    args: &SplunkJobResultsArgs,
+) -> CallToolResult {
+    match crate::controllers::splunk::job_results(&server.splunk_ctx(), args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_splunk_list_saved_searches(
+    server: &AtlassianServer,
+    args: &SplunkListSavedSearchesArgs,
+) -> CallToolResult {
+    match crate::controllers::splunk::list_saved_searches(&server.splunk_ctx(), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }

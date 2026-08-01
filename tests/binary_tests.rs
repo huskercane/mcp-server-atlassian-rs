@@ -155,6 +155,43 @@ fn stdio_transport_answers_initialize() {
     assert!(status.success(), "unexpected exit: {status:?}");
 }
 
+#[test]
+fn stdio_transport_answers_modern_discover_without_initialize() {
+    let mut child = StdCommand::new(cargo_bin(BIN))
+        .env_remove("TRANSPORT_MODE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn binary");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let stdout = child.stdout.take().expect("stdout");
+    let request = concat!(
+        r#"{"jsonrpc":"2.0","id":2,"method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{},"io.modelcontextprotocol/clientInfo":{"name":"rust-binary-test","version":"0"}}}}"#,
+        "\n",
+    );
+    stdin.write_all(request.as_bytes()).expect("write discover");
+    stdin.flush().expect("flush");
+
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    reader.read_line(&mut line).expect("read response line");
+    let response: serde_json::Value = serde_json::from_str(&line).expect("JSON-RPC response");
+    assert_eq!(response["result"]["resultType"], "complete");
+    assert!(
+        response["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.iter().any(|v| v == "2026-07-28")),
+        "server did not advertise MCP 2026-07-28: {response}"
+    );
+
+    drop(stdin);
+    drop(reader);
+    let status = child.wait().expect("wait for exit");
+    assert!(status.success(), "unexpected exit: {status:?}");
+}
+
 #[tokio::test]
 async fn http_transport_binds_and_serves_health() {
     let port = random_port();

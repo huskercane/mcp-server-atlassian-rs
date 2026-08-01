@@ -51,6 +51,119 @@ fn mcp_headers() -> HeaderMap {
     h
 }
 
+fn modern_meta() -> serde_json::Value {
+    json!({
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {
+            "name": "rust-http-test",
+            "version": "0.0.0"
+        }
+    })
+}
+
+async fn response_json(response: reqwest::Response) -> serde_json::Value {
+    let body = response.text().await.expect("response body");
+    if let Ok(value) = serde_json::from_str(&body) {
+        return value;
+    }
+    body.lines()
+        .find_map(|line| {
+            line.strip_prefix("data: ")
+                .or_else(|| line.strip_prefix("data:"))
+        })
+        .and_then(|data| serde_json::from_str(data.trim()).ok())
+        .unwrap_or_else(|| panic!("response was neither JSON nor JSON-framed SSE:\n{body}"))
+}
+
+#[tokio::test]
+async fn modern_discover_is_stateless_and_advertises_2026_protocol() {
+    let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .headers(mcp_headers())
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "server/discover")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "server/discover",
+            "params": { "_meta": modern_meta() }
+        }))
+        .send()
+        .await
+        .expect("server/discover");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+    let body = response_json(response).await;
+    assert_eq!(body["result"]["resultType"], "complete");
+    assert!(
+        body["result"]["supportedVersions"]
+            .as_array()
+            .is_some_and(|versions| versions.iter().any(|v| v == "2026-07-28")),
+        "server did not advertise MCP 2026-07-28: {body}"
+    );
+}
+
+#[tokio::test]
+async fn modern_tools_list_is_stateless_deterministic_and_cacheable() {
+    let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .headers(mcp_headers())
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .header("Mcp-Method", "tools/list")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": { "_meta": modern_meta() }
+        }))
+        .send()
+        .await
+        .expect("tools/list");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(!response.headers().contains_key("mcp-session-id"));
+    let body = response_json(response).await;
+    let result = &body["result"];
+    assert_eq!(result["resultType"], "complete");
+    assert_eq!(result["ttlMs"], 300_000);
+    assert_eq!(result["cacheScope"], "public");
+
+    let names: Vec<&str> = result["tools"]
+        .as_array()
+        .expect("tools array")
+        .iter()
+        .map(|tool| tool["name"].as_str().expect("tool name"))
+        .collect();
+    assert_eq!(names.len(), 57);
+    assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[tokio::test]
+async fn modern_http_rejects_missing_standard_method_header() {
+    let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
+    let response = reqwest::Client::new()
+        .post(format!("{base}/mcp"))
+        .headers(mcp_headers())
+        .header("MCP-Protocol-Version", "2026-07-28")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/list",
+            "params": { "_meta": modern_meta() }
+        }))
+        .send()
+        .await
+        .expect("tools/list without Mcp-Method");
+
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body = response_json(response).await;
+    assert_eq!(body["error"]["code"], -32020);
+}
+
 #[tokio::test]
 async fn health_endpoint_returns_plaintext_version_banner() {
     let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
