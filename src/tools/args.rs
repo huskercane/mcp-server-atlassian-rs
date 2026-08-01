@@ -342,6 +342,118 @@ pub struct SonarqubeSearchIssuesArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `splunk_search`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SplunkSearchArgs {
+    /// Splunk Search Processing Language (SPL) query. Searching indexed data
+    /// normally starts with `search`, for example
+    /// `search index=main error | head 20`.
+    pub search: String,
+
+    /// Inclusive earliest time, such as `-15m`, `-24h@h`, or an ISO timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_time: Option<String>,
+
+    /// Inclusive latest time, such as `now` or an ISO timestamp.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_time: Option<String>,
+
+    /// Maximum seconds Splunk may run the search before finalizing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time: Option<u32>,
+
+    /// JMESPath expression to filter/transform the JSON rows response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `splunk_create_job`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SplunkCreateJobArgs {
+    /// SPL query to run asynchronously.
+    pub search: String,
+
+    /// Inclusive earliest time. REST searches otherwise default to all time,
+    /// so callers should normally provide this bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub earliest_time: Option<String>,
+
+    /// Inclusive latest time.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_time: Option<String>,
+
+    /// Maximum number of stored results, up to Splunk's configured limits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_count: Option<u32>,
+
+    /// Maximum seconds Splunk may run the search before finalizing it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_time: Option<u32>,
+
+    /// JMESPath expression to filter/transform the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `splunk_job_results`.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SplunkJobResultsArgs {
+    /// Search ID returned by `splunk_create_job`.
+    pub sid: String,
+
+    /// Number of results to return. Defaults to Splunk's endpoint default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+
+    /// Zero-based result offset for pagination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+
+    /// JMESPath expression to filter/transform the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for `splunk_list_saved_searches`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SplunkListSavedSearchesArgs {
+    /// Optional Splunk collection filter, for example `name="Errors by host"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub search: Option<String>,
+
+    /// Number of saved searches to return.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub count: Option<u32>,
+
+    /// Zero-based offset for pagination.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset: Option<u32>,
+
+    /// JMESPath expression to filter/transform the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Arguments for `wrds_query`.
 ///
 /// WRDS (Wharton Research Data Services) is a PostgreSQL database, so this tool

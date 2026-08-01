@@ -108,6 +108,11 @@ pub const VENDOR_GRAFANA: &str = "grafana";
 /// headline use is reading back *why* a CI quality gate failed.
 pub const VENDOR_SONARQUBE: &str = "sonarqube";
 
+/// Canonical vendor name for Splunk. Splunk uses its management REST API,
+/// configured by `SPLUNK_URL`, and authenticates with a token from
+/// `SPLUNK_TOKEN`.
+pub const VENDOR_SPLUNK: &str = "splunk";
+
 /// Canonical vendor name for WRDS (Wharton Research Data Services). WRDS is the
 /// one vendor with no REST API: access is a direct **`PostgreSQL`** connection
 /// (`wrds-pgdata.wharton.upenn.edu:9737`, SSL required), so it does not use the
@@ -497,6 +502,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "sonarcloud".to_string(),
         "mcp-server-sonarqube".to_string(),
     ];
+    let splunk_aliases = vec!["splunk".to_string(), "mcp-server-splunk".to_string()];
     let wrds_aliases = vec!["wrds".to_string(), "mcp-server-wrds".to_string()];
 
     vec![
@@ -511,6 +517,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_NEWRELIC, newrelic_aliases),
         (VENDOR_GRAFANA, grafana_aliases),
         (VENDOR_SONARQUBE, sonarqube_aliases),
+        (VENDOR_SPLUNK, splunk_aliases),
         (VENDOR_WRDS, wrds_aliases),
     ]
 }

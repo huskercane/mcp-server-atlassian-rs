@@ -29,6 +29,7 @@ pub mod raw_response;
 /// [`crate::vendor::bitbucket::error`].
 pub use crate::vendor::bitbucket::error as bitbucket_error;
 
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
@@ -82,6 +83,10 @@ pub struct RequestOptions {
     pub method: Option<HttpMethod>,
     pub headers: Vec<(String, String)>,
     pub body: Option<Value>,
+    /// URL-encoded form body. Used by APIs such as Splunk whose POST
+    /// endpoints do not accept JSON. Mutually exclusive with `body`;
+    /// `form` takes precedence if both are supplied.
+    pub form: Option<BTreeMap<String, String>>,
     pub timeout: Option<Duration>,
 }
 
@@ -145,7 +150,12 @@ pub async fn fetch(
     let (auth_name, auth_header) = validate_auth(credentials)?;
     let timeout = resolve_timeout(config, options.timeout);
 
-    let request_body_for_log = options.body.clone();
+    let request_body_for_log = options.body.clone().or_else(|| {
+        options
+            .form
+            .as_ref()
+            .and_then(|form| serde_json::to_value(form).ok())
+    });
     let req = build_request(
         client,
         method,
@@ -302,15 +312,18 @@ fn build_request(
         .request(method.as_reqwest_method(), url)
         .timeout(timeout)
         .header(auth_name.clone(), auth.clone())
-        .header(CONTENT_TYPE, HeaderValue::from_static("application/json"))
         .header(ACCEPT, HeaderValue::from_static("application/json"));
 
     for (k, v) in &options.headers {
         req = req.header(k, v);
     }
 
-    if let Some(body) = options.body.as_ref() {
+    if let Some(form) = options.form.as_ref() {
+        req = req.form(form);
+    } else if let Some(body) = options.body.as_ref() {
         req = req.json(body);
+    } else {
+        req = req.header(CONTENT_TYPE, HeaderValue::from_static("application/json"));
     }
     req
 }

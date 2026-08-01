@@ -177,8 +177,41 @@ pub async fn dispatch_with_creds(
         body,
         ..RequestOptions::default()
     };
+    dispatch_with_options(ctx, creds, &normalized, jq, output_format, opts).await
+}
+
+/// Dispatch a request with a URL-encoded form body and caller-supplied
+/// credentials. Splunk's search POST endpoints require this encoding.
+#[allow(clippy::too_many_arguments)]
+pub async fn dispatch_form_with_creds(
+    ctx: &HandleContext<'_>,
+    creds: &Credentials,
+    method: HttpMethod,
+    path: &str,
+    query_params: Option<&QueryParams>,
+    form: QueryParams,
+    jq: Option<&str>,
+    output_format: OutputFormat,
+) -> Result<ControllerResponse, McpError> {
+    let normalized = normalize_and_append(ctx.vendor, path, query_params);
+    let opts = RequestOptions {
+        method: Some(method),
+        form: Some(form),
+        ..RequestOptions::default()
+    };
+    dispatch_with_options(ctx, creds, &normalized, jq, output_format, opts).await
+}
+
+async fn dispatch_with_options(
+    ctx: &HandleContext<'_>,
+    creds: &Credentials,
+    normalized: &str,
+    jq: Option<&str>,
+    output_format: OutputFormat,
+    opts: RequestOptions,
+) -> Result<ControllerResponse, McpError> {
     let response: TransportResponse =
-        fetch(ctx.client, ctx.vendor, creds, ctx.config, &normalized, opts).await?;
+        fetch(ctx.client, ctx.vendor, creds, ctx.config, normalized, opts).await?;
 
     Ok(render_response(&response, jq, output_format))
 }
