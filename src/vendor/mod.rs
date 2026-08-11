@@ -32,6 +32,7 @@ pub mod edx;
 pub mod grafana;
 pub mod jira;
 pub mod newrelic;
+pub mod ninjaone;
 pub mod postman;
 pub mod slack;
 pub mod sonarqube;

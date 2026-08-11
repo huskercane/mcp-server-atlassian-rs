@@ -1,0 +1,1 @@
+DELETE a resource through a NinjaOne API endpoint on a configured server. Pass `server` as an alias from `NINJAONE_SERVERS`, or omit it to use `NINJAONE_URL`. This is destructive: verify the server, path, resource ID, and query parameters before calling. The MCP server adds authentication.

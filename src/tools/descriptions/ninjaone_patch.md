@@ -1,0 +1,1 @@
+PATCH JSON on a NinjaOne API endpoint on a configured server. Pass `server` as an alias from `NINJAONE_SERVERS`, or omit it to use `NINJAONE_URL`. Verify the server, resource ID, and requested changes before calling. The MCP server adds authentication.

@@ -15,6 +15,7 @@ use mcp_server_atlassian::vendor::edx::EdxVendor;
 use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
 use mcp_server_atlassian::vendor::jira::JiraVendor;
 use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
+use mcp_server_atlassian::vendor::ninjaone::NinjaOneVendor;
 use mcp_server_atlassian::vendor::postman::PostmanVendor;
 use mcp_server_atlassian::vendor::slack::SlackVendor;
 use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
@@ -41,6 +42,7 @@ fn server_info_reports_expected_identity() {
         GrafanaVendor::new(),
         SonarqubeVendor::new(),
         SplunkVendor::new(),
+        NinjaOneVendor::new(),
     );
     let info = server.get_info();
     assert_eq!(

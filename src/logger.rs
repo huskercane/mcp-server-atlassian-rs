@@ -8,6 +8,8 @@
 //!   (ANSI, no target) and the same log file (plain text, target included).
 //!   Both writers run output through a redactor that masks Atlassian API
 //!   tokens, JWTs, `Authorization` headers, and URL-embedded basic auth.
+//!   The stderr layer is opt-out via `LOG_STDERR` (see below); the file
+//!   layer is always installed when the file could be opened.
 //! - Retention: at startup, files in the log dir matching the package
 //!   prefix are pruned by age (`LOG_RETENTION_DAYS`) and then by total size
 //!   (`LOG_RETENTION_MAX_BYTES`, oldest-first). The sweep runs on a detached
@@ -16,6 +18,16 @@
 //!     1. `RUST_LOG` if set — passed straight to `EnvFilter`.
 //!     2. `DEBUG=true` or `DEBUG=1` — bumps the whole subscriber to `debug`.
 //!     3. Default `info,mcp_server_atlassian=debug`.
+//!
+//!   The filter is attached to the registry, so it gates *both* writers.
+//!   `RUST_LOG=off` therefore silences the log file as well as the console —
+//!   to quiet only the console while keeping the file, use `LOG_STDERR=off`.
+//! - Console output: `LOG_STDERR` set to `off`/`false`/`0`/`no`
+//!   (case-insensitive) drops the stderr layer entirely; unset or any other
+//!   value keeps it. Useful for long-running server processes, where the
+//!   per-session log file is the durable record and console noise is not
+//!   wanted. Note this never affects stdout — nothing is ever logged there,
+//!   because stdout is the JSON-RPC channel in stdio transport mode.
 
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -95,12 +107,14 @@ pub fn init() -> PathBuf {
         std::env::var("DEBUG").ok().as_deref(),
     );
 
-    let stderr_layer = fmt::layer()
-        .with_writer(RedactingMakeWriter {
-            inner: std::io::stderr,
-            redactor: redactor.clone(),
-        })
-        .with_target(false);
+    let stderr_layer = stderr_enabled(std::env::var("LOG_STDERR").ok().as_deref()).then(|| {
+        fmt::layer()
+            .with_writer(RedactingMakeWriter {
+                inner: std::io::stderr,
+                redactor: redactor.clone(),
+            })
+            .with_target(false)
+    });
 
     let file_layer = file_writer.map(|file| {
         fmt::layer()
@@ -136,6 +150,21 @@ pub fn init() -> PathBuf {
         .ok();
 
     log_path
+}
+
+/// Whether to install the stderr fmt layer, given the raw `LOG_STDERR` value.
+///
+/// Unset → enabled, preserving the historical default. The disable set is
+/// matched case-insensitively and after trimming; unlike `DEBUG` (which
+/// accepts only exact `true`/`1`) this is deliberately lenient, because a
+/// misspelt off-switch that silently keeps logging is a mild annoyance while
+/// the file layer — the durable record — is unaffected either way.
+fn stderr_enabled(log_stderr: Option<&str>) -> bool {
+    let Some(value) = log_stderr else { return true };
+    let value = value.trim();
+    !["off", "false", "0", "no"]
+        .iter()
+        .any(|disabled| value.eq_ignore_ascii_case(disabled))
 }
 
 fn build_filter(rust_log: Option<&str>, debug: Option<&str>) -> EnvFilter {
@@ -385,6 +414,34 @@ mod tests {
     fn rust_log_per_target_directive_is_honoured() {
         let f = build_filter(Some("mcp_server_atlassian::controllers=trace"), None);
         assert_eq!(format!("{f}"), "mcp_server_atlassian::controllers=trace");
+    }
+
+    // ---- stderr_enabled ----
+
+    #[test]
+    fn stderr_enabled_by_default_when_unset() {
+        assert!(stderr_enabled(None));
+    }
+
+    #[test]
+    fn stderr_disabled_by_recognised_off_values() {
+        for value in ["off", "false", "0", "no"] {
+            assert!(!stderr_enabled(Some(value)), "{value} should disable");
+        }
+    }
+
+    #[test]
+    fn stderr_off_switch_is_case_insensitive_and_trimmed() {
+        for value in ["OFF", "Off", " off ", "\tFALSE\n", "No"] {
+            assert!(!stderr_enabled(Some(value)), "{value:?} should disable");
+        }
+    }
+
+    #[test]
+    fn stderr_stays_enabled_for_on_values_and_junk() {
+        for value in ["on", "true", "1", "yes", "", "  ", "offf", "nope"] {
+            assert!(stderr_enabled(Some(value)), "{value:?} should stay enabled");
+        }
     }
 
     // ---- days_to_ymd ----

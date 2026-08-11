@@ -113,6 +113,11 @@ pub const VENDOR_SONARQUBE: &str = "sonarqube";
 /// `SPLUNK_TOKEN`.
 pub const VENDOR_SPLUNK: &str = "splunk";
 
+/// Canonical vendor name for `NinjaOne`. Supports the public v2 API with a
+/// bearer token or API session key, and (when explicitly configured) the
+/// web-console session cookie used by legacy `/ws/...` endpoints.
+pub const VENDOR_NINJAONE: &str = "ninjaone";
+
 /// Canonical vendor name for WRDS (Wharton Research Data Services). WRDS is the
 /// one vendor with no REST API: access is a direct **`PostgreSQL`** connection
 /// (`wrds-pgdata.wharton.upenn.edu:9737`, SSL required), so it does not use the
@@ -503,6 +508,12 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         "mcp-server-sonarqube".to_string(),
     ];
     let splunk_aliases = vec!["splunk".to_string(), "mcp-server-splunk".to_string()];
+    let ninjaone_aliases = vec![
+        "ninjaone".to_string(),
+        "ninja-one".to_string(),
+        "ninjarmm".to_string(),
+        "mcp-server-ninjaone".to_string(),
+    ];
     let wrds_aliases = vec!["wrds".to_string(), "mcp-server-wrds".to_string()];
 
     vec![
@@ -518,6 +529,7 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         (VENDOR_GRAFANA, grafana_aliases),
         (VENDOR_SONARQUBE, sonarqube_aliases),
         (VENDOR_SPLUNK, splunk_aliases),
+        (VENDOR_NINJAONE, ninjaone_aliases),
         (VENDOR_WRDS, wrds_aliases),
     ]
 }

@@ -9,6 +9,7 @@
 //! - `TRANSPORT_MODE=http`, argv empty → HTTP transport is started.
 //! - argv non-empty → CLI dispatch.
 //! - SIGTERM on the HTTP transport results in a clean exit (Unix only).
+//! - `LOG_STDERR` gates console logging without touching the log file.
 
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
@@ -258,5 +259,68 @@ async fn sigterm_triggers_graceful_exit() {
     assert!(
         exit_status.success(),
         "binary did not exit cleanly after SIGTERM: {exit_status:?}"
+    );
+}
+
+/// Spawn the HTTP transport with `LOG_STDERR` set as given (or removed for
+/// `None`), wait until it binds, then kill it and return everything it wrote
+/// to stderr. `RUST_LOG` is cleared so an ambient value in the developer's or
+/// CI's environment cannot decide the outcome.
+async fn stderr_from_http_run(log_stderr: Option<&str>) -> String {
+    let port = random_port();
+    let mut command = TokioCommand::new(cargo_bin(BIN));
+    command
+        .env("TRANSPORT_MODE", "http")
+        .env("PORT", port.to_string())
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match log_stderr {
+        Some(value) => {
+            command.env("LOG_STDERR", value);
+        }
+        None => {
+            command.env_remove("LOG_STDERR");
+        }
+    }
+
+    let mut child = command.spawn().expect("spawn binary");
+    assert!(
+        wait_for_listen(port, Duration::from_secs(5)),
+        "binary did not bind to 127.0.0.1:{port}",
+    );
+
+    child.start_kill().ok();
+    let output = child.wait_with_output().await.expect("collect output");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[tokio::test]
+async fn stderr_logging_is_enabled_by_default() {
+    let stderr = stderr_from_http_run(None).await;
+    assert!(
+        stderr.contains("listening on streamable-HTTP transport"),
+        "expected startup log on stderr by default, got:\n{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn log_stderr_off_silences_console() {
+    let stderr = stderr_from_http_run(Some("off")).await;
+    assert!(
+        stderr.trim().is_empty(),
+        "LOG_STDERR=off should leave stderr empty, got:\n{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn log_stderr_unrecognised_value_keeps_console_logging() {
+    // Only the documented off-switches disable output; anything else must be
+    // treated as "leave logging on" rather than silently swallowing logs.
+    let stderr = stderr_from_http_run(Some("yes")).await;
+    assert!(
+        stderr.contains("listening on streamable-HTTP transport"),
+        "unrecognised LOG_STDERR value should keep stderr logging, got:\n{stderr}"
     );
 }

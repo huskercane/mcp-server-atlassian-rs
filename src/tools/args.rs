@@ -135,6 +135,61 @@ pub struct WriteArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for a read-shaped NinjaOne request. `server` is a configured
+/// alias, never a caller-controlled URL.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NinjaOneReadArgs {
+    /// Optional alias from the `NINJAONE_SERVERS` JSON object. When omitted,
+    /// `NINJAONE_URL` is used. Raw URLs are intentionally not accepted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+
+    /// API path relative to the selected NinjaOne server. Public API examples
+    /// use `/v2/devices`; private console endpoints use `/ws/...`.
+    pub path: String,
+
+    /// Optional query parameters as key-value pairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_params: Option<QueryParams>,
+
+    /// Optional JMESPath expression to reduce or reshape the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for a write-shaped NinjaOne request.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NinjaOneWriteArgs {
+    /// Optional alias from the `NINJAONE_SERVERS` JSON object. When omitted,
+    /// `NINJAONE_URL` is used. Raw URLs are intentionally not accepted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+
+    /// API path relative to the selected NinjaOne server.
+    pub path: String,
+
+    /// JSON request body expected by the selected endpoint.
+    pub body: Value,
+
+    /// Optional query parameters as key-value pairs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub query_params: Option<QueryParams>,
+
+    /// Optional JMESPath expression to reduce or reshape the response.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Arguments for `newrelic_query`.
 ///
 /// New Relic's only API is NerdGraph (a single GraphQL endpoint), so this is a

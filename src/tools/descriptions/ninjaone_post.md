@@ -1,0 +1,1 @@
+POST JSON to a NinjaOne API endpoint on a configured server. Pass `server` as an alias from `NINJAONE_SERVERS`, or omit it to use `NINJAONE_URL`. This can perform consequential actions such as running scripts or deleting devices through action endpoints; verify the server, path, IDs, and body before calling. The MCP server adds authentication.

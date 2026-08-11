@@ -47,6 +47,7 @@ use crate::controllers::edx::EdxContext;
 use crate::controllers::grafana::GrafanaContext;
 use crate::controllers::handle_clone;
 use crate::controllers::newrelic::NewRelicContext;
+use crate::controllers::ninjaone::NinjaOneContext;
 use crate::controllers::postman::PostmanContext;
 use crate::controllers::slack::SlackContext;
 use crate::controllers::sonarqube::SonarqubeContext;
@@ -64,6 +65,7 @@ use crate::vendor::edx::EdxVendor;
 use crate::vendor::grafana::GrafanaVendor;
 use crate::vendor::jira::JiraVendor;
 use crate::vendor::newrelic::NewRelicVendor;
+use crate::vendor::ninjaone::NinjaOneVendor;
 use crate::vendor::postman::PostmanVendor;
 use crate::vendor::slack::SlackVendor;
 use crate::vendor::sonarqube::SonarqubeVendor;
@@ -76,8 +78,9 @@ use args::{
     CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
     EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    ReadArgs, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, SplunkCreateJobArgs,
-    SplunkJobResultsArgs, SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
+    NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
+    SonarqubeSearchIssuesArgs, SplunkCreateJobArgs, SplunkJobResultsArgs,
+    SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
 };
 #[cfg(feature = "wrds")]
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
@@ -107,6 +110,7 @@ struct ServerState {
     grafana_vendor: GrafanaVendor,
     sonarqube_vendor: SonarqubeVendor,
     splunk_vendor: SplunkVendor,
+    ninjaone_vendor: NinjaOneVendor,
     /// WRDS (PostgreSQL) vendor. Feature-gated: a `--no-default-features` build
     /// drops the Postgres dependency tree entirely, so this field and the
     /// `wrds_*` tools simply don't exist. Constructed internally (it is cheap
@@ -144,6 +148,7 @@ impl AtlassianServer {
             GrafanaVendor::new(),
             SonarqubeVendor::new(),
             SplunkVendor::new(),
+            NinjaOneVendor::new(),
         ))
     }
 
@@ -170,6 +175,7 @@ impl AtlassianServer {
         grafana_vendor: GrafanaVendor,
         sonarqube_vendor: SonarqubeVendor,
         splunk_vendor: SplunkVendor,
+        ninjaone_vendor: NinjaOneVendor,
     ) -> Self {
         Self {
             state: Arc::new(ServerState {
@@ -187,6 +193,7 @@ impl AtlassianServer {
                 grafana_vendor,
                 sonarqube_vendor,
                 splunk_vendor,
+                ninjaone_vendor,
                 #[cfg(feature = "wrds")]
                 wrds_vendor: WrdsVendor::new(),
                 workspace_cache: WorkspaceCache::new(),
@@ -213,6 +220,7 @@ impl AtlassianServer {
             + Self::grafana_router()
             + Self::sonarqube_router()
             + Self::splunk_router();
+        let router = router + Self::ninjaone_router();
         // WRDS tools only exist when the `wrds` feature is on (default).
         #[cfg(feature = "wrds")]
         let router = router + Self::wrds_router();
@@ -348,6 +356,14 @@ impl AtlassianServer {
             &self.state.client,
             &self.state.config,
             &self.state.splunk_vendor,
+        )
+    }
+
+    fn ninjaone_ctx(&self) -> NinjaOneContext<'_> {
+        NinjaOneContext::new(
+            &self.state.client,
+            &self.state.config,
+            &self.state.ninjaone_vendor,
         )
     }
 
@@ -1186,6 +1202,83 @@ impl AtlassianServer {
 }
 
 // ============================================================================
+// NinjaOne tools
+// ============================================================================
+
+#[tool_router(router = ninjaone_router)]
+impl AtlassianServer {
+    #[doc = include_str!("descriptions/ninjaone_get.md")]
+    #[tool(annotations(
+        read_only_hint = true,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_get(
+        &self,
+        Parameters(args): Parameters<NinjaOneReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_ninjaone(self, HttpMethod::Get, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/ninjaone_post.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_post(
+        &self,
+        Parameters(args): Parameters<NinjaOneWriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_ninjaone(self, HttpMethod::Post, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/ninjaone_put.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_put(
+        &self,
+        Parameters(args): Parameters<NinjaOneWriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_ninjaone(self, HttpMethod::Put, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/ninjaone_patch.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_patch(
+        &self,
+        Parameters(args): Parameters<NinjaOneWriteArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_write_ninjaone(self, HttpMethod::Patch, &args).await)
+    }
+
+    #[doc = include_str!("descriptions/ninjaone_delete.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = true,
+        idempotent_hint = true,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_delete(
+        &self,
+        Parameters(args): Parameters<NinjaOneReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_read_ninjaone(self, HttpMethod::Delete, &args).await)
+    }
+}
+
+// ============================================================================
 // WRDS tools (feature = "wrds")
 // ============================================================================
 
@@ -1483,6 +1576,28 @@ async fn run_write_postman(
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
         }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_read_ninjaone(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &NinjaOneReadArgs,
+) -> CallToolResult {
+    match crate::controllers::ninjaone::handle_read(&server.ninjaone_ctx(), method, args).await {
+        Ok(resp) => success_response(&resp),
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_write_ninjaone(
+    server: &AtlassianServer,
+    method: HttpMethod,
+    args: &NinjaOneWriteArgs,
+) -> CallToolResult {
+    match crate::controllers::ninjaone::handle_write(&server.ninjaone_ctx(), method, args).await {
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }

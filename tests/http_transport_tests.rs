@@ -138,7 +138,7 @@ async fn modern_tools_list_is_stateless_deterministic_and_cacheable() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
         .collect();
-    assert_eq!(names.len(), 57);
+    assert_eq!(names.len(), 62);
     assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
 }
 

@@ -83,6 +83,8 @@ Grafana is separate too: create a [service-account token](https://grafana.com/do
 SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read as plaintext from the `sonarqube` config section or environment; never goes through the OS keychain.
 Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read as plaintext from the `splunk` config section or environment; never goes through the OS keychain.
 
+NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map such as `{"dev":"https://dev.example","qa":"https://qa.example"}` and pass the alias as the tool's `server`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
+
 WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read as plaintext from the `wrds` config section or environment; never goes through the OS keychain. Requires the binary to be built with the `wrds` feature (the default).
 
 ### Environment variables
@@ -113,6 +115,11 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `SPLUNK_URL` | Splunk management REST API base URL (usually `https://<host>:8089`). **Required** before invoking any `splunk_*` tool; only checked at tool-call time, so a non-Splunk setup boots without it. | splunk only |
 | `SPLUNK_TOKEN` | Splunk authentication token. **Required** before invoking any `splunk_*` tool; sent as `Authorization: Bearer` by default. | splunk only |
 | `SPLUNK_AUTH_SCHEME` | Optional auth scheme. Defaults to `bearer`; set `splunk` only when supplying a legacy Splunk session key. | splunk only |
+| `NINJAONE_URL` | Default NinjaOne tenant/server base URL. Used when a tool call omits `server`. | ninjaone only |
+| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to tenant/server base URLs. Tool calls accept an alias, never a raw URL. | ninjaone only |
+| `NINJAONE_ACCESS_TOKEN` | NinjaOne OAuth access token, sent as `Authorization: Bearer`. Takes precedence over session credentials. | ninjaone only |
+| `NINJAONE_SESSION_KEY` | NinjaOne API session key, sent in the `sessionKey` header. | ninjaone only |
+| `NINJAONE_SESSION_COOKIE` | Exact `Cookie` header value for private web-console `/ws/...` calls, e.g. `sessionKey=...`. | ninjaone only |
 | `WRDS_USERNAME` | WRDS account username for the PostgreSQL connection. **Required** before invoking any `wrds_*` tool; only checked at tool-call time, so a non-WRDS setup boots without it. | wrds only |
 | `WRDS_PASSWORD` | WRDS account password. **Required** before invoking any `wrds_*` tool. | wrds only |
 | `WRDS_HOST` | WRDS Postgres host. Defaults to `wrds-pgdata.wharton.upenn.edu`; override for a mirror or local test DB. | wrds only |
@@ -123,7 +130,7 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
 
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `splunk`, `mcp-server-splunk`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
+Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `splunk`, `mcp-server-splunk`, `ninjaone`, `ninja-one`, `ninjarmm`, `mcp-server-ninjaone`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
 
 ```json
 {
@@ -190,6 +197,13 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
       "SPLUNK_TOKEN": "eyJ..."
     }
   },
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_URL": "https://app.ninjarmm.com",
+      "NINJAONE_SERVERS": "{\"dev\":\"https://dev.example\",\"qa\":\"https://qa.example\"}",
+      "NINJAONE_ACCESS_TOKEN": "eyJ..."
+    }
+  },
   "wrds": {
     "environments": {
       "WRDS_USERNAME": "your-wrds-username",
@@ -199,7 +213,7 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`, `SPLUNK_TOKEN`, `WRDS_USERNAME`/`WRDS_PASSWORD`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`, `SPLUNK_TOKEN`, `NINJAONE_*`, `WRDS_USERNAME`/`WRDS_PASSWORD`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
 
 `ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
 
@@ -464,6 +478,18 @@ The usual CI investigation is `circleci_logs` → `sonarqube_quality_gate` → `
 | `splunk_list_saved_searches` | read-only, idempotent | List reports, alerts, and other saved searches visible to the token |
 
 The normal flow is `splunk_search` for small, bounded queries and `splunk_create_job` → `splunk_job_results` for longer or paged searches. Search POSTs use Splunk's required URL-encoded form body and request `json_rows`; job results use the versioned v2 endpoint. REST searches default to all time when no time modifiers are present, so provide `earliestTime` and `latestTime` or put equivalent bounds in the SPL. Keep responses small with `head`, `fields`, `table`, or aggregation commands. Authentication uses `SPLUNK_TOKEN` and `SPLUNK_URL`; modern tokens use `Bearer`, while `SPLUNK_AUTH_SCHEME=splunk` supports legacy session keys.
+
+### NinjaOne (`ninjaone_*`)
+
+| Tool | Annotations | Use |
+|---|---|---|
+| `ninjaone_get` | read-only, idempotent | GET any public `/v2/...` or private `/ws/...` endpoint |
+| `ninjaone_post` | mutating, potentially destructive | POST JSON, including action endpoints |
+| `ninjaone_put` | mutating, idempotent | PUT JSON to replace a resource |
+| `ninjaone_patch` | mutating | PATCH a resource |
+| `ninjaone_delete` | destructive, idempotent | DELETE a resource |
+
+Each call supplies only a relative `path` and an optional configured `server` alias. The base URL is resolved from `NINJAONE_URL` or `NINJAONE_SERVERS`, preventing an MCP caller from sending the server-held credential to an arbitrary URL. The public API uses OAuth 2.0 bearer tokens; `NINJAONE_SESSION_KEY` and `NINJAONE_SESSION_COOKIE` cover API-session-key and private web-console calls. Private `/ws/...` endpoints such as those in the IntelliJ HTTP sample are not stable public contracts. Because NinjaOne action endpoints can use POST for destructive work, `ninjaone_post` carries the destructive annotation.
 
 ### WRDS (`wrds_*`)
 

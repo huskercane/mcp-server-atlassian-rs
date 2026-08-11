@@ -1,0 +1,1 @@
+Read any NinjaOne API endpoint on a configured server. Pass `server` as an alias from `NINJAONE_SERVERS`, or omit it to use `NINJAONE_URL`. The MCP server adds its configured authentication; never include tokens or cookies in arguments. Prefer public `/v2/...` endpoints. Private `/ws/...` console endpoints may change without notice.
