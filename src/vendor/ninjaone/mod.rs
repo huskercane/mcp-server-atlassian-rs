@@ -80,22 +80,39 @@ impl NinjaOneVendor {
         })?;
         let parsed: Value = serde_json::from_str(raw).map_err(|error| {
             unexpected(
-                format!("NINJAONE_SERVERS must be a JSON object of alias-to-URL strings: {error}"),
+                format!(
+                    "NINJAONE_SERVERS must be a JSON object whose values are URLs or server objects: {error}"
+                ),
                 None,
             )
         })?;
-        parsed
+        let entry = parsed
             .as_object()
             .and_then(|servers| servers.get(alias))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|url| !url.is_empty())
-            .map(str::to_owned)
             .ok_or_else(|| {
                 auth_missing(format!(
                     "Unknown NinjaOne server alias `{alias}`. Add it to NINJAONE_SERVERS."
                 ))
-            })
+            })?;
+
+        match entry {
+            Value::String(url) if !url.trim().is_empty() => Ok(url.trim().to_owned()),
+            Value::Object(server) => {
+                let url = server
+                    .get("url")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|url| !url.is_empty())
+                    .ok_or_else(|| invalid_server_entry(alias))?;
+                let prefix = server
+                    .get("prefix")
+                    .map(|value| value.as_str().ok_or_else(|| invalid_server_entry(alias)))
+                    .transpose()?
+                    .unwrap_or_default();
+                append_prefix(url, prefix)
+            }
+            _ => Err(invalid_server_entry(alias)),
+        }
     }
 }
 
@@ -104,6 +121,33 @@ fn non_blank<'a>(config: &'a Config, key: &str) -> Option<&'a str> {
         .get_for(VENDOR_NINJAONE, key)
         .map(str::trim)
         .filter(|value| !value.is_empty())
+}
+
+fn invalid_server_entry(alias: &str) -> McpError {
+    unexpected(
+        format!(
+            "NINJAONE_SERVERS entry `{alias}` must be a URL string or an object with a non-empty `url` and optional `prefix` string"
+        ),
+        None,
+    )
+}
+
+fn append_prefix(url: &str, prefix: &str) -> Result<String, McpError> {
+    let prefix = prefix.trim();
+    if prefix.is_empty() || prefix == "/" {
+        return Ok(url.to_owned());
+    }
+    if !prefix.starts_with('/') || prefix.contains(['?', '#']) {
+        return Err(unexpected(
+            "NinjaOne server prefix must be an absolute path beginning with `/` and must not include a query string or fragment",
+            None,
+        ));
+    }
+    Ok(format!(
+        "{}{}",
+        url.trim_end_matches('/'),
+        prefix.trim_end_matches('/')
+    ))
 }
 
 impl Vendor for NinjaOneVendor {

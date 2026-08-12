@@ -83,7 +83,7 @@ Grafana is separate too: create a [service-account token](https://grafana.com/do
 SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read as plaintext from the `sonarqube` config section or environment; never goes through the OS keychain.
 Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read as plaintext from the `splunk` config section or environment; never goes through the OS keychain.
 
-NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map such as `{"dev":"https://dev.example","qa":"https://qa.example"}` and pass the alias as the tool's `server`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
+NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map and pass the alias as the tool's `server`. An alias can be a URL string, or an object with `url` and an optional environment-specific path `prefix`: `{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}`. The prefix is inserted before every tool-supplied path, so a call with `/v2/devices` targets `https://test.example/test-api/v2/devices` on `test`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
 
 WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read as plaintext from the `wrds` config section or environment; never goes through the OS keychain. Requires the binary to be built with the `wrds` feature (the default).
 
@@ -116,7 +116,7 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `SPLUNK_TOKEN` | Splunk authentication token. **Required** before invoking any `splunk_*` tool; sent as `Authorization: Bearer` by default. | splunk only |
 | `SPLUNK_AUTH_SCHEME` | Optional auth scheme. Defaults to `bearer`; set `splunk` only when supplying a legacy Splunk session key. | splunk only |
 | `NINJAONE_URL` | Default NinjaOne tenant/server base URL. Used when a tool call omits `server`. | ninjaone only |
-| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to tenant/server base URLs. Tool calls accept an alias, never a raw URL. | ninjaone only |
+| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to URL strings or `{ "url": "...", "prefix": "/..." }` objects. The optional prefix is applied per server before the tool path. Tool calls accept an alias, never a raw URL. | ninjaone only |
 | `NINJAONE_ACCESS_TOKEN` | NinjaOne OAuth access token, sent as `Authorization: Bearer`. Takes precedence over session credentials. | ninjaone only |
 | `NINJAONE_SESSION_KEY` | NinjaOne API session key, sent in the `sessionKey` header. | ninjaone only |
 | `NINJAONE_SESSION_COOKIE` | Exact `Cookie` header value for private web-console `/ws/...` calls, e.g. `sessionKey=...`. | ninjaone only |
@@ -200,7 +200,7 @@ Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-
   "ninjaone": {
     "environments": {
       "NINJAONE_URL": "https://app.ninjarmm.com",
-      "NINJAONE_SERVERS": "{\"dev\":\"https://dev.example\",\"qa\":\"https://qa.example\"}",
+      "NINJAONE_SERVERS": "{\"test\":{\"url\":\"https://test.example\",\"prefix\":\"/test-api\"},\"qa\":{\"url\":\"https://qa.example\",\"prefix\":\"/qa-api\"}}",
       "NINJAONE_ACCESS_TOKEN": "eyJ..."
     }
   },
@@ -349,6 +349,37 @@ Restart Claude Desktop. The server appears in the status bar. Stdio transport is
 
 Point the client at the binary. Stdio is the default transport. If your client uses streamable HTTP, run the binary with `TRANSPORT_MODE=http` and point the client at `http://127.0.0.1:3000/mcp`.
 
+### Run in the background on Windows
+
+[`71-mcp.ps1`](71-mcp.ps1) starts one hidden, per-user HTTP server and leaves it running after the launching PowerShell window closes. It checks the executable's full path before starting, so opening more PowerShell sessions does not create duplicate server processes.
+
+By default, the script looks for the executable at `%LOCALAPPDATA%\Programs\mcp-atlassian\mcp-atlassian.exe` and listens on port `3001`. Install the downloaded executable there, or edit `ExecutablePath` and `Port` near the top of the script. Then start it from the repository directory:
+
+```powershell
+pwsh -NoProfile -File .\71-mcp.ps1
+
+# Confirm the background server is responding.
+Invoke-WebRequest http://127.0.0.1:3001/
+```
+
+Point an HTTP MCP client at `http://127.0.0.1:3001/mcp`. To start the server automatically the next time an interactive PowerShell session opens, add this line to the PowerShell profile shown by `$PROFILE`:
+
+```powershell
+. 'C:\path\to\mcp-server-atlassian-bitbucket-rs\71-mcp.ps1'
+```
+
+The script defines both `Start-McpServer` and the backwards-compatible `StartMcpServer` alias. To stop the exact executable that the default script launches:
+
+```powershell
+$binaryPath = Join-Path $env:LOCALAPPDATA 'Programs\mcp-atlassian\mcp-atlassian.exe'
+$binary = (Resolve-Path -LiteralPath $binaryPath).ProviderPath
+Get-Process -Name 'mcp-atlassian' -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $binary } |
+    Stop-Process
+```
+
+The script sets `TRANSPORT_MODE=http`, `PORT`, `LOG_STDERR`, and `RUST_LOG` only for the child process. Vendor configuration is inherited from the launching environment, but `~/.mcp/configs.json` is recommended for a background process because it does not depend on which PowerShell session launched it. This is not a Windows Service: it does not run before login or automatically restart after a reboot. The profile entry starts it when PowerShell next opens; use Task Scheduler or a service wrapper if it must start at Windows boot.
+
 ## Available tools
 
 Fifty-seven tools across thirteen vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, `sonarqube_*`, `splunk_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
@@ -489,7 +520,50 @@ The normal flow is `splunk_search` for small, bounded queries and `splunk_create
 | `ninjaone_patch` | mutating | PATCH a resource |
 | `ninjaone_delete` | destructive, idempotent | DELETE a resource |
 
-Each call supplies only a relative `path` and an optional configured `server` alias. The base URL is resolved from `NINJAONE_URL` or `NINJAONE_SERVERS`, preventing an MCP caller from sending the server-held credential to an arbitrary URL. The public API uses OAuth 2.0 bearer tokens; `NINJAONE_SESSION_KEY` and `NINJAONE_SESSION_COOKIE` cover API-session-key and private web-console calls. Private `/ws/...` endpoints such as those in the IntelliJ HTTP sample are not stable public contracts. Because NinjaOne action endpoints can use POST for destructive work, `ninjaone_post` carries the destructive annotation.
+Each call supplies only a relative `path` and an optional configured `server` alias. The base URL is resolved from `NINJAONE_URL` or `NINJAONE_SERVERS`, preventing an MCP caller from sending the server-held credential to an arbitrary URL. Because NinjaOne action endpoints can use POST for destructive work, `ninjaone_post` carries the destructive annotation.
+
+#### Configure NinjaOne servers
+
+For one server, set a default URL and one authentication method in `~/.mcp/configs.json` (`$HOME\.mcp\configs.json` in PowerShell):
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_URL": "https://app.ninjarmm.com",
+      "NINJAONE_ACCESS_TOKEN": "your-oauth-access-token"
+    }
+  }
+}
+```
+
+For multiple environments, configure safe aliases with `NINJAONE_SERVERS`. A value can be a plain URL, or an object containing `url` and an environment-specific `prefix`:
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_SERVERS": "{\"test\":{\"url\":\"https://test.example\",\"prefix\":\"/test-api\"},\"qa\":{\"url\":\"https://qa.example\",\"prefix\":\"/qa-api\"},\"prod\":\"https://app.ninjarmm.com\"}",
+      "NINJAONE_SESSION_COOKIE": "sessionKey=replace-me"
+    }
+  }
+}
+```
+
+`NINJAONE_SERVERS` is itself a JSON string because it lives inside the outer `configs.json`, so its quotes must be escaped as shown. With that configuration:
+
+- `{"server":"test","path":"/v2/devices"}` requests `https://test.example/test-api/v2/devices`.
+- `{"server":"qa","path":"/v2/devices"}` requests `https://qa.example/qa-api/v2/devices`.
+- Omitting `server` uses `NINJAONE_URL`; it is an error if no default URL is configured.
+
+The equivalent temporary PowerShell environment configuration is:
+
+```powershell
+$env:NINJAONE_SERVERS = '{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}'
+$env:NINJAONE_ACCESS_TOKEN = 'your-oauth-access-token'
+```
+
+Choose only the authentication carrier appropriate for the endpoint. Resolution order is `NINJAONE_ACCESS_TOKEN` (OAuth bearer), then `NINJAONE_SESSION_KEY` (`sessionKey` header), then `NINJAONE_SESSION_COOKIE` (exact `Cookie` header value). Authentication is currently shared by all configured aliases. Prefer the supported public `/v2/...` API; private `/ws/...` console endpoints and browser-session cookies can change or expire without notice.
 
 ### WRDS (`wrds_*`)
 

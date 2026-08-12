@@ -42,6 +42,47 @@ fn server_alias_must_come_from_configured_map() {
 }
 
 #[test]
+fn server_alias_can_apply_its_own_path_prefix() {
+    let config = config_with(&[(
+        "NINJAONE_SERVERS",
+        r#"{
+            "test":{"url":"https://test.example/root/","prefix":"/test-api/"},
+            "qa":{"url":"https://qa.example","prefix":"/qa-api"}
+        }"#,
+    )]);
+
+    assert_eq!(
+        NinjaOneVendor::new()
+            .for_server(Some("test"))
+            .base_url(&config)
+            .unwrap(),
+        "https://test.example/root/test-api"
+    );
+    assert_eq!(
+        NinjaOneVendor::new()
+            .for_server(Some("qa"))
+            .base_url(&config)
+            .unwrap(),
+        "https://qa.example/qa-api"
+    );
+}
+
+#[test]
+fn server_alias_rejects_an_invalid_prefix() {
+    let config = config_with(&[(
+        "NINJAONE_SERVERS",
+        r#"{"test":{"url":"https://test.example","prefix":"relative"}}"#,
+    )]);
+
+    let error = NinjaOneVendor::new()
+        .for_server(Some("test"))
+        .base_url(&config)
+        .unwrap_err();
+    assert_eq!(error.kind, ErrorKind::UnexpectedError);
+    assert!(error.message.contains("prefix must be an absolute path"));
+}
+
+#[test]
 fn bearer_token_has_precedence() {
     let config = config_with(&[
         ("NINJAONE_ACCESS_TOKEN", "access-token"),
