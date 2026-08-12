@@ -13,7 +13,6 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use rand::RngCore;
 use serde_json::Value;
 use tokio::fs;
 use tracing::debug;
@@ -66,7 +65,7 @@ pub async fn save(
 fn generate_filename() -> String {
     let ts = iso_dashed();
     let mut bytes = [0u8; 4];
-    rand::thread_rng().fill_bytes(&mut bytes);
+    rand::fill(&mut bytes);
     let mut hex = String::with_capacity(8);
     for b in bytes {
         let _ = write!(hex, "{b:02x}");
