@@ -132,6 +132,12 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 
 Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `splunk`, `mcp-server-splunk`, `ninjaone`, `ninja-one`, `ninjarmm`, `mcp-server-ninjaone`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
 
+When this file exists at server startup, the running server watches it and
+hot-reloads valid changes. Existing stdio and HTTP connections remain open;
+subsequent tool calls use the new values. A temporarily malformed file (for
+example, while an editor is midway through a save) leaves the last valid
+configuration active until a valid version is written.
+
 ```json
 {
   "bitbucket": {
