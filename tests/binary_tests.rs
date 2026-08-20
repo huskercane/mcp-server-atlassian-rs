@@ -324,3 +324,18 @@ async fn log_stderr_unrecognised_value_keeps_console_logging() {
         "unrecognised LOG_STDERR value should keep stderr logging, got:\n{stderr}"
     );
 }
+
+/// The version users see must be the crate version.
+///
+/// Regression guard: this constant was once a hardcoded `"3.1.0"` inherited
+/// from the TS reference server, so a `v0.11.0` release shipped a binary that
+/// introduced itself as `3.1.0` to every MCP client. Deriving it from
+/// `CARGO_PKG_VERSION` makes that drift impossible; this test fails if anyone
+/// writes a literal back.
+#[test]
+fn version_reported_to_users_is_the_crate_version() {
+    assert_eq!(
+        mcp_server_atlassian::constants::VERSION,
+        env!("CARGO_PKG_VERSION")
+    );
+}

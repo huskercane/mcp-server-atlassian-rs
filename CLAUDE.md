@@ -34,6 +34,38 @@ compile-time warning or error" is enforced by `-D warnings` — clippy `all` +
 `pedantic` are `warn` (see `[lints]` in `Cargo.toml`); a handful are explicitly
 allowed there, so prefer fixing over adding new `#[allow(...)]`.
 
+## Releasing (one version number, not three)
+
+`Cargo.toml`'s `version` is the **single source of truth**. `src/constants.rs::VERSION`
+derives from it via `env!("CARGO_PKG_VERSION")`, and that constant is what MCP clients
+see in `get_info()`, what `--version` prints, and what the HTTP health banner shows.
+Never write a version literal back into it — `binary_tests::version_reported_to_users_is_the_crate_version`
+fails if you do. (Unrelated to the MCP *protocol* version, which is negotiated
+separately.)
+
+To cut a release:
+
+1. Bump `version` in `Cargo.toml`, and build so `Cargo.lock` picks it up.
+2. Commit both, and get them onto `main`.
+3. Tag `v<version>` on `main` — the tag must match `Cargo.toml` exactly.
+4. Push the tag. `.github/workflows/release.yml` triggers on `v*` and builds the
+   Linux/macOS/Windows matrix (~8 minutes).
+
+`scripts/check-release-tag.sh` enforces step 3, wired as a `PreToolUse` hook in
+`.claude/settings.json`: it denies a tag-creating command whose version disagrees
+with `Cargo.toml`, and ignores everything else (listing, deleting, log ranges, and
+commands that merely mention tagging). It reads the hook JSON payload on stdin, so
+to check by hand:
+
+```bash
+echo '{"tool_input":{"command":"git tag -a v1.2.3 -m x"}}' | scripts/check-release-tag.sh
+```
+
+This exists because the three numbers had silently diverged: releases reached
+`v0.10.0` while `Cargo.toml` said `0.8.0` and the reported version said `3.1.0`
+(inherited from the TS reference server at port time), so a released binary
+introduced itself to every MCP client under a version that was never released.
+
 ## Layout
 
 - `src/vendor/` — per-vendor HTTP clients (auth headers, request/response shapes).
