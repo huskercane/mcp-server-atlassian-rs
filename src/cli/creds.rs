@@ -30,7 +30,8 @@ use atomicwrites::{AllowOverwrite, AtomicFile};
 use serde_json::Value;
 
 use crate::auth::keychain::{KeychainBackend, KeychainError, OsKeychain, SecretKind};
-use crate::config::{self, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA};
+use crate::auth::secrets;
+use crate::config::{self};
 use crate::constants::PACKAGE_NAME;
 use crate::error::{McpError, unexpected};
 
@@ -56,13 +57,13 @@ pub enum Command {
 /// Shared `--kind` + `--vendor` + `--principal` selector.
 #[derive(Debug, Args)]
 pub struct SelectOpts {
-    /// Secret kind: `api-token` (Atlassian Cloud) or `app-password`
-    /// (Bitbucket).
+    /// Secret kind: `api-token` (Atlassian Cloud), `app-password`
+    /// (Bitbucket), or `password` / `totp-secret` (`NinjaOne`).
     #[arg(long, value_parser = parse_kind)]
     pub kind: SecretKind,
-    /// Atlassian product the secret belongs to: `bitbucket`, `jira`, or
-    /// `confluence`. The same email may have a different token per
-    /// vendor, so the slot is vendor-scoped.
+    /// Vendor the secret belongs to: `bitbucket`, `jira`, `confluence`, or
+    /// `ninjaone`. The same email may have a different secret per vendor, so
+    /// the slot is vendor-scoped.
     #[arg(long, value_parser = parse_vendor)]
     pub vendor: String,
     /// Account identifier — email for `api-token`, username for
@@ -125,40 +126,53 @@ pub async fn dispatch(command: Command) -> Result<(), McpError> {
 fn parse_kind(s: &str) -> Result<SecretKind, String> {
     SecretKind::parse(s).ok_or_else(|| {
         format!(
-            "unknown kind '{s}': use one of 'api-token' or 'app-password' \
-             (env-var spellings ATLASSIAN_API_TOKEN / ATLASSIAN_BITBUCKET_APP_PASSWORD \
-             also accepted)"
+            "unknown kind '{s}': use one of 'api-token', 'app-password', 'password', \
+             'totp-secret', or 'token'. Any registered config key name also works \
+             (e.g. SLACK_TOKEN, ZOOM_CLIENT_SECRET, NINJAONE_TOTP_SECRET)."
         )
     })
 }
 
 fn parse_vendor(s: &str) -> Result<String, String> {
-    match s {
-        VENDOR_BITBUCKET | VENDOR_JIRA | VENDOR_CONFLUENCE => Ok(s.to_owned()),
-        _ => Err(format!(
-            "unknown vendor '{s}': use one of '{VENDOR_BITBUCKET}', '{VENDOR_JIRA}', \
-             or '{VENDOR_CONFLUENCE}'"
-        )),
+    let known = secrets::vendors_with_secrets();
+    if known.contains(&s) {
+        Ok(s.to_owned())
+    } else {
+        Err(format!(
+            "unknown vendor '{s}': use one of {}",
+            known.join(", ")
+        ))
     }
 }
 
-/// Reject `--kind app-password --vendor <not-bitbucket>`. Atlassian
-/// app-passwords are a Bitbucket-only auth scheme; runtime auth (see
-/// `Credentials::resolve_with_for`) will never read an app-password
-/// keychain entry under another vendor's scope, so creating, reading,
-/// or deleting one is dead state. Surface this at CLI parse time
-/// instead of letting the backend round-trip succeed and mislead.
+/// Reject kind/vendor pairs no runtime path would ever read.
+///
+/// The registry is the authority: an app-password only exists for Bitbucket, a
+/// TOTP seed only for `NinjaOne`, and so on. An entry stored under a scope no
+/// runtime lookup uses is dead state — the backend round-trip would succeed
+/// and mislead — so this is caught at CLI parse time instead.
 fn ensure_kind_vendor_combo(kind: SecretKind, vendor: &str) -> Result<(), McpError> {
-    if matches!(kind, SecretKind::AppPassword) && vendor != VENDOR_BITBUCKET {
-        return Err(unexpected(
-            format!(
-                "kind=app-password is Bitbucket-only; vendor `{vendor}` does not \
-                 support it. Drop --vendor or pass --vendor {VENDOR_BITBUCKET}."
-            ),
-            None,
-        ));
+    if secrets::kind_supported_by(kind, vendor) {
+        return Ok(());
     }
-    Ok(())
+    let supported: Vec<&str> = secrets::VENDOR_SECRETS
+        .iter()
+        .filter(|secret| secret.kind == kind)
+        .map(|secret| secret.vendor)
+        .fold(Vec::new(), |mut acc, vendor| {
+            if !acc.contains(&vendor) {
+                acc.push(vendor);
+            }
+            acc
+        });
+    Err(unexpected(
+        format!(
+            "kind={kind} is not used by vendor `{vendor}`; nothing would ever read that \
+             entry. Vendors using kind={kind}: {}.",
+            supported.join(", ")
+        ),
+        None,
+    ))
 }
 
 /// `creds set` handler. Public so tests can call it directly.
@@ -413,32 +427,11 @@ pub fn migrate_with(
     let mut planned: Vec<PlannedAction> = Vec::new();
     let mut skipped: Vec<MigrateSkip> = Vec::new();
 
+    // Which secrets exist for which vendor is the registry's business — it
+    // already encodes that app-passwords are Bitbucket-only and that a Slack
+    // token has no principal, so this loop stays a plain walk.
     for (canonical, alias_list) in &aliases {
-        // App-passwords are Bitbucket-only; runtime auth never reads them
-        // for any other vendor, so migrating them under jira/confluence
-        // would silently store dead state.
-        let candidates: &[Candidate] = if *canonical == VENDOR_BITBUCKET {
-            &[
-                Candidate {
-                    kind: SecretKind::ApiToken,
-                    principal_key: "ATLASSIAN_USER_EMAIL",
-                    secret_key: "ATLASSIAN_API_TOKEN",
-                },
-                Candidate {
-                    kind: SecretKind::AppPassword,
-                    principal_key: "ATLASSIAN_BITBUCKET_USERNAME",
-                    secret_key: "ATLASSIAN_BITBUCKET_APP_PASSWORD",
-                },
-            ]
-        } else {
-            &[Candidate {
-                kind: SecretKind::ApiToken,
-                principal_key: "ATLASSIAN_USER_EMAIL",
-                secret_key: "ATLASSIAN_API_TOKEN",
-            }]
-        };
-
-        for candidate in candidates {
+        for candidate in secrets::for_vendor(canonical) {
             match plan_candidate(candidate, canonical, alias_list, &json)? {
                 CandidateOutcome::Migrate(plan) => planned.push(plan),
                 CandidateOutcome::Skip(reason) => skipped.push(reason),
@@ -693,12 +686,6 @@ fn print_migrate_summary(outcome: &MigrateOutcome) {
 
 // ---- internals ----
 
-struct Candidate {
-    kind: SecretKind,
-    principal_key: &'static str,
-    secret_key: &'static str,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PlannedKind {
     /// Write the captured plaintext value into the keychain.
@@ -796,12 +783,19 @@ fn read_vendor_string<'a>(
 }
 
 fn plan_candidate(
-    candidate: &Candidate,
+    candidate: &secrets::VendorSecret,
     canonical: &str,
     alias_list: &[String],
     json: &Value,
 ) -> Result<CandidateOutcome, McpError> {
-    let principal = read_vendor_string(json, canonical, alias_list, candidate.principal_key)?;
+    // A row without a principal key is addressed by its own key name, so the
+    // principal is always present and the "principal missing" arms below apply
+    // only to account-scoped secrets.
+    let principal = match candidate.principal_key {
+        Some(key) => read_vendor_string(json, canonical, alias_list, key)?,
+        None => Some(candidate.secret_key),
+    };
+    let principal_key = candidate.principal_key.unwrap_or(candidate.secret_key);
     let secret = read_vendor_string(json, canonical, alias_list, candidate.secret_key)?;
 
     match (principal, secret) {
@@ -812,7 +806,7 @@ fn plan_candidate(
         (None, Some("keychain")) => Err(unexpected(
             format!(
                 "vendor `{canonical}` sets {}=\"keychain\" but {} is missing; cannot migrate",
-                candidate.secret_key, candidate.principal_key
+                candidate.secret_key, principal_key
             ),
             None,
         )),
@@ -820,10 +814,7 @@ fn plan_candidate(
             format!(
                 "plaintext {} is set in vendor `{canonical}` but {} is missing; \
                  migration cannot move it safely. Add {} or remove {} first.",
-                candidate.secret_key,
-                candidate.principal_key,
-                candidate.principal_key,
-                candidate.secret_key
+                candidate.secret_key, principal_key, principal_key, candidate.secret_key
             ),
             None,
         )),
@@ -988,11 +979,19 @@ mod tests {
     #[test]
     fn app_password_rejected_for_non_bitbucket_vendors() {
         let kc = InMemoryKeychain::new();
-        for v in ["jira", "confluence"] {
+        for v in ["jira", "confluence", "ninjaone"] {
             let err = get(&kc, select(SecretKind::AppPassword, v, "bobby")).unwrap_err();
-            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+            assert!(
+                err.message.contains("not used by vendor"),
+                "{}",
+                err.message
+            );
             let err = rm(&kc, select(SecretKind::AppPassword, v, "bobby")).unwrap_err();
-            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+            assert!(
+                err.message.contains("not used by vendor"),
+                "{}",
+                err.message
+            );
             let opts = SetOpts {
                 kind: SecretKind::AppPassword,
                 vendor: v.to_owned(),
@@ -1000,9 +999,59 @@ mod tests {
                 from_stdin: true,
             };
             let err = set(&kc, opts).unwrap_err();
-            assert!(err.message.contains("Bitbucket-only"), "{}", err.message);
+            assert!(
+                err.message.contains("not used by vendor"),
+                "{}",
+                err.message
+            );
         }
         // The keychain must remain untouched — guard fired before any backend call.
         assert!(kc.is_empty());
+    }
+
+    /// The `NinjaOne` login secrets are the mirror image of the app-password
+    /// rule: only the `ninjaone` scope is ever read for them, so an entry
+    /// filed under an Atlassian vendor would be dead state.
+    #[test]
+    fn ninjaone_login_secrets_are_rejected_for_other_vendors() {
+        let kc = InMemoryKeychain::new();
+        for kind in [SecretKind::Password, SecretKind::TotpSecret] {
+            for vendor in ["bitbucket", "jira", "confluence"] {
+                let err = get(&kc, select(kind, vendor, "tech@example.com")).unwrap_err();
+                assert!(
+                    err.message.contains("not used by vendor"),
+                    "{}",
+                    err.message
+                );
+            }
+        }
+        assert!(kc.is_empty());
+    }
+
+    /// Both spellings the CLI accepts for the `NinjaOne` kinds, and the
+    /// vendor-scoped service names they map to.
+    #[test]
+    fn ninjaone_kinds_parse_and_scope_by_vendor() {
+        assert_eq!(SecretKind::parse("password"), Some(SecretKind::Password));
+        assert_eq!(
+            SecretKind::parse("NINJAONE_PASSWORD"),
+            Some(SecretKind::Password)
+        );
+        assert_eq!(
+            SecretKind::parse("totp-secret"),
+            Some(SecretKind::TotpSecret)
+        );
+        assert_eq!(
+            SecretKind::parse("NINJAONE_TOTP_SECRET"),
+            Some(SecretKind::TotpSecret)
+        );
+        assert_eq!(
+            SecretKind::Password.service_for("ninjaone"),
+            "mcp-server-atlassian.password.ninjaone"
+        );
+        assert_eq!(
+            SecretKind::TotpSecret.service_for("ninjaone"),
+            "mcp-server-atlassian.totp-secret.ninjaone"
+        );
     }
 }

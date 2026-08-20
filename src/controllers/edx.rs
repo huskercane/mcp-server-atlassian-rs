@@ -224,7 +224,7 @@ async fn dispatch(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
     let handle = HandleContext::new(ctx.client, ctx.config, ctx.vendor);
     dispatch_with_creds(

@@ -12,7 +12,8 @@ pub fn classify(status: StatusCode, body: &str) -> McpError {
         .ok()
         .and_then(|value| {
             value
-                .get("message")
+                .get("errorMessage")
+                .or_else(|| value.get("message"))
                 .or_else(|| value.get("error"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)

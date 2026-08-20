@@ -105,9 +105,13 @@ impl WrdsVendor {
     /// and password are required; everything else defaults to the WRDS Cloud
     /// values. Errors with an actionable message at tool-call time so a
     /// non-WRDS deployment still boots.
-    fn conn_params(config: &Config) -> Result<ConnParams, McpError> {
+    async fn conn_params(config: &Config) -> Result<ConnParams, McpError> {
         let user = require(config, "WRDS_USERNAME")?;
-        let password = require(config, "WRDS_PASSWORD")?;
+        // Keychain-backed; the username beside it is an identifier, not a
+        // secret, so it stays a plain config read.
+        let password = crate::auth::vendor_secret(config, VENDOR_WRDS, "WRDS_PASSWORD")
+            .await?
+            .ok_or_else(|| missing("WRDS_PASSWORD"))?;
         let host = config
             .get_for(VENDOR_WRDS, "WRDS_HOST")
             .map(str::trim)
@@ -164,7 +168,7 @@ impl WrdsVendor {
     /// task. The returned client owns the connection; dropping it ends the
     /// driver.
     async fn connect(&self, config: &Config) -> Result<tokio_postgres::Client, McpError> {
-        let params = Self::conn_params(config)?;
+        let params = Self::conn_params(config).await?;
         let tls_cfg = self.tls_config()?;
         let tls = MakeRustlsConnect::new((*tls_cfg).clone());
 
@@ -287,13 +291,15 @@ fn require(config: &Config, key: &str) -> Result<String, McpError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            auth_missing(format!(
-                "{key} is required for wrds_* tools. Set your WRDS username and password \
-                 (WRDS_USERNAME / WRDS_PASSWORD) under the `wrds` section of \
-                 ~/.mcp/configs.json or in the environment."
-            ))
-        })
+        .ok_or_else(|| missing(key))
+}
+
+fn missing(key: &str) -> McpError {
+    auth_missing(format!(
+        "{key} is required for wrds_* tools. Set your WRDS username and password \
+         (WRDS_USERNAME / WRDS_PASSWORD) under the `wrds` section of \
+         ~/.mcp/configs.json or in the environment."
+    ))
 }
 
 /// Wrap a caller `SELECT` so Postgres aggregates it to a JSONB array

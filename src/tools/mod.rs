@@ -80,7 +80,7 @@ use args::{
     CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
     EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
+    NinjaOneLoginArgs, NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
     SonarqubeSearchIssuesArgs, SplunkCreateJobArgs, SplunkJobResultsArgs,
     SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
 };
@@ -1233,6 +1233,20 @@ impl AtlassianServer {
 
 #[tool_router(router = ninjaone_router)]
 impl AtlassianServer {
+    #[doc = include_str!("descriptions/ninjaone_login.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_login(
+        &self,
+        Parameters(args): Parameters<NinjaOneLoginArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_ninjaone_login(self, &args).await)
+    }
+
     #[doc = include_str!("descriptions/ninjaone_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1624,6 +1638,14 @@ async fn run_write_postman(
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
         }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_ninjaone_login(server: &AtlassianServer, args: &NinjaOneLoginArgs) -> CallToolResult {
+    let config = server.config();
+    match crate::controllers::ninjaone::login(&server.ninjaone_ctx(&config), args).await {
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }

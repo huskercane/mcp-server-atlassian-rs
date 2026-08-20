@@ -91,7 +91,11 @@ impl ZoomVendor {
     pub async fn bearer(&self, client: &Client, config: &Config) -> Result<String, McpError> {
         let account_id = require_cred(config, "ZOOM_ACCOUNT_ID")?;
         let client_id = require_cred(config, "ZOOM_CLIENT_ID")?;
-        let client_secret = require_cred(config, "ZOOM_CLIENT_SECRET")?;
+        // Only the secret is keychain-backed; the account and client ids are
+        // identifiers, not credentials, and stay plain config reads.
+        let client_secret = crate::auth::vendor_secret(config, VENDOR_ZOOM, "ZOOM_CLIENT_SECRET")
+            .await?
+            .ok_or_else(|| missing_cred("ZOOM_CLIENT_SECRET"))?;
         self.cache
             .bearer(
                 client,
@@ -112,13 +116,15 @@ fn require_cred(config: &Config, key: &str) -> Result<String, McpError> {
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(str::to_owned)
-        .ok_or_else(|| {
-            auth_missing(format!(
-                "{key} is required for zoom_* tools. Set the Server-to-Server OAuth \
-                 credentials (ZOOM_ACCOUNT_ID + ZOOM_CLIENT_ID + ZOOM_CLIENT_SECRET) under \
-                 the `zoom` section of ~/.mcp/configs.json or in the environment."
-            ))
-        })
+        .ok_or_else(|| missing_cred(key))
+}
+
+fn missing_cred(key: &str) -> McpError {
+    auth_missing(format!(
+        "{key} is required for zoom_* tools. Set the Server-to-Server OAuth \
+         credentials (ZOOM_ACCOUNT_ID + ZOOM_CLIENT_ID + ZOOM_CLIENT_SECRET) under \
+         the `zoom` section of ~/.mcp/configs.json or in the environment."
+    ))
 }
 
 impl Vendor for ZoomVendor {

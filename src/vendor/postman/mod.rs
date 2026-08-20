@@ -59,12 +59,9 @@ impl PostmanVendor {
     /// Resolve the API key from the `postman` config section. This is the
     /// Postman credential entry point. Errors with a clear, actionable message
     /// at tool-call time when the key is absent.
-    pub fn key(&self, config: &Config) -> Result<String, McpError> {
-        config
-            .get_for(VENDOR_POSTMAN, "POSTMAN_API_KEY")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+    pub async fn key(&self, config: &Config) -> Result<String, McpError> {
+        crate::auth::vendor_secret(config, VENDOR_POSTMAN, "POSTMAN_API_KEY")
+            .await?
             .ok_or_else(|| {
                 auth_missing(
                     "POSTMAN_API_KEY is required for postman_* tools. Set a Postman API \

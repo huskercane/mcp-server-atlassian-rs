@@ -30,12 +30,9 @@ impl SplunkVendor {
         }
     }
 
-    pub fn token(&self, config: &Config) -> Result<String, McpError> {
-        config
-            .get_for(VENDOR_SPLUNK, "SPLUNK_TOKEN")
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(str::to_owned)
+    pub async fn token(&self, config: &Config) -> Result<String, McpError> {
+        crate::auth::vendor_secret(config, VENDOR_SPLUNK, "SPLUNK_TOKEN")
+            .await?
             .ok_or_else(|| {
                 auth_missing(
                     "SPLUNK_TOKEN is required for splunk_* tools. Set a Splunk \

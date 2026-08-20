@@ -22,7 +22,7 @@ This directory does **not** ship to npm. It builds a single static-ish binary: `
 - No Node.js runtime dependency.
 - ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
 - Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, SonarQube, Splunk, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 57 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, six `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`, three `sonarqube_*`, four `splunk_*`, four `wrds_*`). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
+- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, SonarQube, Splunk, NinjaOne, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 63 tools (six `bb_*`, five `jira_*`, five `conf_*`, five `zoom_*`, six `circleci_*`, five `slack_*`, five `postman_*`, six `edx_discussion_*`, one `newrelic_query`, two `grafana_*`, three `sonarqube_*`, four `splunk_*`, six `ninjaone_*`, four `wrds_*`). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
 - Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
 
 ## Download prebuilt binaries
@@ -66,26 +66,26 @@ cargo deny check                             # license + advisory check
 
 Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or Confluence). The TS README has step-by-step screenshots: see [Get Your Bitbucket Credentials](https://github.com/aashari/mcp-server-atlassian-bitbucket#1-get-your-bitbucket-credentials).
 
-Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Server OAuth app](https://developers.zoom.us/docs/internal-apps/s2s-oauth/) and use its account ID, client ID, and client secret (`ZOOM_*` below). These never go through the OS keychain — they are read as plaintext from the `zoom` config section or environment.
+Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Server OAuth app](https://developers.zoom.us/docs/internal-apps/s2s-oauth/) and use its account ID, client ID, and client secret (`ZOOM_*` below). Read from the `zoom` config section or environment; the client secret can also live in the OS keychain (`creds set --kind token --vendor zoom --principal <client-id>`).
 
-CircleCI is also separate: create a [personal API token](https://circleci.com/docs/managing-api-tokens/) (CircleCI → User Settings → Personal API Tokens) and set it as `CIRCLECI_TOKEN` (below). Like Zoom, it is read as plaintext from the `circleci` config section or environment and never goes through the OS keychain.
+CircleCI is also separate: create a [personal API token](https://circleci.com/docs/managing-api-tokens/) (CircleCI → User Settings → Personal API Tokens) and set it as `CIRCLECI_TOKEN` (below). Like every other vendor secret, it can stay in the `circleci` config section as plaintext or be moved into the OS keychain (`creds set --kind token --vendor circleci --principal CIRCLECI_TOKEN`).
 
-Slack is separate too: create a Slack app, install it to your workspace, and copy its bot token (`xoxb-…`) or user token (`xoxp-…`) into `SLACK_TOKEN` (below). The token's [scopes](https://api.slack.com/scopes) gate what the `slack_*` tools can do. Read as plaintext from the `slack` config section or environment; never goes through the OS keychain.
+Slack is separate too: create a Slack app, install it to your workspace, and copy its bot token (`xoxb-…`) or user token (`xoxp-…`) into `SLACK_TOKEN` (below). The token's [scopes](https://api.slack.com/scopes) gate what the `slack_*` tools can do. Read from the `slack` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
-Postman is separate too: create an [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) (Postman → Account Settings → API Keys) and set it as `POSTMAN_API_KEY` (below). Unlike every other vendor it is sent in the `X-API-Key` header, not `Authorization`. Read as plaintext from the `postman` config section or environment; never goes through the OS keychain.
+Postman is separate too: create an [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) (Postman → Account Settings → API Keys) and set it as `POSTMAN_API_KEY` (below). Unlike every other vendor it is sent in the `X-API-Key` header, not `Authorization`. Read from the `postman` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
 edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access the target course discussions. The default LMS base is `https://courses.edx.org`; set `EDX_API_BASE` for another Open edX instance. Discussion endpoints still enforce course enrollment/forum-role access and course discussion availability.
 
-New Relic is separate too: create a [User API key](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) (New Relic → user menu → API keys → User key) and set it as `NEW_RELIC_API_KEY`. Unlike every other vendor it is sent in the `API-Key` header, and its only API is **NerdGraph** (a single GraphQL endpoint), so the integration exposes one `newrelic_query` tool rather than five REST verbs. EU-region accounts must set `NEW_RELIC_REGION=eu`. Read as plaintext from the `newrelic` config section or environment; never goes through the OS keychain.
+New Relic is separate too: create a [User API key](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) (New Relic → user menu → API keys → User key) and set it as `NEW_RELIC_API_KEY`. Unlike every other vendor it is sent in the `API-Key` header, and its only API is **NerdGraph** (a single GraphQL endpoint), so the integration exposes one `newrelic_query` tool rather than five REST verbs. EU-region accounts must set `NEW_RELIC_REGION=eu`. Read from the `newrelic` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
-Grafana is separate too: create a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) (Grafana → Administration → Service accounts) and set it as `GRAFANA_TOKEN`, plus `GRAFANA_URL` for your instance base (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). The token is sent as `Authorization: Bearer`. "Reading logs from Grafana" runs a LogQL query against a Loki datasource via Grafana's datasource proxy, so you first discover the Loki datasource `uid` with `grafana_list_datasources`, then pass it to `grafana_query_logs`. Read as plaintext from the `grafana` config section or environment; never goes through the OS keychain.
+Grafana is separate too: create a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) (Grafana → Administration → Service accounts) and set it as `GRAFANA_TOKEN`, plus `GRAFANA_URL` for your instance base (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). The token is sent as `Authorization: Bearer`. "Reading logs from Grafana" runs a LogQL query against a Loki datasource via Grafana's datasource proxy, so you first discover the Loki datasource `uid` with `grafana_list_datasources`, then pass it to `grafana_query_logs`. Read from the `grafana` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
-SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read as plaintext from the `sonarqube` config section or environment; never goes through the OS keychain.
-Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read as plaintext from the `splunk` config section or environment; never goes through the OS keychain.
+SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read from the `sonarqube` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
+Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read from the `splunk` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
 NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map and pass the alias as the tool's `server`. An alias can be a URL string, or an object with `url` and an optional environment-specific path `prefix`: `{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}`. The prefix is inserted before every tool-supplied path, so a call with `/v2/devices` targets `https://test.example/test-api/v2/devices` on `test`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
 
-WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read as plaintext from the `wrds` config section or environment; never goes through the OS keychain. Requires the binary to be built with the `wrds` feature (the default).
+WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read from the `wrds` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)). Requires the binary to be built with the `wrds` feature (the default).
 
 ### Environment variables
 
@@ -120,6 +120,10 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `NINJAONE_ACCESS_TOKEN` | NinjaOne OAuth access token, sent as `Authorization: Bearer`. Takes precedence over session credentials. | ninjaone only |
 | `NINJAONE_SESSION_KEY` | NinjaOne API session key, sent in the `sessionKey` header. | ninjaone only |
 | `NINJAONE_SESSION_COOKIE` | Exact `Cookie` header value for private web-console `/ws/...` calls, e.g. `sessionKey=...`. | ninjaone only |
+| `NINJAONE_EMAIL` | Console account email used by `ninjaone_login` to mint a session key. | ninjaone only |
+| `NINJAONE_PASSWORD` | Password for `NINJAONE_EMAIL`. Never accepted as a tool argument. Supports the `"keychain"` sentinel. | ninjaone only |
+| `NINJAONE_TOTP_COMMAND` | Shell command that prints the current one-time code to stdout, e.g. `bw get totp ninja-qa5`. Removes the need to pass `mfaCode` per login. Per-server overrides go in the `NINJAONE_SERVERS` entry as `totpCommand`. | ninjaone only |
+| `NINJAONE_TOTP_SECRET` | `otpauth://totp/...` URI or bare base32 seed, used to derive the code in-process when no vault CLI is reachable. Tried after `NINJAONE_TOTP_COMMAND`. Supports the `"keychain"` sentinel. Per-server override: `totpSecret`. | ninjaone only |
 | `WRDS_USERNAME` | WRDS account username for the PostgreSQL connection. **Required** before invoking any `wrds_*` tool; only checked at tool-call time, so a non-WRDS setup boots without it. | wrds only |
 | `WRDS_PASSWORD` | WRDS account password. **Required** before invoking any `wrds_*` tool. | wrds only |
 | `WRDS_HOST` | WRDS Postgres host. Defaults to `wrds-pgdata.wharton.upenn.edu`; override for a mirror or local test DB. | wrds only |
@@ -225,7 +229,7 @@ Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBU
 
 ### Storing credentials in the OS keychain (desktop only)
 
-If you'd rather not keep API tokens or app passwords in plaintext on disk, store them in the OS keychain and put the literal string `"keychain"` in their place. Supported on **macOS** (Keychain Services), **Windows** (Credential Manager), and **Linux desktop** (GNOME Keyring or KWallet, auto-unlocked at login).
+If you'd rather not keep secrets in plaintext on disk, store them in the OS keychain and put the literal string `"keychain"` in their place. This covers **every** secret the config holds — not just Atlassian tokens — so `creds migrate` moves a Slack token, a Zoom client secret, and a NinjaOne TOTP seed in the same pass. Supported on **macOS** (Keychain Services), **Windows** (Credential Manager), and **Linux desktop** (GNOME Keyring or KWallet, auto-unlocked at login).
 
 > **Headless / CI / SSH-only Linux is out of scope.** Keychain backends require a logged-in desktop session with a keyring agent running. For server-style deployments either keep using env vars in your launcher, or build with `--no-default-features` to compile without the `keyring` dependency entirely.
 
@@ -240,7 +244,33 @@ When the binary needs a credential, it tries each source in priority order; the 
    - **Explicit**: a previous source returned the literal string `"keychain"` (the sentinel). The principal (email/username) is read from the same cascade. A missing keychain entry is a hard auth error — it tells you the configuration intent didn't match reality.
    - **Implicit**: the secret is absent from every source above but the principal is set. Useful if you've migrated and deleted the field outright. A miss falls through silently.
 
-Keychain entries are scoped by `(kind, vendor, principal)` — the service name carries the vendor suffix (`mcp-server-atlassian.api-token.bitbucket`, `.jira`, `.confluence`), so the same email can hold a different token in each slot. `Config::get_for` itself is unaware of the keychain; the expansion happens entirely inside `auth::Credentials::resolve_with_for(config, backend, vendor)`. Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
+Keychain entries are scoped by `(kind, vendor, principal)` — the service name carries the vendor suffix (`mcp-server-atlassian.api-token.bitbucket`, `.jira`, `.confluence`, `mcp-server-atlassian.password.ninjaone`), so the same email can hold a different secret in each slot. `Config::get_for` itself is unaware of the keychain; the expansion happens inside `auth::Credentials::resolve_with_for(config, backend, vendor)` for the Atlassian keys, and inside `auth::resolve_secret_for(...)` for a vendor that owns its own login (NinjaOne). Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
+
+**Coverage.** Every secret-bearing config key is keychain-backed. One registry (`src/auth/secrets.rs`) declares them all and drives runtime resolution, `creds migrate`, and the `creds set` guard, so the three cannot drift apart:
+
+| Key | Vendor | `--kind` | Principal |
+|---|---|---|---|
+| `ATLASSIAN_API_TOKEN` | bitbucket / jira / confluence | `api-token` | `ATLASSIAN_USER_EMAIL` |
+| `ATLASSIAN_BITBUCKET_APP_PASSWORD` | bitbucket | `app-password` | `ATLASSIAN_BITBUCKET_USERNAME` |
+| `ZOOM_CLIENT_SECRET` | zoom | `token` | `ZOOM_CLIENT_ID` |
+| `SLACK_TOKEN` | slack | `token` | *key name* |
+| `CIRCLECI_TOKEN` | circleci | `token` | *key name* |
+| `POSTMAN_API_KEY` | postman | `token` | *key name* |
+| `NEW_RELIC_API_KEY` | newrelic | `token` | *key name* |
+| `GRAFANA_TOKEN` | grafana | `token` | *key name* |
+| `SONARQUBE_TOKEN` | sonarqube | `token` | *key name* |
+| `SPLUNK_TOKEN` | splunk | `token` | *key name* |
+| `EDX_ACCESS_TOKEN` | edx | `token` | *key name* |
+| `WRDS_PASSWORD` | wrds | `password` | `WRDS_USERNAME` |
+| `NINJAONE_PASSWORD` | ninjaone | `password` | `NINJAONE_EMAIL` |
+| `NINJAONE_TOTP_SECRET` | ninjaone | `totp-secret` | `NINJAONE_EMAIL` |
+| `NINJAONE_ACCESS_TOKEN` | ninjaone | `token` | *key name* |
+| `NINJAONE_SESSION_KEY` | ninjaone | `token` | *key name* |
+| `NINJAONE_SESSION_COOKIE` | ninjaone | `token` | *key name* |
+
+Most vendor tokens have no account attached — there is no "who" for `SLACK_TOKEN` — so those slots use **the config key name as the principal**. That keeps them self-describing in the OS keychain UI and distinct for a vendor holding several tokens, as NinjaOne does. Keys with a real account (an Atlassian email, a Zoom client id, a WRDS or NinjaOne login) are filed under it, so rotating the account moves the slot. `--kind` also accepts a config key name directly, so `--kind SLACK_TOKEN` works without looking up which generic kind it maps to.
+
+Identifiers are never migrated — `ZOOM_CLIENT_ID`, `WRDS_USERNAME`, `NINJAONE_EMAIL`, and `ATLASSIAN_SITE_NAME` stay in the file, since they name the slot rather than unlock it.
 
 #### CLI
 
@@ -249,6 +279,19 @@ Keychain entries are scoped by `(kind, vendor, principal)` — the service name 
 # so the same email can hold one Bitbucket-scoped token, one Jira-scoped
 # token, etc. (no echo when stdin is a tty; pipes work too).
 mcp-atlassian creds set --kind api-token --vendor bitbucket --principal you@company.com
+
+# NinjaOne console-login secrets live in their own vendor-scoped slots.
+mcp-atlassian creds set --kind password    --vendor ninjaone --principal you@company.com
+mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal you@company.com
+
+# A vendor token with no account is filed under its own key name.
+mcp-atlassian creds set --kind token --vendor slack --principal SLACK_TOKEN
+mcp-atlassian creds set --kind SLACK_TOKEN --vendor slack --principal SLACK_TOKEN  # same slot
+
+# `creds migrate` does all of the above in one pass: it reads
+# ~/.mcp/configs.json, moves every registered secret into the keychain, and
+# replaces each with the "keychain" sentinel (leaving a .bak alongside).
+mcp-atlassian creds migrate
 mcp-atlassian creds set --kind api-token --vendor jira       --principal you@company.com
 mcp-atlassian creds set --kind api-token --vendor confluence --principal you@company.com
 
@@ -388,7 +431,7 @@ The script sets `TRANSPORT_MODE=http`, `PORT`, `LOG_STDERR`, and `RUST_LOG` only
 
 ## Available tools
 
-Fifty-seven tools across thirteen vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, `sonarqube_*`, `splunk_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
+Sixty-three tools across fourteen vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, `sonarqube_*`, `splunk_*`, `ninjaone_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
 
 ### Bitbucket (`bb_*`)
 
@@ -520,6 +563,7 @@ The normal flow is `splunk_search` for small, bounded queries and `splunk_create
 
 | Tool | Annotations | Use |
 |---|---|---|
+| `ninjaone_login` | mutating, non-destructive | Mint a console session key for the configured account |
 | `ninjaone_get` | read-only, idempotent | GET any public `/v2/...` or private `/ws/...` endpoint |
 | `ninjaone_post` | mutating, potentially destructive | POST JSON, including action endpoints |
 | `ninjaone_put` | mutating, idempotent | PUT JSON to replace a resource |
@@ -527,6 +571,87 @@ The normal flow is `splunk_search` for small, bounded queries and `splunk_create
 | `ninjaone_delete` | destructive, idempotent | DELETE a resource |
 
 Each call supplies only a relative `path` and an optional configured `server` alias. The base URL is resolved from `NINJAONE_URL` or `NINJAONE_SERVERS`, preventing an MCP caller from sending the server-held credential to an arbitrary URL. Because NinjaOne action endpoints can use POST for destructive work, `ninjaone_post` carries the destructive annotation.
+
+#### Session-key login
+
+The private `/ws/...` console endpoints need a `sessionKey`. Rather than copying one out of a browser, set `NINJAONE_EMAIL` + `NINJAONE_PASSWORD` and call `ninjaone_login`, which performs the console exchange the browser performs — `POST /ws/account/authentication-state`, `POST /ws/account/login`, then `POST /ws/account/mfa-login` when the account uses MFA:
+
+```json
+{ "server": "qa", "mfaCode": "381164" }
+```
+
+Only `mfaCode` (and, for a tenant that reports `recaptchaRequired`, `recaptchaToken`) is passed per call; the email and password stay server-side. The minted key is held **in memory for the life of the server process**, keyed by server URL and account, and is never written to disk or returned in full — the response reports an 8-character prefix, the division/user UIDs, and whether MFA was used.
+
+Subsequent calls replay it the way the browser does, as the cookie the console sets on `mfa-login` (`Cookie: sessionKey=...`), not as a bare header. Setting `NINJAONE_SESSION_COOKIE` by hand remains equivalent; `NINJAONE_SESSION_KEY` sends the same value as a `sessionKey` header instead.
+
+#### Supplying the MFA code automatically
+
+Rather than integrating with any particular password manager, `NINJAONE_TOTP_COMMAND` names a command that prints the current code to stdout. Every vault CLI already emits a finished code, so no TOTP seed reaches this server or its config file, and the server takes no dependency on the vault you happen to use:
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_TOTP_COMMAND": "bw get totp ninja-qa5"
+    }
+  }
+}
+```
+
+`op item get ninja-qa5 --otp`, `oathtool --totp -b "$(pass ninja/qa5)"`, `ykman oath accounts code -s ninja-qa5`, or any script works the same way. The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) with this process's environment, so vault session handles such as `BW_SESSION` are inherited — the vault must already be unlocked, since the command is given 15 seconds and nothing is attached to its stdin to answer a prompt.
+
+For several accounts across environments — different roles, different orgs — put the command on the server alias instead, where it overrides the top-level default:
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_SERVERS": "{\"qa5\":{\"url\":\"https://qa5.example\",\"totpCommand\":\"bw get totp ninja-qa5\"},\"dev2\":{\"url\":\"https://dev2.example\",\"totpCommand\":\"bw get totp ninja-dev2\"}}"
+    }
+  }
+}
+```
+
+With this configured, `ninjaone_login {"server": "qa5"}` needs no arguments at all. An explicit `mfaCode` still overrides the command, and with neither configured the login reports which one to supply. Note that `NINJAONE_TOTP_COMMAND` is executable configuration: it is read only from config, never from a tool argument.
+
+Where no vault CLI is reachable from the machine running the server, `NINJAONE_TOTP_SECRET` takes the `otpauth://totp/...` URI (or a bare base32 seed) and derives the code in-process — RFC 6238, verified against the RFC's published test vectors:
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_TOTP_SECRET": "otpauth://totp/NinjaOne:you%40example.com?secret=GEZDGNBVGY3TQOJQ&issuer=NinjaOne"
+    }
+  }
+}
+```
+
+The `algorithm`, `digits`, and `period` parameters are honoured, defaulting to SHA1 / 6 / 30 as NinjaOne issues them; the per-server override is `totpSecret`. Understand the trade before choosing it: this places a **long-lived seed on the machine**, which is precisely what `NINJAONE_TOTP_COMMAND` avoids by keeping the seed inside the vault and taking only a 30-second code. It buys having no external moving parts. The command is tried first when both are configured.
+
+Keep both the password and the seed out of the config file by putting them in the OS keychain and leaving the `"keychain"` sentinel behind:
+
+```bash
+mcp-atlassian creds set --kind password    --vendor ninjaone --principal you@example.com
+mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal you@example.com
+```
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_EMAIL": "you@example.com",
+      "NINJAONE_PASSWORD": "keychain",
+      "NINJAONE_TOTP_SECRET": "keychain"
+    }
+  }
+}
+```
+
+Both slots are keyed by `(kind, ninjaone, NINJAONE_EMAIL)`, so several accounts across environments each get their own entry. The semantics match the Atlassian keys exactly: an explicit `"keychain"` whose entry is missing is a hard error naming the command to fix it, and omitting the key entirely still falls back to the keychain.
+
+Because the code is derived from the wall clock, a host whose clock has drifted beyond the server's tolerance will generate codes NinjaOne rejects — the usual TOTP caveat, and a reason to keep NTP running.
+
+One login therefore covers every later `ninjaone_*` call on that server, and it outranks a `NINJAONE_SESSION_KEY` left in config. When NinjaOne expires the session, the next call returns a `401`, the cached key is dropped, and the error says to call `ninjaone_login` again with a current code. Restarting the MCP server also requires a fresh login. Federated (SSO) accounts are refused before the password is sent — use `NINJAONE_SESSION_KEY` for those.
 
 #### Configure NinjaOne servers
 

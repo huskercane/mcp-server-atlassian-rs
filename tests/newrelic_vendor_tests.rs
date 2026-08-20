@@ -102,23 +102,29 @@ fn normalize_path_prepends_missing_leading_slash() {
 
 // ---- api key lookup ----
 
-#[test]
-fn api_key_reads_from_newrelic_config_section() {
+#[tokio::test]
+async fn api_key_reads_from_newrelic_config_section() {
     let config = config_with(&[("NEW_RELIC_API_KEY", "NRAK-abc")]);
-    assert_eq!(NewRelicVendor::new().api_key(&config).unwrap(), "NRAK-abc");
+    assert_eq!(
+        NewRelicVendor::new().api_key(&config).await.unwrap(),
+        "NRAK-abc"
+    );
 }
 
-#[test]
-fn api_key_missing_is_auth_missing_error() {
-    let err = NewRelicVendor::new().api_key(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn api_key_missing_is_auth_missing_error() {
+    let err = NewRelicVendor::new()
+        .api_key(&empty_config())
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("NEW_RELIC_API_KEY"));
 }
 
-#[test]
-fn api_key_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn api_key_blank_is_treated_as_missing() {
     let config = config_with(&[("NEW_RELIC_API_KEY", "   ")]);
-    let err = NewRelicVendor::new().api_key(&config).unwrap_err();
+    let err = NewRelicVendor::new().api_key(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

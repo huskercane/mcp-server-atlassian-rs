@@ -190,6 +190,39 @@ pub struct NinjaOneWriteArgs {
     pub output_format: Option<OutputFormatArg>,
 }
 
+/// Arguments for `ninjaone_login`.
+///
+/// Email and password are deliberately absent: they are server-held config
+/// (`NINJAONE_EMAIL` / `NINJAONE_PASSWORD`), so an MCP caller can never
+/// redirect them or supply its own. Only the short-lived one-time code — and,
+/// where a tenant demands it, a reCAPTCHA token — come in as arguments.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NinjaOneLoginArgs {
+    /// Optional alias from the `NINJAONE_SERVERS` JSON object. When omitted,
+    /// `NINJAONE_URL` is used. Raw URLs are intentionally not accepted here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub server: Option<String>,
+
+    /// Current multi-factor code for the configured account (6 digits for a
+    /// TOTP authenticator). Required whenever the account has MFA enabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mfa_code: Option<String>,
+
+    /// reCAPTCHA token, only when the tenant reports `recaptchaRequired`.
+    /// Normally omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recaptcha_token: Option<String>,
+
+    /// Optional JMESPath expression to reduce or reshape the login summary.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jq: Option<String>,
+
+    /// Output format: "toon" (default) or "json".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_format: Option<OutputFormatArg>,
+}
+
 /// Arguments for `newrelic_query`.
 ///
 /// New Relic's only API is NerdGraph (a single GraphQL endpoint), so this is a

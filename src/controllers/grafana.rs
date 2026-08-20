@@ -57,7 +57,7 @@ pub async fn query_logs(
     ctx: &GrafanaContext<'_>,
     args: &GrafanaQueryLogsArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
 
     // datasource UIDs are `[a-zA-Z0-9_-]`, so direct interpolation is safe.
@@ -106,7 +106,7 @@ pub async fn list_datasources(
     ctx: &GrafanaContext<'_>,
     args: &GrafanaListDatasourcesArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
 
     let fmt = args.output_format.map_or(OutputFormat::Toon, Into::into);

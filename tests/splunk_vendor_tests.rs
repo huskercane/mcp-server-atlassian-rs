@@ -17,8 +17,8 @@ fn config_with(pairs: &[(&str, &str)]) -> Config {
     )
 }
 
-#[test]
-fn resolves_name_url_token_and_auth_scheme() {
+#[tokio::test]
+async fn resolves_name_url_token_and_auth_scheme() {
     let vendor = SplunkVendor::new();
     let config = config_with(&[
         ("SPLUNK_URL", "https://splunk.example.com:8089/"),
@@ -30,7 +30,7 @@ fn resolves_name_url_token_and_auth_scheme() {
         vendor.base_url(&config).unwrap(),
         "https://splunk.example.com:8089"
     );
-    assert_eq!(vendor.token(&config).unwrap(), "ey-token");
+    assert_eq!(vendor.token(&config).await.unwrap(), "ey-token");
     assert_eq!(vendor.auth_scheme(&config), "Bearer");
 }
 
@@ -40,8 +40,8 @@ fn legacy_splunk_auth_scheme_is_supported() {
     assert_eq!(SplunkVendor::new().auth_scheme(&config), "Splunk");
 }
 
-#[test]
-fn missing_configuration_fails_at_call_time() {
+#[tokio::test]
+async fn missing_configuration_fails_at_call_time() {
     let config = Config::from_map(HashMap::new());
     let vendor = SplunkVendor::new();
 
@@ -49,7 +49,7 @@ fn missing_configuration_fails_at_call_time() {
     assert_eq!(url_error.kind, ErrorKind::AuthMissing);
     assert!(url_error.message.contains("SPLUNK_URL"));
 
-    let token_error = vendor.token(&config).unwrap_err();
+    let token_error = vendor.token(&config).await.unwrap_err();
     assert_eq!(token_error.kind, ErrorKind::AuthMissing);
     assert!(token_error.message.contains("SPLUNK_TOKEN"));
 }

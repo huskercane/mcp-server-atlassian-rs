@@ -841,3 +841,126 @@ fn migrate_errors_on_invalid_json() {
     let err = creds::migrate_with(&kc, &path, false).unwrap_err();
     assert!(err.message.contains("not valid JSON"), "{}", err.message);
 }
+
+// ---- migrate across the full vendor registry ------------------------------
+
+/// Before the registry existed, `migrate` walked a hardcoded Atlassian table
+/// and silently left every other vendor's secret in plaintext. This locks the
+/// sweep: a principal-less token, an account-scoped password, and a
+/// client-secret paired with a client id all move in one run.
+#[test]
+fn migrate_moves_non_atlassian_vendor_secrets() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    write_config(
+        &path,
+        &json!({
+            "slack":    { "environments": { "SLACK_TOKEN": "xoxb-real" }},
+            "circleci": { "environments": { "CIRCLECI_TOKEN": "circle-real" }},
+            "zoom":     { "environments": {
+                "ZOOM_ACCOUNT_ID":  "acct-1",
+                "ZOOM_CLIENT_ID":     "client-1",
+                "ZOOM_CLIENT_SECRET": "zoom-real",
+            }},
+            "wrds":     { "environments": {
+                "WRDS_USERNAME": "rohit",
+                "WRDS_PASSWORD": "wrds-real",
+            }},
+            "ninjaone": { "environments": {
+                "NINJAONE_EMAIL":       "tech@example.com",
+                "NINJAONE_PASSWORD":    "ninja-real",
+                "NINJAONE_SESSION_KEY": "session-real",
+            }},
+        }),
+    );
+    let kc = InMemoryKeychain::new();
+
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+    assert_eq!(outcome.migrated.len(), 6, "{:?}", outcome.migrated);
+
+    // Principal-less tokens are filed under their own key name.
+    assert_eq!(
+        kc.get(SecretKind::Token, "slack", "SLACK_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some("xoxb-real")
+    );
+    assert_eq!(
+        kc.get(SecretKind::Token, "circleci", "CIRCLECI_TOKEN")
+            .unwrap()
+            .as_deref(),
+        Some("circle-real")
+    );
+    assert_eq!(
+        kc.get(SecretKind::Token, "ninjaone", "NINJAONE_SESSION_KEY")
+            .unwrap()
+            .as_deref(),
+        Some("session-real")
+    );
+    // Account-scoped secrets follow their principal.
+    assert_eq!(
+        kc.get(SecretKind::Token, "zoom", "client-1")
+            .unwrap()
+            .as_deref(),
+        Some("zoom-real")
+    );
+    assert_eq!(
+        kc.get(SecretKind::Password, "wrds", "rohit")
+            .unwrap()
+            .as_deref(),
+        Some("wrds-real")
+    );
+    assert_eq!(
+        kc.get(SecretKind::Password, "ninjaone", "tech@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("ninja-real")
+    );
+
+    // Every migrated key is replaced by the sentinel; identifiers are not.
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        rewritten["slack"]["environments"]["SLACK_TOKEN"],
+        "keychain"
+    );
+    assert_eq!(
+        rewritten["zoom"]["environments"]["ZOOM_CLIENT_SECRET"],
+        "keychain"
+    );
+    assert_eq!(
+        rewritten["zoom"]["environments"]["ZOOM_CLIENT_ID"],
+        "client-1"
+    );
+    assert_eq!(rewritten["wrds"]["environments"]["WRDS_USERNAME"], "rohit");
+    assert_eq!(
+        rewritten["ninjaone"]["environments"]["NINJAONE_EMAIL"],
+        "tech@example.com"
+    );
+}
+
+/// The DB blob holds passwords but is not a single secret, so migrate must
+/// leave it exactly as it found it rather than storing the whole document.
+#[test]
+fn migrate_leaves_the_database_environment_blob_alone() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    let blob = r#"{"qa5":{"centralHost":"h","divisionHosts":{},"username":"u","password":"p"}}"#;
+    write_config(
+        &path,
+        &json!({
+            "ninjaone": { "environments": { "NINJAONE_DB_ENVIRONMENTS": blob }},
+        }),
+    );
+    let kc = InMemoryKeychain::new();
+
+    creds::migrate_with(&kc, &path, false).unwrap();
+
+    let rewritten: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(
+        rewritten["ninjaone"]["environments"]["NINJAONE_DB_ENVIRONMENTS"],
+        blob
+    );
+    assert!(kc.is_empty());
+}
