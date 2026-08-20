@@ -688,3 +688,214 @@ async fn a_malformed_seed_fails_the_login_with_a_clear_message() {
     assert_eq!(error.kind, ErrorKind::AuthInvalid);
     assert!(error.message.contains("NINJAONE_TOTP_SECRET"));
 }
+
+// ---------------------------------------------------------------------------
+// Per-server accounts
+//
+// A NinjaOne account decides which division and role a session gets, so an
+// operator holds a different account per environment rather than one account
+// for all of them. These lock the merge rule: a `NINJAONE_SERVERS` entry that
+// names its own `email` is a self-contained principal, and the top-level
+// NINJAONE_* login keys — which unlock a different account — never leak into
+// it.
+// ---------------------------------------------------------------------------
+
+/// The `qa4-1` account: a different person, on a different environment, from
+/// the top-level `EMAIL` / `PASSWORD` every config in this file also sets.
+const QA4_EMAIL: &str = "qa4-operator@example.net";
+const QA4_PASSWORD: &str = "qa4-s3cret";
+const QA5_EMAIL: &str = "qa5-operator@example.net";
+
+/// `authentication-state` + `login` mounted for one specific principal. The
+/// `body_json` matchers are the assertion: a login that used any other email
+/// or password matches nothing and fails the exchange.
+async fn mount_login_for(server: &MockServer, email: &str, password: &str) {
+    Mock::given(method("POST"))
+        .and(path("/ws/account/authentication-state"))
+        .and(body_json(json!({ "email": email })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authState": "NATIVE",
+            "recaptchaRequired": false,
+        })))
+        .mount(server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/login"))
+        .and(body_json(json!({
+            "email": email,
+            "password": password,
+            "staySignedIn": false,
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_success()))
+        .mount(server)
+        .await;
+}
+
+#[tokio::test]
+async fn a_server_entry_logs_in_as_its_own_account() {
+    let server = MockServer::start().await;
+    mount_login_for(&server, QA4_EMAIL, QA4_PASSWORD).await;
+
+    let client = build_client().unwrap();
+    let servers = json!({
+        "qa4-1": {
+            "url": server.uri(),
+            "email": QA4_EMAIL,
+            "password": QA4_PASSWORD,
+        },
+    })
+    .to_string();
+    // The top-level NINJAONE_EMAIL / NINJAONE_PASSWORD stay set throughout:
+    // the point is that the entry's own account wins over them.
+    let config = config(&[("NINJAONE_SERVERS", servers.as_str())]);
+    let vendor = NinjaOneVendor::default();
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let mut args = login_args();
+    args.server = Some("qa4-1".to_owned());
+    let response = login(&ctx, &args).await.unwrap();
+
+    assert!(response.content.contains("\"authenticated\": true"));
+    // Which account the session belongs to is reported: on NinjaOne that is
+    // what determines the division and role the session can see.
+    assert!(response.content.contains(QA4_EMAIL));
+    assert!(!response.content.contains(EMAIL));
+    assert!(!response.content.contains(QA4_PASSWORD));
+}
+
+#[tokio::test]
+async fn a_server_account_never_borrows_the_top_level_password() {
+    let server = MockServer::start().await;
+    let client = build_client().unwrap();
+    // `email` without `password`: the top-level NINJAONE_PASSWORD belongs to a
+    // different account, so sending it here would fail the login and count a
+    // bad attempt against a real person's account.
+    let servers = json!({ "qa4-1": { "url": server.uri(), "email": QA4_EMAIL } }).to_string();
+    let config = config(&[("NINJAONE_SERVERS", servers.as_str())]);
+    let vendor = NinjaOneVendor::default();
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let mut args = login_args();
+    args.server = Some("qa4-1".to_owned());
+    let error = login(&ctx, &args).await.unwrap_err();
+
+    assert_eq!(error.kind, ErrorKind::AuthMissing);
+    assert!(error.message.contains(QA4_EMAIL));
+    // The fix names the field the operator has to add, not the top-level key
+    // they did not use.
+    assert!(
+        error
+            .message
+            .contains("NINJAONE_SERVERS[\"qa4-1\"].password"),
+        "unhelpful message: {}",
+        error.message
+    );
+    // Nothing was sent: the missing password is caught before the exchange.
+    assert!(server.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_server_entry_uses_its_own_totp_seed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/authentication-state"))
+        .and(body_json(json!({ "email": QA4_EMAIL })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "authState": "NATIVE",
+            "recaptchaRequired": false,
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(mfa_required()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/mfa-login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_success()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let servers = json!({
+        "qa4-1": {
+            "url": server.uri(),
+            "email": QA4_EMAIL,
+            "password": QA4_PASSWORD,
+            "totpSecret": "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ",
+        },
+    })
+    .to_string();
+    // A top-level command for the *other* account is configured and must be
+    // ignored: an MFA source belongs to the account it was enrolled on.
+    let config = config(&[
+        ("NINJAONE_SERVERS", servers.as_str()),
+        ("NINJAONE_TOTP_COMMAND", "echo 111111"),
+    ]);
+    let vendor = NinjaOneVendor::default();
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let mut args = login_args();
+    args.server = Some("qa4-1".to_owned());
+    login(&ctx, &args).await.unwrap();
+
+    let submitted = server
+        .received_requests()
+        .await
+        .expect("recorded requests")
+        .into_iter()
+        .find(|request| request.url.path() == "/ws/account/mfa-login")
+        .expect("an mfa-login request was sent");
+    let body: serde_json::Value = serde_json::from_slice(&submitted.body).unwrap();
+    let code = body["code"].as_str().expect("a code was submitted");
+    assert_ne!(code, "111111", "the other account's TOTP command was used");
+    assert_eq!(code.len(), 6);
+    assert!(code.chars().all(|c| c.is_ascii_digit()));
+}
+
+#[tokio::test]
+async fn a_session_belongs_to_the_account_that_minted_it() {
+    let server = MockServer::start().await;
+    mount_login_for(&server, QA4_EMAIL, QA4_PASSWORD).await;
+    Mock::given(method("GET"))
+        .and(path("/ws/webapp/sessionproperties"))
+        .and(header("cookie", SESSION_COOKIE))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"attributes": {"id": 7}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    // Two environments, two accounts. Both happen to be served by the same
+    // mock, so only the principal distinguishes their sessions.
+    let servers = json!({
+        "qa4-1": { "url": server.uri(), "email": QA4_EMAIL, "password": QA4_PASSWORD },
+        "qa5": { "url": server.uri(), "email": QA5_EMAIL, "password": "qa5-s3cret" },
+    })
+    .to_string();
+    let config = config(&[("NINJAONE_SERVERS", servers.as_str())]);
+    let vendor = NinjaOneVendor::default();
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let mut args = login_args();
+    args.server = Some("qa4-1".to_owned());
+    login(&ctx, &args).await.unwrap();
+
+    let mut read = read_args();
+    read.server = Some("qa4-1".to_owned());
+    let response = handle_read(&ctx, HttpMethod::Get, &read).await.unwrap();
+    assert!(response.content.contains('7'));
+    if let Some(path) = response.raw_response_path {
+        let _ = std::fs::remove_file(path);
+    }
+
+    // The other environment has its own account and no session of its own, so
+    // it must ask for a login rather than replay qa4-1's key as a different
+    // person.
+    read.server = Some("qa5".to_owned());
+    let error = handle_read(&ctx, HttpMethod::Get, &read).await.unwrap_err();
+    assert_eq!(error.kind, ErrorKind::AuthMissing);
+    assert!(error.message.contains("ninjaone_login"));
+}

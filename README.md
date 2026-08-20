@@ -83,7 +83,7 @@ Grafana is separate too: create a [service-account token](https://grafana.com/do
 SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read from the `sonarqube` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read from the `splunk` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
 
-NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map and pass the alias as the tool's `server`. An alias can be a URL string, or an object with `url` and an optional environment-specific path `prefix`: `{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}`. The prefix is inserted before every tool-supplied path, so a call with `/v2/devices` targets `https://test.example/test-api/v2/devices` on `test`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
+NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map and pass the alias as the tool's `server`. An alias can be a URL string, or an object with `url`, an optional environment-specific path `prefix`, and the account that environment is reached as (`email`, `password`, `totpCommand`, `totpSecret`): `{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}`. The prefix is inserted before every tool-supplied path, so a call with `/v2/devices` targets `https://test.example/test-api/v2/devices` on `test`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
 
 WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read from the `wrds` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)). Requires the binary to be built with the `wrds` feature (the default).
 
@@ -116,12 +116,12 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `SPLUNK_TOKEN` | Splunk authentication token. **Required** before invoking any `splunk_*` tool; sent as `Authorization: Bearer` by default. | splunk only |
 | `SPLUNK_AUTH_SCHEME` | Optional auth scheme. Defaults to `bearer`; set `splunk` only when supplying a legacy Splunk session key. | splunk only |
 | `NINJAONE_URL` | Default NinjaOne tenant/server base URL. Used when a tool call omits `server`. | ninjaone only |
-| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to URL strings or `{ "url": "...", "prefix": "/..." }` objects. The optional prefix is applied per server before the tool path. Tool calls accept an alias, never a raw URL. | ninjaone only |
+| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to URL strings or `{ "url": "...", "prefix": "/...", "email": "...", "password": "...", "totpCommand": "...", "totpSecret": "..." }` objects. The optional prefix is applied per server before the tool path; the login fields give that environment its own account. Tool calls accept an alias, never a raw URL. | ninjaone only |
 | `NINJAONE_ACCESS_TOKEN` | NinjaOne OAuth access token, sent as `Authorization: Bearer`. Takes precedence over session credentials. | ninjaone only |
 | `NINJAONE_SESSION_KEY` | NinjaOne API session key, sent in the `sessionKey` header. | ninjaone only |
 | `NINJAONE_SESSION_COOKIE` | Exact `Cookie` header value for private web-console `/ws/...` calls, e.g. `sessionKey=...`. | ninjaone only |
-| `NINJAONE_EMAIL` | Console account email used by `ninjaone_login` to mint a session key. | ninjaone only |
-| `NINJAONE_PASSWORD` | Password for `NINJAONE_EMAIL`. Never accepted as a tool argument. Supports the `"keychain"` sentinel. | ninjaone only |
+| `NINJAONE_EMAIL` | Console account email used by `ninjaone_login` to mint a session key. Per-server override: `email`, which also scopes that server's password and MFA source to that account. | ninjaone only |
+| `NINJAONE_PASSWORD` | Password for `NINJAONE_EMAIL`. Never accepted as a tool argument. Supports the `"keychain"` sentinel. Per-server override: `password`. | ninjaone only |
 | `NINJAONE_TOTP_COMMAND` | Shell command that prints the current one-time code to stdout, e.g. `bw get totp ninja-qa5`. Removes the need to pass `mfaCode` per login. Per-server overrides go in the `NINJAONE_SERVERS` entry as `totpCommand`. | ninjaone only |
 | `NINJAONE_TOTP_SECRET` | `otpauth://totp/...` URI or bare base32 seed, used to derive the code in-process when no vault CLI is reachable. Tried after `NINJAONE_TOTP_COMMAND`. Supports the `"keychain"` sentinel. Per-server override: `totpSecret`. | ninjaone only |
 | `WRDS_USERNAME` | WRDS account username for the PostgreSQL connection. **Required** before invoking any `wrds_*` tool; only checked at tool-call time, so a non-WRDS setup boots without it. | wrds only |
@@ -574,15 +574,42 @@ Each call supplies only a relative `path` and an optional configured `server` al
 
 #### Session-key login
 
-The private `/ws/...` console endpoints need a `sessionKey`. Rather than copying one out of a browser, set `NINJAONE_EMAIL` + `NINJAONE_PASSWORD` and call `ninjaone_login`, which performs the console exchange the browser performs — `POST /ws/account/authentication-state`, `POST /ws/account/login`, then `POST /ws/account/mfa-login` when the account uses MFA:
+The private `/ws/...` console endpoints need a `sessionKey`. Rather than copying one out of a browser, set `NINJAONE_EMAIL` + `NINJAONE_PASSWORD` (or the per-server `email` + `password` below) and call `ninjaone_login`, which performs the console exchange the browser performs — `POST /ws/account/authentication-state`, `POST /ws/account/login`, then `POST /ws/account/mfa-login` when the account uses MFA:
 
 ```json
 { "server": "qa", "mfaCode": "381164" }
 ```
 
-Only `mfaCode` (and, for a tenant that reports `recaptchaRequired`, `recaptchaToken`) is passed per call; the email and password stay server-side. The minted key is held **in memory for the life of the server process**, keyed by server URL and account, and is never written to disk or returned in full — the response reports an 8-character prefix, the division/user UIDs, and whether MFA was used.
+Only `mfaCode` (and, for a tenant that reports `recaptchaRequired`, `recaptchaToken`) is passed per call; the email and password stay server-side. The minted key is held **in memory for the life of the server process**, keyed by server URL and account, and is never written to disk or returned in full — the response reports an 8-character prefix, the account it belongs to, the division/user UIDs, and whether MFA was used.
 
 Subsequent calls replay it the way the browser does, as the cookie the console sets on `mfa-login` (`Cookie: sessionKey=...`), not as a bare header. Setting `NINJAONE_SESSION_COOKIE` by hand remains equivalent; `NINJAONE_SESSION_KEY` sends the same value as a `sessionKey` header instead.
+
+#### One account per environment
+
+A NinjaOne account is the access boundary: the division, the role, and what the session can see all follow from which account logged in. One person therefore holds a different account per environment, not one account for all of them. Put each environment's login on its own `NINJAONE_SERVERS` entry:
+
+```json
+{
+  "ninjaone": {
+    "environments": {
+      "NINJAONE_SERVERS": "{\"qa4-1\":{\"url\":\"https://qa4.engineering-env.ninja\",\"prefix\":\"/swb/s1\",\"email\":\"qa4-operator@example.com\",\"password\":\"keychain\",\"totpSecret\":\"keychain\"},\"qa5\":{\"url\":\"https://qa5.example\",\"email\":\"qa5-operator@example.com\",\"password\":\"keychain\",\"totpSecret\":\"keychain\"}}"
+    }
+  }
+}
+```
+
+An entry that names its own `email` is a **self-contained principal**: its password and MFA source come from that entry (or from the keychain under that email), and the top-level `NINJAONE_PASSWORD` / `NINJAONE_TOTP_COMMAND` / `NINJAONE_TOTP_SECRET` are not consulted for it. That is deliberate — those unlock a *different* account, and quietly sending one account's password to another's login is how a real person's account gets locked out. An entry with no `email` inherits the top-level keys exactly as before, so a single-account setup needs no change.
+
+Sessions are cached per (server URL, account), so `ninjaone_login` on `qa4-1` does not authorise calls on `qa5`; each environment is logged into once per server process. The login response names the account and division it got, which is the answer to "which environment am I actually in".
+
+Per-server `password` and `totpSecret` take the same `"keychain"` sentinel as the top-level keys, resolved against that entry's `email`:
+
+```bash
+mcp-atlassian creds set --kind password    --vendor ninjaone --principal qa4-operator@example.com
+mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal qa4-operator@example.com
+```
+
+Prefer that to a literal value: everything inside `NINJAONE_SERVERS` is one config string, so `creds migrate` cannot lift secrets out of it the way it does for a top-level key — a plaintext `password` there stays plaintext in `~/.mcp/configs.json`.
 
 #### Supplying the MFA code automatically
 
@@ -600,7 +627,7 @@ Rather than integrating with any particular password manager, `NINJAONE_TOTP_COM
 
 `op item get ninja-qa5 --otp`, `oathtool --totp -b "$(pass ninja/qa5)"`, `ykman oath accounts code -s ninja-qa5`, or any script works the same way. The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) with this process's environment, so vault session handles such as `BW_SESSION` are inherited — the vault must already be unlocked, since the command is given 15 seconds and nothing is attached to its stdin to answer a prompt.
 
-For several accounts across environments — different roles, different orgs — put the command on the server alias instead, where it overrides the top-level default:
+For several accounts across environments — different roles, different orgs — put the command on the server alias instead, where it overrides the top-level default (and, when that alias also names an `email`, replaces it entirely):
 
 ```json
 {
@@ -647,7 +674,7 @@ mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal you@exa
 }
 ```
 
-Both slots are keyed by `(kind, ninjaone, NINJAONE_EMAIL)`, so several accounts across environments each get their own entry. The semantics match the Atlassian keys exactly: an explicit `"keychain"` whose entry is missing is a hard error naming the command to fix it, and omitting the key entirely still falls back to the keychain.
+Both slots are keyed by `(kind, ninjaone, <email>)` — the top-level `NINJAONE_EMAIL`, or the server entry's own `email` — so several accounts across environments each get their own entry. The semantics match the Atlassian keys exactly: an explicit `"keychain"` whose entry is missing is a hard error naming the command to fix it, and omitting the key entirely still falls back to the keychain.
 
 Because the code is derived from the wall clock, a host whose clock has drifted beyond the server's tolerance will generate codes NinjaOne rejects — the usual TOTP caveat, and a reason to keep NTP running.
 
@@ -668,7 +695,7 @@ For one server, set a default URL and one authentication method in `~/.mcp/confi
 }
 ```
 
-For multiple environments, configure safe aliases with `NINJAONE_SERVERS`. A value can be a plain URL, or an object containing `url` and an environment-specific `prefix`:
+For multiple environments, configure safe aliases with `NINJAONE_SERVERS`. A value can be a plain URL, or an object containing `url`, an environment-specific `prefix`, and that environment's own account (`email`, `password`, `totpCommand`, `totpSecret` — see [One account per environment](#one-account-per-environment)):
 
 ```json
 {

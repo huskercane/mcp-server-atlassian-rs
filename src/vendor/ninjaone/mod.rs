@@ -12,6 +12,14 @@
 //! config. Alternatively `NINJAONE_EMAIL` + `NINJAONE_PASSWORD` let the server
 //! mint its own console session key through the login exchange in [`session`],
 //! which is what the `ninjaone_login` tool drives.
+//!
+//! Those login keys are also settable **per server**, inside the
+//! `NINJAONE_SERVERS` entry (`email`, `password`, `totpCommand`,
+//! `totpSecret`). That is the ordinary case, not an exotic one: the NinjaOne
+//! account is what determines which division and role a session gets, so one
+//! operator holds a different account per environment. An entry that names its
+//! own `email` is a self-contained principal — the top-level `NINJAONE_*`
+//! login keys belong to a *different* account and are never mixed into it.
 
 pub mod error;
 pub mod mfa;
@@ -23,7 +31,7 @@ use std::sync::Arc;
 use reqwest::{Client, StatusCode};
 use serde_json::Value;
 
-use crate::auth::{Credentials, SecretKind, resolve_secret_async, vendor_secret};
+use crate::auth::{Credentials, SecretKind, resolve_configured_secret_async, vendor_secret};
 use crate::config::{Config, VENDOR_NINJAONE};
 use crate::error::{McpError, auth_missing, unexpected};
 use crate::vendor::Vendor;
@@ -102,7 +110,7 @@ impl NinjaOneVendor {
     pub fn credentials(&self, config: &Config) -> Result<Credentials, McpError> {
         Self::static_credentials(config)
             .map(|resolved| resolved.credentials)
-            .ok_or_else(|| missing_auth_error(config))
+            .ok_or_else(|| self.missing_auth_error(config))
     }
 
     /// Config-only view of the three carrier credentials. Synchronous, so it
@@ -155,7 +163,7 @@ impl NinjaOneVendor {
         }
         Self::static_credentials_async(config)
             .await?
-            .ok_or_else(|| missing_auth_error(config))
+            .ok_or_else(|| self.missing_auth_error(config))
     }
 
     /// Perform the console login exchange for the configured principal and
@@ -172,21 +180,24 @@ impl NinjaOneVendor {
         recaptcha_token: Option<&str>,
     ) -> Result<LoginOutcome, McpError> {
         let base_url = self.base_url(config)?;
+        let login = self.login_config(config)?;
+        let email = login.email.clone().ok_or_else(missing_login_email)?;
         // Password comes through the shared keychain-aware resolver, so
-        // NINJAONE_PASSWORD="keychain" behaves exactly like the Atlassian keys.
-        let (email, password) = resolve_secret_async(
-            config,
-            VENDOR_NINJAONE,
+        // `"keychain"` behaves exactly like it does on the Atlassian keys —
+        // whether it sits in NINJAONE_PASSWORD or in a server entry.
+        let password = resolve_configured_secret_async(
             SecretKind::Password,
-            "NINJAONE_EMAIL",
-            "NINJAONE_PASSWORD",
+            VENDOR_NINJAONE,
+            email.clone(),
+            login.password.clone(),
+            login.password_label.clone(),
         )
         .await?
-        .ok_or_else(missing_login_creds)?;
+        .ok_or_else(|| missing_login_password(&login.password_label, &email))?;
         // Resolved before the exchange starts: a vault CLI can take seconds,
         // and a TOTP code is only valid for a 30-second window, so fetching it
         // late would race its own expiry.
-        let code = self.mfa_code(config, mfa_code).await?;
+        let code = Self::mfa_code(&login, &email, mfa_code).await?;
         self.sessions
             .login(
                 client,
@@ -204,17 +215,79 @@ impl NinjaOneVendor {
     /// Drop the cached session key for this vendor's base URL. Called after a
     /// `401` so the stale key is not replayed on the next tool call.
     pub async fn invalidate_session(&self, config: &Config) {
-        if let (Ok(base_url), Some(email)) =
-            (self.base_url(config), non_blank(config, "NINJAONE_EMAIL"))
-        {
-            self.sessions.invalidate(&base_url, email).await;
+        if let (Ok(base_url), Some(email)) = (self.base_url(config), self.principal(config)) {
+            self.sessions.invalidate(&base_url, &email).await;
         }
     }
 
     async fn cached_session_key(&self, config: &Config) -> Option<String> {
-        let email = non_blank(config, "NINJAONE_EMAIL")?;
+        let email = self.principal(config)?;
         let base_url = self.base_url(config).ok()?;
-        self.sessions.get(&base_url, email).await
+        self.sessions.get(&base_url, &email).await
+    }
+
+    /// The account this vendor's server logs in as, which is also half of the
+    /// session-cache key. `None` when no email is configured anywhere, and on
+    /// a malformed `NINJAONE_SERVERS` — the base URL lookup reports that same
+    /// failure with a better message, so there is nothing to add here.
+    fn principal(&self, config: &Config) -> Option<String> {
+        self.login_config(config).ok()?.email
+    }
+
+    /// Merge the selected server entry with the top-level login keys.
+    ///
+    /// The merge rule is per field, and it turns on whether the entry names its
+    /// own `email`. If it does, the entry is a self-contained principal and the
+    /// top-level `NINJAONE_PASSWORD` / `NINJAONE_TOTP_COMMAND` /
+    /// `NINJAONE_TOTP_SECRET` are ignored for it: those unlock a different
+    /// account, and sending one account's password to another is how an
+    /// operator gets a real account locked out. If it does not, the top-level
+    /// keys fill in as before, so a single-account setup is untouched.
+    fn login_config(&self, config: &Config) -> Result<LoginConfig, McpError> {
+        let entry = match self.server_alias.as_deref() {
+            Some(alias) => ServerEntry::parse(config, alias)?,
+            None => ServerEntry::default(),
+        };
+        let scoped = entry.email.is_some();
+        let field = |name: &str| match self.server_alias.as_deref() {
+            Some(alias) => format!("NINJAONE_SERVERS[{alias:?}].{name}"),
+            None => name.to_owned(),
+        };
+        let inherit = |key: &'static str| {
+            if scoped {
+                None
+            } else {
+                non_blank(config, key).map(str::to_owned)
+            }
+        };
+        let (password, password_label) = match entry.password {
+            Some(password) => (Some(password), field("password")),
+            None if scoped => (None, field("password")),
+            None => (
+                non_blank(config, "NINJAONE_PASSWORD").map(str::to_owned),
+                "NINJAONE_PASSWORD".to_owned(),
+            ),
+        };
+        let (totp_secret, totp_secret_label) = match entry.totp_secret {
+            Some(secret) => (Some(secret), field("totpSecret")),
+            None if scoped => (None, field("totpSecret")),
+            None => (
+                non_blank(config, "NINJAONE_TOTP_SECRET").map(str::to_owned),
+                "NINJAONE_TOTP_SECRET".to_owned(),
+            ),
+        };
+        Ok(LoginConfig {
+            email: entry
+                .email
+                .or_else(|| non_blank(config, "NINJAONE_EMAIL").map(str::to_owned)),
+            password,
+            password_label,
+            totp_command: entry
+                .totp_command
+                .or_else(|| inherit("NINJAONE_TOTP_COMMAND")),
+            totp_secret,
+            totp_secret_label,
+        })
     }
 
     fn configured_alias_url(config: &Config, alias: &str) -> Result<String, McpError> {
@@ -233,53 +306,96 @@ impl NinjaOneVendor {
     /// A per-alias `"totpCommand"` / `"totpSecret"` wins over the top-level
     /// `NINJAONE_TOTP_COMMAND` / `NINJAONE_TOTP_SECRET`: one person routinely
     /// holds several NinjaOne accounts with different roles across
-    /// environments, and each needs its own entry.
+    /// environments, and each needs its own entry. The seed resolves against
+    /// `email` — the principal that entry logs in as — so `"keychain"` works
+    /// per environment too.
     async fn mfa_code(
-        &self,
-        config: &Config,
+        login: &LoginConfig,
+        email: &str,
         explicit: Option<&str>,
     ) -> Result<Option<String>, McpError> {
         if let Some(code) = explicit.map(str::trim).filter(|code| !code.is_empty()) {
             return Ok(Some(code.to_owned()));
         }
 
-        let entry = match self.server_alias.as_deref() {
-            Some(alias) => ServerEntry::parse(config, alias)?,
-            None => ServerEntry::default(),
-        };
-
-        if let Some(command) = entry
-            .totp_command
-            .or_else(|| non_blank(config, "NINJAONE_TOTP_COMMAND").map(str::to_owned))
-        {
-            return mfa::run_command(&command).await.map(Some);
+        if let Some(command) = &login.totp_command {
+            return mfa::run_command(command).await.map(Some);
         }
 
-        let secret = match entry.totp_secret {
-            Some(secret) => Some(secret),
-            None => resolve_secret_async(
-                config,
-                VENDOR_NINJAONE,
-                SecretKind::TotpSecret,
-                "NINJAONE_EMAIL",
-                "NINJAONE_TOTP_SECRET",
-            )
-            .await?
-            .map(|(_, secret)| secret),
-        };
+        let secret = resolve_configured_secret_async(
+            SecretKind::TotpSecret,
+            VENDOR_NINJAONE,
+            email.to_owned(),
+            login.totp_secret.clone(),
+            login.totp_secret_label.clone(),
+        )
+        .await?;
 
         secret
-            .map(|secret| TotpSpec::parse(&secret)?.current_code())
+            .map(|secret| {
+                let spec = TotpSpec::parse(&secret)
+                    .map_err(|error| relabel(error, &login.totp_secret_label))?;
+                spec.current_code()
+            })
             .transpose()
+    }
+
+    /// Actionable "no credentials" error. The wording branches on whether login
+    /// credentials are configured for the *selected server*: with them the fix
+    /// is to run `ninjaone_login` (or re-run it after the session expired),
+    /// without them it is to set one of the static keys.
+    fn missing_auth_error(&self, config: &Config) -> McpError {
+        let login_configured = self
+            .login_config(config)
+            .is_ok_and(|login| login.email.is_some() && login.password.is_some());
+        if login_configured {
+            auth_missing(
+                "No NinjaOne session is active. Call the ninjaone_login tool (with the current \
+                 multi-factor code, if the account uses MFA) to mint a session key for this \
+                 process, or set NINJAONE_ACCESS_TOKEN / NINJAONE_SESSION_KEY.",
+            )
+        } else {
+            auth_missing(
+                "NinjaOne authentication is required for ninjaone_* tools. Set NINJAONE_EMAIL + \
+                 NINJAONE_PASSWORD (or per-server `email` + `password` in the NINJAONE_SERVERS \
+                 entry) and call ninjaone_login, or set one of NINJAONE_ACCESS_TOKEN, \
+                 NINJAONE_SESSION_KEY, or NINJAONE_SESSION_COOKIE under the `ninjaone` section \
+                 of ~/.mcp/configs.json or in the environment.",
+            )
+        }
     }
 }
 
+/// The account a login runs as, after merging the selected `NINJAONE_SERVERS`
+/// entry with the top-level login keys.
+///
+/// Each secret keeps the label of wherever it came from, because that is what
+/// the operator has to go and edit: telling someone to fix `NINJAONE_PASSWORD`
+/// when they set `password` on a server entry sends them to the wrong file.
+/// The values are raw — still possibly the `"keychain"` sentinel — and are
+/// expanded by [`resolve_configured_secret_async`] at use.
+///
+/// Deliberately not `Debug`: one of these fields is a password, and the
+/// cheapest way to keep it out of a log line is to make formatting it fail to
+/// compile.
+struct LoginConfig {
+    email: Option<String>,
+    password: Option<String>,
+    password_label: String,
+    totp_command: Option<String>,
+    totp_secret: Option<String>,
+    totp_secret_label: String,
+}
+
 /// One entry of the `NINJAONE_SERVERS` map: either a bare URL string, or an
-/// object carrying the URL plus optional per-server settings.
+/// object carrying the URL plus optional per-server settings — including the
+/// account that server is reached as.
 #[derive(Debug, Default)]
 struct ServerEntry {
     url: String,
     prefix: String,
+    email: Option<String>,
+    password: Option<String>,
     totp_command: Option<String>,
     totp_secret: Option<String>,
 }
@@ -323,6 +439,8 @@ impl ServerEntry {
                 Ok(Self {
                     url: url.to_owned(),
                     prefix: string_field(server, "prefix", alias)?.unwrap_or_default(),
+                    email: string_field(server, "email", alias)?,
+                    password: string_field(server, "password", alias)?,
                     totp_command: string_field(server, "totpCommand", alias)?,
                     totp_secret: string_field(server, "totpSecret", alias)?,
                 })
@@ -393,36 +511,35 @@ fn session_cookie_credentials(key: &str) -> Credentials {
     }
 }
 
-/// Actionable "no credentials" error. The wording branches on whether login
-/// credentials are configured: with them the fix is to run `ninjaone_login`
-/// (or re-run it after the session expired), without them it is to set one of
-/// the static keys.
-fn missing_auth_error(config: &Config) -> McpError {
-    if non_blank(config, "NINJAONE_EMAIL").is_some()
-        && non_blank(config, "NINJAONE_PASSWORD").is_some()
-    {
-        auth_missing(
-            "No NinjaOne session is active. Call the ninjaone_login tool (with the current \
-             multi-factor code, if the account uses MFA) to mint a session key for this \
-             process, or set NINJAONE_ACCESS_TOKEN / NINJAONE_SESSION_KEY.",
-        )
-    } else {
-        auth_missing(
-            "NinjaOne authentication is required for ninjaone_* tools. Set NINJAONE_EMAIL + \
-             NINJAONE_PASSWORD and call ninjaone_login, or set one of NINJAONE_ACCESS_TOKEN, \
-             NINJAONE_SESSION_KEY, or NINJAONE_SESSION_COOKIE under the `ninjaone` section of \
-             ~/.mcp/configs.json or in the environment.",
-        )
-    }
+fn missing_login_email() -> McpError {
+    auth_missing(
+        "NINJAONE_EMAIL is required to log in to NinjaOne. Set it under the `ninjaone` section \
+         of ~/.mcp/configs.json or in the environment, or give the server its own account with \
+         an `email` field in its NINJAONE_SERVERS entry.",
+    )
 }
 
-fn missing_login_creds() -> McpError {
-    auth_missing(
-        "NINJAONE_EMAIL + NINJAONE_PASSWORD are required to log in to NinjaOne. Set them under \
-         the `ninjaone` section of ~/.mcp/configs.json or in the environment, or store the \
-         password in the OS keychain (`mcp-atlassian creds set --kind password --vendor \
-         ninjaone --principal <email>`) and set NINJAONE_PASSWORD=\"keychain\".",
-    )
+/// No password for the account the selected server logs in as. `label` names
+/// the exact setting to add — the top-level key, or the server entry's field —
+/// so the fix does not depend on guessing which of the two is in play.
+fn missing_login_password(label: &str, email: &str) -> McpError {
+    auth_missing(format!(
+        "No NinjaOne password is configured for {email}. Set {label} under the `ninjaone` \
+         section of ~/.mcp/configs.json or in the environment, or store the password in the OS \
+         keychain (`mcp-atlassian creds set --kind password --vendor ninjaone --principal \
+         {email}`) and set {label} to \"keychain\"."
+    ))
+}
+
+/// The TOTP parser names `NINJAONE_TOTP_SECRET` in its errors, because that is
+/// where a seed normally comes from. When this one came from a server entry
+/// instead, point at the field the operator actually set — a message telling
+/// them to fix a key they never wrote is worse than no message.
+fn relabel(mut error: McpError, label: &str) -> McpError {
+    if label != "NINJAONE_TOTP_SECRET" {
+        error.message = error.message.replace("NINJAONE_TOTP_SECRET", label);
+    }
+    error
 }
 
 fn non_blank<'a>(config: &'a Config, key: &str) -> Option<&'a str> {
@@ -435,7 +552,7 @@ fn non_blank<'a>(config: &'a Config, key: &str) -> Option<&'a str> {
 fn invalid_server_entry(alias: &str) -> McpError {
     unexpected(
         format!(
-            "NINJAONE_SERVERS entry `{alias}` must be a URL string or an object with a non-empty `url` and optional `prefix` string"
+            "NINJAONE_SERVERS entry `{alias}` must be a URL string or an object with a non-empty `url` and optional string `prefix`, `email`, `password`, `totpCommand`, and `totpSecret` fields"
         ),
         None,
     )

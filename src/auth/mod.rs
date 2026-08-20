@@ -398,10 +398,39 @@ fn resolve_kind_with_principal(
     principal: &str,
     secret_key: &str,
 ) -> Result<Option<(String, String)>, McpError> {
+    resolve_configured_secret(
+        backend,
+        kind,
+        vendor,
+        principal,
+        config.get_for(vendor, secret_key),
+        secret_key,
+    )
+    .map(|secret| secret.map(|secret| (principal.to_owned(), secret)))
+}
+
+/// The same cascade for a secret whose raw value the caller already holds,
+/// rather than one addressed by a config key.
+///
+/// `raw` is the configured value (`None` when it is absent altogether), and
+/// `secret_label` is what error messages call it. For a plain config key those
+/// are `config.get_for(...)` and the key name; for a credential carried
+/// *inside* a config value — a per-server `NINJAONE_SERVERS` entry, say — they
+/// are the field's value and a path like `NINJAONE_SERVERS["qa4-1"].password`.
+/// Keeping one implementation is the point: a nested credential gets the same
+/// `"keychain"` semantics as a top-level one instead of a second dialect.
+pub fn resolve_configured_secret(
+    backend: &dyn KeychainBackend,
+    kind: SecretKind,
+    vendor: &str,
+    principal: &str,
+    raw: Option<&str>,
+    secret_label: &str,
+) -> Result<Option<String>, McpError> {
     // Trim before matching. Surrounding whitespace on a secret is never
     // intentional — it is a copy-paste artefact — and a whitespace-only value
     // must read as "not set" rather than as a credential made of spaces.
-    match config.get_for(vendor, secret_key).map(str::trim) {
+    match raw.map(str::trim) {
         // Explicit sentinel — user opted in, miss is a hard error.
         Some("keychain") => match backend.get(kind, vendor, principal) {
             Ok(Some(s)) if !s.is_empty() => {
@@ -414,17 +443,17 @@ fn resolve_kind_with_principal(
                         "resolved credential (sentinel)"
                     );
                 }
-                Ok(Some((principal.to_owned(), s)))
+                Ok(Some(s))
             }
             Ok(_) => {
                 tracing::error!(
                     kind = %kind,
                     vendor = vendor,
                     principal = principal,
-                    "vendor `{vendor}` sets {secret_key}=\"keychain\" but no entry exists"
+                    "vendor `{vendor}` sets {secret_label}=\"keychain\" but no entry exists"
                 );
                 Err(auth_missing(format!(
-                    "vendor `{vendor}` sets {secret_key}=\"keychain\" but no keychain \
+                    "vendor `{vendor}` sets {secret_label}=\"keychain\" but no keychain \
                      entry exists for kind={kind}, vendor={vendor}, principal={principal}. \
                      Run `mcp-atlassian creds set --kind {kind} --vendor {vendor} \
                      --principal {principal}` or remove the sentinel."
@@ -445,7 +474,7 @@ fn resolve_kind_with_principal(
             }
         },
         // Plaintext secret — use as-is.
-        Some(s) if !s.is_empty() => Ok(Some((principal.to_owned(), s.to_owned()))),
+        Some(s) if !s.is_empty() => Ok(Some(s.to_owned())),
         // Empty plaintext is treated as missing for fall-through.
         Some(_) => Ok(None),
         // Implicit fallback — secret absent; try keychain, miss is fine.
@@ -460,7 +489,7 @@ fn resolve_kind_with_principal(
                         "resolved credential (implicit)"
                     );
                 }
-                Ok(Some((principal.to_owned(), s)))
+                Ok(Some(s))
             }
             Ok(_) => {
                 tracing::debug!(
@@ -493,4 +522,44 @@ fn resolve_kind_with_principal(
             }
         },
     }
+}
+
+/// Async form of [`resolve_configured_secret`] against the process-wide OS
+/// keychain, for the request path.
+///
+/// Plaintext short-circuits before any thread dispatch, exactly as
+/// [`vendor_secret`] does: only a sentinel or an absent value actually reaches
+/// the OS keychain, and those are the only cases worth a `spawn_blocking`.
+pub async fn resolve_configured_secret_async(
+    kind: SecretKind,
+    vendor: &'static str,
+    principal: String,
+    raw: Option<String>,
+    secret_label: String,
+) -> Result<Option<String>, McpError> {
+    match raw.as_deref().map(str::trim) {
+        // Only a sentinel or an absent value needs the keychain; everything
+        // else is decided here, off the blocking pool.
+        Some("keychain") | None => {}
+        Some("") => return Ok(None),
+        Some(secret) => return Ok(Some(secret.to_owned())),
+    }
+
+    tokio::task::spawn_blocking(move || {
+        resolve_configured_secret(
+            os_keychain(),
+            kind,
+            vendor,
+            &principal,
+            raw.as_deref(),
+            &secret_label,
+        )
+    })
+    .await
+    .map_err(|error| {
+        crate::error::unexpected(
+            format!("credential resolution task panicked: {error}"),
+            None,
+        )
+    })?
 }

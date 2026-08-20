@@ -126,9 +126,11 @@ pub async fn handle_write(
 /// Mint a console session key for the configured NinjaOne principal.
 ///
 /// The session key never leaves the process: the response reports only the
-/// non-secret facts (which server, which principal, whether MFA was used, and
-/// an 8-character prefix so a human can correlate the session with a browser
-/// one).
+/// non-secret facts (which server, which account, which division, whether MFA
+/// was used, and an 8-character prefix so a human can correlate the session
+/// with a browser one). The account matters to the caller: each server can be
+/// configured with its own principal, and that principal is what decides the
+/// division and role the session sees.
 pub async fn login(
     ctx: &NinjaOneContext<'_>,
     args: &NinjaOneLoginArgs,
@@ -158,6 +160,7 @@ pub async fn login(
         "activeCredential": active,
         "server": args.server.clone(),
         "baseUrl": vendor.base_url(ctx.config)?,
+        "email": outcome.email,
         "mfaUsed": outcome.mfa_used,
         "mfaType": outcome.mfa_type,
         "sessionKeyPreview": format!("{}…", outcome.session_key_preview),

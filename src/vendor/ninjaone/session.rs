@@ -25,9 +25,11 @@
 //! call evicts the entry so the next tool call reports an actionable
 //! "session expired" error rather than looping on a dead key.
 //!
-//! The MFA code is supplied per login call today. When a TOTP secret is
-//! configured later, it becomes another producer of that same `mfa_code`
-//! argument — nothing else in this module changes.
+//! The `email`/`password`/`mfa_code` inputs are already resolved by the time
+//! they arrive here — from the top-level `NINJAONE_*` keys or from the selected
+//! `NINJAONE_SERVERS` entry, which is how one operator holds a different
+//! account per environment. This module only performs the exchange; where the
+//! credentials came from is [`super`]'s concern.
 
 use std::collections::HashMap;
 use std::fmt;
@@ -71,6 +73,10 @@ pub struct LoginRequest<'a> {
 /// with a browser one without the full secret entering tool output or logs.
 #[derive(Debug, Clone)]
 pub struct LoginOutcome {
+    /// The account the session belongs to. Reported back because on NinjaOne
+    /// the account *is* the access boundary — division and role come from it —
+    /// so "which login is this session" is not a detail a caller can infer.
+    pub email: String,
     pub session_key_preview: String,
     pub mfa_used: bool,
     pub mfa_type: Option<String>,
@@ -180,6 +186,7 @@ impl SessionCache {
         })?;
 
         let outcome = LoginOutcome {
+            email: request.email.to_owned(),
             session_key_preview: preview(&session_key),
             mfa_used,
             mfa_type: response.mfa_type.clone(),
@@ -361,8 +368,10 @@ fn login_rejected(response: &LoginResponse, email: &str) -> McpError {
         .as_deref()
         .map_or_else(String::new, |message| format!(": {message}"));
     auth_invalid(format!(
-        "NinjaOne login for {email} returned `{code}`{detail}. Check NINJAONE_EMAIL / \
-         NINJAONE_PASSWORD and, for an MFA account, that the code is current."
+        "NinjaOne login for {email} returned `{code}`{detail}. Check the email and password \
+         configured for this server (NINJAONE_EMAIL / NINJAONE_PASSWORD, or the `email` / \
+         `password` fields of its NINJAONE_SERVERS entry) and, for an MFA account, that the \
+         code is current."
     ))
 }
 
