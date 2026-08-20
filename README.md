@@ -246,7 +246,7 @@ When the binary needs a credential, it tries each source in priority order; the 
 
 Keychain entries are scoped by `(kind, vendor, principal)` — the service name carries the vendor suffix (`mcp-server-atlassian.api-token.bitbucket`, `.jira`, `.confluence`, `mcp-server-atlassian.password.ninjaone`), so the same email can hold a different secret in each slot. `Config::get_for` itself is unaware of the keychain; the expansion happens inside `auth::Credentials::resolve_with_for(config, backend, vendor)` for the Atlassian keys, and inside `auth::resolve_secret_for(...)` for a vendor that owns its own login (NinjaOne). Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
 
-**Coverage.** Every secret-bearing config key is keychain-backed. One registry (`src/auth/secrets.rs`) declares them all and drives runtime resolution, `creds migrate`, and the `creds set` guard, so the three cannot drift apart:
+**Coverage.** Every secret-bearing config key is keychain-backed. One registry (`src/auth/secrets.rs`) declares them all and drives runtime resolution, `creds migrate`, and the `creds set` guard, so the three cannot drift apart. The last two rows are the exception the registry cannot describe — they are fields of one entry inside the `NINJAONE_SERVERS` document rather than config keys — and are handled explicitly by both runtime resolution and `creds migrate`:
 
 | Key | Vendor | `--kind` | Principal |
 |---|---|---|---|
@@ -264,6 +264,8 @@ Keychain entries are scoped by `(kind, vendor, principal)` — the service name 
 | `WRDS_PASSWORD` | wrds | `password` | `WRDS_USERNAME` |
 | `NINJAONE_PASSWORD` | ninjaone | `password` | `NINJAONE_EMAIL` |
 | `NINJAONE_TOTP_SECRET` | ninjaone | `totp-secret` | `NINJAONE_EMAIL` |
+| `NINJAONE_SERVERS[…].password` | ninjaone | `password` | that entry's `email` |
+| `NINJAONE_SERVERS[…].totpSecret` | ninjaone | `totp-secret` | that entry's `email` |
 | `NINJAONE_ACCESS_TOKEN` | ninjaone | `token` | *key name* |
 | `NINJAONE_SESSION_KEY` | ninjaone | `token` | *key name* |
 | `NINJAONE_SESSION_COOKIE` | ninjaone | `token` | *key name* |
@@ -609,7 +611,7 @@ mcp-atlassian creds set --kind password    --vendor ninjaone --principal qa4-ope
 mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal qa4-operator@example.com
 ```
 
-Prefer that to a literal value: everything inside `NINJAONE_SERVERS` is one config string, so `creds migrate` cannot lift secrets out of it the way it does for a top-level key — a plaintext `password` there stays plaintext in `~/.mcp/configs.json`.
+`creds migrate` also walks these: it files each entry's plaintext `password` and `totpSecret` under that entry's `email` and rewrites the field to `"keychain"`, so an existing multi-environment config moves in one command. Two caveats specific to the nested form. Migrate refuses an entry whose secret has no account to file it under — no `email` on the entry and no top-level `NINJAONE_EMAIL` — since a secret in a slot nothing reads is worse than the plaintext it replaced. And because the map is JSON encoded as a single config string, rewriting it re-encodes that string: its internal whitespace and escaping are normalised, though the content is not. `totpCommand` is never migrated; it is a command line, not a secret, and its whole point is that the seed stays in the vault.
 
 #### Supplying the MFA code automatically
 

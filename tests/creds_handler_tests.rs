@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use mcp_server_atlassian::auth::keychain::{KeychainBackend, KeychainError, KeychainResult};
 use mcp_server_atlassian::auth::{InMemoryKeychain, SecretKind};
 use mcp_server_atlassian::cli::creds::{self, MigrateSkip};
-use mcp_server_atlassian::config::{VENDOR_BITBUCKET, VENDOR_JIRA};
+use mcp_server_atlassian::config::{VENDOR_BITBUCKET, VENDOR_JIRA, VENDOR_NINJAONE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
@@ -963,4 +963,242 @@ fn migrate_leaves_the_database_environment_blob_alone() {
         blob
     );
     assert!(kc.is_empty());
+}
+
+// ---- per-server NinjaOne accounts ----------------------------------------
+//
+// A NinjaOne account is the access boundary, so an operator holds one per
+// environment and configures each on its own `NINJAONE_SERVERS` entry. Those
+// credentials sit inside a JSON document that is itself one config string,
+// which is the only place migrate has to walk into rather than read off a key.
+
+/// Pull `NINJAONE_SERVERS` back out of the rewritten file and parse it.
+fn servers_map(root: &Value, section: &str) -> Value {
+    let raw = env_value(root, section, "NINJAONE_SERVERS").expect("NINJAONE_SERVERS is present");
+    serde_json::from_str(&raw).expect("NINJAONE_SERVERS is valid JSON")
+}
+
+fn ninjaone_config(servers: &Value, extra: &[(&str, &str)]) -> Value {
+    let mut env = serde_json::Map::new();
+    env.insert(
+        "NINJAONE_SERVERS".to_owned(),
+        Value::String(serde_json::to_string(servers).unwrap()),
+    );
+    for (key, value) in extra {
+        env.insert((*key).to_owned(), Value::String((*value).to_owned()));
+    }
+    json!({ "ninjaone": { "environments": Value::Object(env) } })
+}
+
+#[test]
+fn migrate_moves_each_server_entrys_own_credentials() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    write_config(
+        &path,
+        &ninjaone_config(
+            &json!({
+                "qa4-1": {
+                    "url": "https://qa4.example",
+                    "prefix": "/swb/s1",
+                    "email": "qa4@example.com",
+                    "password": "qa4-plaintext",
+                    "totpSecret": "GEZDGNBVGY3TQOJQ",
+                },
+                "qa5": {
+                    "url": "https://qa5.example",
+                    "email": "qa5@example.com",
+                    "password": "qa5-plaintext",
+                },
+                "prod": "https://app.ninjarmm.com",
+            }),
+            &[],
+        ),
+    );
+    let kc = InMemoryKeychain::new();
+
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+
+    // Each account got its own slot, keyed by the entry's own email.
+    assert_eq!(
+        kc.get(SecretKind::Password, VENDOR_NINJAONE, "qa4@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("qa4-plaintext")
+    );
+    assert_eq!(
+        kc.get(SecretKind::TotpSecret, VENDOR_NINJAONE, "qa4@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("GEZDGNBVGY3TQOJQ")
+    );
+    assert_eq!(
+        kc.get(SecretKind::Password, VENDOR_NINJAONE, "qa5@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("qa5-plaintext")
+    );
+    assert_eq!(outcome.migrated.len(), 3);
+    // The record says which line moved: one account can be configured in more
+    // than one place, so the principal alone does not identify it.
+    assert!(
+        outcome
+            .migrated
+            .iter()
+            .any(|record| record.site == "NINJAONE_SERVERS[\"qa4-1\"].totpSecret"),
+        "sites: {:?}",
+        outcome.migrated.iter().map(|r| &r.site).collect::<Vec<_>>()
+    );
+
+    // The file keeps everything that is not a secret, and holds sentinels
+    // where the secrets were.
+    let servers = servers_map(&read_config(&path), "ninjaone");
+    assert_eq!(servers["qa4-1"]["password"], json!("keychain"));
+    assert_eq!(servers["qa4-1"]["totpSecret"], json!("keychain"));
+    assert_eq!(servers["qa4-1"]["email"], json!("qa4@example.com"));
+    assert_eq!(servers["qa4-1"]["prefix"], json!("/swb/s1"));
+    assert_eq!(servers["qa5"]["password"], json!("keychain"));
+    assert_eq!(servers["prod"], json!("https://app.ninjarmm.com"));
+    // No plaintext survives anywhere in the file.
+    let rewritten = std::fs::read_to_string(&path).unwrap();
+    assert!(!rewritten.contains("qa4-plaintext"));
+    assert!(!rewritten.contains("qa5-plaintext"));
+}
+
+#[test]
+fn migrate_files_an_entry_without_an_email_under_the_top_level_account() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    // No `email` on the entry: it logs in as the top-level account, so that is
+    // the account its password belongs to.
+    write_config(
+        &path,
+        &ninjaone_config(
+            &json!({ "qa": { "url": "https://qa.example", "password": "shared-plaintext" } }),
+            &[("NINJAONE_EMAIL", "shared@example.com")],
+        ),
+    );
+    let kc = InMemoryKeychain::new();
+
+    creds::migrate_with(&kc, &path, false).unwrap();
+
+    assert_eq!(
+        kc.get(SecretKind::Password, VENDOR_NINJAONE, "shared@example.com")
+            .unwrap()
+            .as_deref(),
+        Some("shared-plaintext")
+    );
+    let servers = servers_map(&read_config(&path), "ninjaone");
+    assert_eq!(servers["qa"]["password"], json!("keychain"));
+}
+
+#[test]
+fn migrate_refuses_a_server_secret_with_no_account_to_file_it_under() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    let config = ninjaone_config(
+        &json!({ "qa": { "url": "https://qa.example", "password": "orphan-plaintext" } }),
+        &[],
+    );
+    write_config(&path, &config);
+    let kc = InMemoryKeychain::new();
+
+    let error = creds::migrate_with(&kc, &path, false).unwrap_err();
+
+    assert!(
+        error.message.contains("NINJAONE_SERVERS[\"qa\"].password"),
+        "unhelpful message: {}",
+        error.message
+    );
+    assert!(error.message.contains("email"));
+    // Nothing filed, nothing rewritten: a secret in a slot nothing reads is
+    // worse than the plaintext it replaced.
+    assert_eq!(read_config(&path), config);
+}
+
+#[test]
+fn migrate_rejects_two_entries_that_disagree_about_one_account() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    let config = ninjaone_config(
+        &json!({
+            "qa4-1": {
+                "url": "https://qa4.example",
+                "email": "same@example.com",
+                "password": "one-value",
+            },
+            "qa5": {
+                "url": "https://qa5.example",
+                "email": "same@example.com",
+                "password": "another-value",
+            },
+        }),
+        &[],
+    );
+    write_config(&path, &config);
+    let kc = InMemoryKeychain::new();
+
+    let error = creds::migrate_with(&kc, &path, false).unwrap_err();
+
+    // Both culprits are named; the keychain holds one value per account, so
+    // the second write would otherwise silently win.
+    assert!(
+        error
+            .message
+            .contains("NINJAONE_SERVERS[\"qa4-1\"].password")
+            && error.message.contains("NINJAONE_SERVERS[\"qa5\"].password"),
+        "unhelpful message: {}",
+        error.message
+    );
+    // Redacted, and no plaintext in the error.
+    assert!(!error.message.contains("one-value"));
+    assert!(
+        kc.get(SecretKind::Password, VENDOR_NINJAONE, "same@example.com")
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(read_config(&path), config);
+}
+
+#[test]
+fn migrate_verifies_a_per_server_sentinel_against_the_keychain() {
+    let dir = TempDir::new().unwrap();
+    let path = make_path(&dir, "configs.json");
+    let config = ninjaone_config(
+        &json!({
+            "qa4-1": {
+                "url": "https://qa4.example",
+                "email": "qa4@example.com",
+                "password": "keychain",
+            },
+        }),
+        &[],
+    );
+    write_config(&path, &config);
+    let kc = InMemoryKeychain::new();
+
+    // A sentinel with nothing behind it is a hard error naming the fix — the
+    // runtime would fail the same way on the next login.
+    let error = creds::migrate_with(&kc, &path, false).unwrap_err();
+    assert!(error.message.contains("creds set"), "{}", error.message);
+    assert!(error.message.contains("qa4@example.com"));
+    assert_eq!(read_config(&path), config);
+
+    // With the entry present it is a no-op, and the file is left alone.
+    kc.set(
+        SecretKind::Password,
+        VENDOR_NINJAONE,
+        "qa4@example.com",
+        "already-there",
+    )
+    .unwrap();
+    let outcome = creds::migrate_with(&kc, &path, false).unwrap();
+    assert!(outcome.migrated.is_empty());
+    assert!(
+        outcome
+            .skipped
+            .iter()
+            .any(|skip| matches!(skip, MigrateSkip::AlreadyMigrated { .. }))
+    );
+    assert_eq!(read_config(&path), config);
 }

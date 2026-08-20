@@ -31,7 +31,7 @@ use serde_json::Value;
 
 use crate::auth::keychain::{KeychainBackend, KeychainError, OsKeychain, SecretKind};
 use crate::auth::secrets;
-use crate::config::{self};
+use crate::config::{self, VENDOR_NINJAONE};
 use crate::constants::PACKAGE_NAME;
 use crate::error::{McpError, unexpected};
 
@@ -39,6 +39,10 @@ use crate::error::{McpError, unexpected};
 /// which caps the credential blob at 2560 bytes (DPAPI overhead included).
 /// We reject earlier with a clear message rather than letting the OS error.
 const MAX_SECRET_BYTES: usize = 2048;
+
+/// The one config value that carries credentials *inside* it rather than
+/// beside it. See [`plan_server_entry_secrets`].
+const NINJAONE_SERVERS_KEY: &str = "NINJAONE_SERVERS";
 
 /// Verbs exposed under `mcp-atlassian creds …`.
 #[derive(Debug, Subcommand)]
@@ -348,6 +352,11 @@ pub struct MigrateRecord {
     pub kind: SecretKind,
     pub vendor: String,
     pub principal: String,
+    /// Where in configs.json the secret was read from — a config key, or a
+    /// path like `NINJAONE_SERVERS["qa4-1"].password`. One account can be
+    /// migrated from several places, so the principal alone does not say
+    /// which line moved.
+    pub site: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -437,7 +446,11 @@ pub fn migrate_with(
                 CandidateOutcome::Skip(reason) => skipped.push(reason),
             }
         }
+        if *canonical == VENDOR_NINJAONE {
+            planned.extend(plan_server_entry_secrets(canonical, alias_list, &json)?);
+        }
     }
+    reject_principal_conflicts(&planned)?;
 
     // Execute keychain writes with rollback on failure.
     let mut applied: Vec<RollbackEntry> = Vec::new();
@@ -507,6 +520,7 @@ pub fn migrate_with(
                     kind: plan.kind,
                     vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
+                    site: plan.site.describe(),
                 });
                 to_rewrite.push(plan);
             }
@@ -530,6 +544,7 @@ pub fn migrate_with(
                     kind: plan.kind,
                     vendor: plan.vendor.clone(),
                     principal: plan.principal.clone(),
+                    site: plan.site.describe(),
                 });
                 to_rewrite.push(plan);
             }
@@ -582,7 +597,14 @@ pub fn migrate_with(
                 .iter()
                 .find(|(c, _)| *c == plan.vendor)
                 .map_or(&[][..], |(_, list)| list.as_slice());
-            rewrite_vendor_aliases_to_sentinel(&mut json, plan.secret_key, alias_list);
+            match &plan.site {
+                SecretSite::VendorKey(secret_key) => {
+                    rewrite_vendor_aliases_to_sentinel(&mut json, secret_key, alias_list);
+                }
+                SecretSite::ServerEntry { alias, field } => {
+                    rewrite_server_entry_to_sentinel(&mut json, alias_list, alias, field);
+                }
+            }
         }
     }
 
@@ -642,8 +664,8 @@ fn print_migrate_summary(outcome: &MigrateOutcome) {
         );
         for rec in &outcome.migrated {
             println!(
-                "  - {} for vendor {} principal {}",
-                rec.kind, rec.vendor, rec.principal
+                "  - {} for vendor {} principal {} (from {})",
+                rec.kind, rec.vendor, rec.principal, rec.site
             );
         }
     }
@@ -699,9 +721,34 @@ struct PlannedAction {
     kind: SecretKind,
     vendor: String,
     principal: String,
-    secret_key: &'static str,
+    site: SecretSite,
     value: String, // plaintext; empty for VerifySentinel
     action: PlannedKind,
+}
+
+/// Where a secret sits in configs.json, which is also what has to be rewritten
+/// to the sentinel once the value is in the keychain.
+#[derive(Debug, Clone)]
+enum SecretSite {
+    /// A plain `environments` key, e.g. `NINJAONE_PASSWORD`.
+    VendorKey(&'static str),
+    /// A field of one entry inside the `NINJAONE_SERVERS` map, which is itself
+    /// JSON encoded as a single config string.
+    ServerEntry { alias: String, field: &'static str },
+}
+
+impl SecretSite {
+    /// How the site is named to a human — matching the label the runtime uses
+    /// when it reports the same setting missing, so the two are greppable
+    /// against each other.
+    fn describe(&self) -> String {
+        match self {
+            Self::VendorKey(key) => (*key).to_owned(),
+            Self::ServerEntry { alias, field } => {
+                format!("{NINJAONE_SERVERS_KEY}[{alias:?}].{field}")
+            }
+        }
+    }
 }
 
 enum CandidateOutcome {
@@ -826,7 +873,7 @@ fn plan_candidate(
             kind: candidate.kind,
             vendor: canonical.to_owned(),
             principal: principal.to_owned(),
-            secret_key: candidate.secret_key,
+            site: SecretSite::VendorKey(candidate.secret_key),
             value: String::new(),
             action: PlannedKind::VerifySentinel,
         })),
@@ -834,11 +881,180 @@ fn plan_candidate(
             kind: candidate.kind,
             vendor: canonical.to_owned(),
             principal: principal.to_owned(),
-            secret_key: candidate.secret_key,
+            site: SecretSite::VendorKey(candidate.secret_key),
             value: secret.to_owned(),
             action: PlannedKind::WriteFromPlaintext,
         })),
     }
+}
+
+/// Plan the credentials that live *inside* the `NINJAONE_SERVERS` value.
+///
+/// Every other secret is addressed by a config key, which is exactly what
+/// [`secrets::VENDOR_SECRETS`] enumerates. `NinjaOne` is the exception: an
+/// account there decides which division and role a session gets, so an
+/// operator holds one account per environment, and those accounts live as
+/// `email` / `password` / `totpSecret` fields of a JSON object that is itself
+/// encoded as one config string. A registry row names a key, not a path
+/// through a nested document, so this knowledge sits here next to the only
+/// value shaped that way rather than becoming a general mechanism with one
+/// user.
+///
+/// `totpCommand` is deliberately not migrated: it is a command line, not a
+/// secret, and the whole point of it is that the seed stays in the vault.
+fn plan_server_entry_secrets(
+    canonical: &str,
+    alias_list: &[String],
+    json: &Value,
+) -> Result<Vec<PlannedAction>, McpError> {
+    let Some(raw) = read_vendor_string(json, canonical, alias_list, NINJAONE_SERVERS_KEY)? else {
+        return Ok(Vec::new());
+    };
+    let servers = parse_servers(raw)?;
+    // An entry without its own `email` logs in as the top-level account, so
+    // that is the principal its secrets belong to.
+    let fallback = read_vendor_string(json, canonical, alias_list, "NINJAONE_EMAIL")?;
+
+    let mut planned = Vec::new();
+    for (entry_alias, entry) in &servers {
+        // A bare URL string carries no credentials.
+        let Some(entry) = entry.as_object() else {
+            continue;
+        };
+        let email = entry_string(entry, entry_alias, "email")?
+            .map(str::to_owned)
+            .or_else(|| fallback.map(str::to_owned));
+
+        for (field, kind) in [
+            ("password", SecretKind::Password),
+            ("totpSecret", SecretKind::TotpSecret),
+        ] {
+            let Some(value) = entry_string(entry, entry_alias, field)? else {
+                continue;
+            };
+            let site = SecretSite::ServerEntry {
+                alias: entry_alias.clone(),
+                field,
+            };
+            let Some(principal) = email.as_deref() else {
+                // Refusing beats guessing: filing this under some other
+                // account's name would leave a secret in a slot nothing reads.
+                return Err(unexpected(
+                    format!(
+                        "{} is set, but the entry names no `email` and NINJAONE_EMAIL is not \
+                         set either; migrate cannot tell which account it unlocks. Add an \
+                         `email` to the entry first.",
+                        site.describe()
+                    ),
+                    None,
+                ));
+            };
+            let sentinel = value == "keychain";
+            planned.push(PlannedAction {
+                kind,
+                vendor: canonical.to_owned(),
+                principal: principal.to_owned(),
+                site,
+                value: if sentinel {
+                    String::new()
+                } else {
+                    value.to_owned()
+                },
+                action: if sentinel {
+                    PlannedKind::VerifySentinel
+                } else {
+                    PlannedKind::WriteFromPlaintext
+                },
+            });
+        }
+    }
+    Ok(planned)
+}
+
+/// Parse the `NINJAONE_SERVERS` config string into its alias map. A value that
+/// is not a JSON object is a hard error: the runtime refuses it too, and
+/// migrating everything *except* the broken part would hide it.
+fn parse_servers(raw: &str) -> Result<serde_json::Map<String, Value>, McpError> {
+    let parsed: Value = serde_json::from_str(raw).map_err(|error| {
+        unexpected(
+            format!("{NINJAONE_SERVERS_KEY} is not valid JSON: {error}. Fix it before migrating."),
+            None,
+        )
+    })?;
+    match parsed {
+        Value::Object(map) => Ok(map),
+        other => Err(unexpected(
+            format!(
+                "{NINJAONE_SERVERS_KEY} must be a JSON object mapping aliases to servers, not a \
+                 {}.",
+                json_type_name(&other)
+            ),
+            None,
+        )),
+    }
+}
+
+/// Read one string field of a server entry, rejecting a non-string with the
+/// same "refuses to coerce" rule [`read_vendor_string`] applies to config
+/// keys. Blank reads as absent.
+fn entry_string<'a>(
+    entry: &'a serde_json::Map<String, Value>,
+    entry_alias: &str,
+    field: &str,
+) -> Result<Option<&'a str>, McpError> {
+    match entry.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value.trim()).filter(|value| !value.is_empty())),
+        Some(other) => Err(unexpected(
+            format!(
+                "`{field}` in {NINJAONE_SERVERS_KEY} entry `{entry_alias}` is a JSON {} value; \
+                 migrate refuses to coerce. Quote it as a string first.",
+                json_type_name(other)
+            ),
+            None,
+        )),
+    }
+}
+
+/// Reject two config sites that would file different secrets under the same
+/// account.
+///
+/// A keychain slot holds one value per (kind, vendor, principal), so the
+/// second write would silently overwrite the first — or, with an existing
+/// entry, surface as a "config looks stale" conflict that names neither
+/// culprit. Catching it while planning is the only point where both sites can
+/// still be named.
+fn reject_principal_conflicts(planned: &[PlannedAction]) -> Result<(), McpError> {
+    for (index, plan) in planned.iter().enumerate() {
+        if plan.action != PlannedKind::WriteFromPlaintext {
+            continue;
+        }
+        for other in &planned[index + 1..] {
+            if other.action == PlannedKind::WriteFromPlaintext
+                && other.kind == plan.kind
+                && other.vendor == plan.vendor
+                && other.principal == plan.principal
+                && other.value != plan.value
+            {
+                return Err(unexpected(
+                    format!(
+                        "{} and {} set a different {} for vendor {} principal {} ({} vs {}). \
+                         The keychain holds one value per account, so reconcile them before \
+                         migrating.",
+                        plan.site.describe(),
+                        other.site.describe(),
+                        plan.kind,
+                        plan.vendor,
+                        plan.principal,
+                        fingerprint(&plan.value),
+                        fingerprint(&other.value),
+                    ),
+                    None,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn json_type_name(v: &Value) -> &'static str {
@@ -876,6 +1092,51 @@ fn rewrite_vendor_aliases_to_sentinel(json: &mut Value, secret_key: &str, alias_
                 Value::String("keychain".to_string()),
             );
         }
+    }
+}
+
+/// Replace one field of one `NINJAONE_SERVERS` entry with the sentinel, in
+/// every config section that carries that map.
+///
+/// The map is JSON encoded as a string, so this parses, edits, and re-encodes
+/// it — which normalises that string's internal whitespace and escaping. It
+/// therefore writes back only when a field actually changed, so a run that
+/// migrates nothing leaves the file byte-identical.
+fn rewrite_server_entry_to_sentinel(
+    json: &mut Value,
+    alias_list: &[String],
+    entry_alias: &str,
+    field: &str,
+) {
+    let Some(root) = json.as_object_mut() else {
+        return;
+    };
+    for alias in alias_list {
+        let Some(env) = root
+            .get_mut(alias)
+            .and_then(|section| section.get_mut("environments"))
+            .and_then(Value::as_object_mut)
+        else {
+            continue;
+        };
+        let Some(Value::String(raw)) = env.get(NINJAONE_SERVERS_KEY) else {
+            continue;
+        };
+        let Ok(mut servers) = serde_json::from_str::<Value>(raw) else {
+            continue;
+        };
+        let Some(entry) = servers.get_mut(entry_alias).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        match entry.get(field) {
+            Some(Value::String(value)) if !value.trim().is_empty() && value != "keychain" => {}
+            _ => continue,
+        }
+        entry.insert(field.to_owned(), Value::String("keychain".to_owned()));
+        let Ok(encoded) = serde_json::to_string(&servers) else {
+            continue;
+        };
+        env.insert(NINJAONE_SERVERS_KEY.to_owned(), Value::String(encoded));
     }
 }
 

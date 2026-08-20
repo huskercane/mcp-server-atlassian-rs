@@ -83,6 +83,13 @@ const fn owned(
 /// per-environment passwords inside, not a single secret, so it does not fit a
 /// one-string slot — storing the whole blob would put hostnames and usernames
 /// in the keychain too and make editing it a round-trip through `creds set`.
+///
+/// Absent for a different reason: the `password` and `totpSecret` fields of a
+/// `NINJAONE_SERVERS` entry. Those *are* keychain-backed, each under its
+/// entry's own `email`, but a row here names a config key and they are
+/// addressed by a path into a nested document. The two places that need to
+/// know handle them explicitly — [`crate::vendor::ninjaone`] resolves them at
+/// login, and `cli::creds` migrates them.
 pub const VENDOR_SECRETS: &[VendorSecret] = &[
     // Atlassian: one API token per product, plus Bitbucket's app password.
     owned(
