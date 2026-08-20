@@ -65,17 +65,17 @@ fn normalize_path_only_ensures_leading_slash() {
     );
 }
 
-#[test]
-fn token_reads_from_edx_config() {
+#[tokio::test]
+async fn token_reads_from_edx_config() {
     let mut m = HashMap::new();
     m.insert("EDX_ACCESS_TOKEN".to_string(), "tok-edx".to_string());
     let config = Config::from_map(m);
-    assert_eq!(EdxVendor::new().token(&config).unwrap(), "tok-edx");
+    assert_eq!(EdxVendor::new().token(&config).await.unwrap(), "tok-edx");
 }
 
-#[test]
-fn token_missing_is_auth_missing() {
-    let err = EdxVendor::new().token(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn token_missing_is_auth_missing() {
+    let err = EdxVendor::new().token(&empty_config()).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("EDX_ACCESS_TOKEN"));
 }

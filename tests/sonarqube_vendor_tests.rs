@@ -99,23 +99,29 @@ fn normalize_path_prepends_missing_leading_slash() {
 
 // ---- token lookup ----
 
-#[test]
-fn token_reads_from_sonarqube_config_section() {
+#[tokio::test]
+async fn token_reads_from_sonarqube_config_section() {
     let config = config_with(&[("SONARQUBE_TOKEN", "squ_abc")]);
-    assert_eq!(SonarqubeVendor::new().token(&config).unwrap(), "squ_abc");
+    assert_eq!(
+        SonarqubeVendor::new().token(&config).await.unwrap(),
+        "squ_abc"
+    );
 }
 
-#[test]
-fn token_missing_is_auth_missing_error() {
-    let err = SonarqubeVendor::new().token(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn token_missing_is_auth_missing_error() {
+    let err = SonarqubeVendor::new()
+        .token(&empty_config())
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("SONARQUBE_TOKEN"));
 }
 
-#[test]
-fn token_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn token_blank_is_treated_as_missing() {
     let config = config_with(&[("SONARQUBE_TOKEN", "   ")]);
-    let err = SonarqubeVendor::new().token(&config).unwrap_err();
+    let err = SonarqubeVendor::new().token(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

@@ -61,27 +61,27 @@ fn normalize_path_prepends_missing_leading_slash() {
 
 // ---- key lookup ----
 
-#[test]
-fn key_reads_from_postman_config_section() {
+#[tokio::test]
+async fn key_reads_from_postman_config_section() {
     let mut m = HashMap::new();
     m.insert("POSTMAN_API_KEY".to_string(), "PMAK-abc".to_string());
     let config = Config::from_map(m);
-    assert_eq!(PostmanVendor::new().key(&config).unwrap(), "PMAK-abc");
+    assert_eq!(PostmanVendor::new().key(&config).await.unwrap(), "PMAK-abc");
 }
 
-#[test]
-fn key_missing_is_auth_missing_error() {
-    let err = PostmanVendor::new().key(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn key_missing_is_auth_missing_error() {
+    let err = PostmanVendor::new().key(&empty_config()).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("POSTMAN_API_KEY"));
 }
 
-#[test]
-fn key_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn key_blank_is_treated_as_missing() {
     let mut m = HashMap::new();
     m.insert("POSTMAN_API_KEY".to_string(), "   ".to_string());
     let config = Config::from_map(m);
-    let err = PostmanVendor::new().key(&config).unwrap_err();
+    let err = PostmanVendor::new().key(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

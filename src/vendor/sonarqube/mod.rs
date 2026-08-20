@@ -74,12 +74,9 @@ impl SonarqubeVendor {
     /// SonarQube credential entry point — the shared Atlassian resolver is never
     /// consulted. Errors with a clear, actionable message at tool-call time when
     /// the token is absent.
-    pub fn token(&self, config: &Config) -> Result<String, McpError> {
-        config
-            .get_for(VENDOR_SONARQUBE, "SONARQUBE_TOKEN")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+    pub async fn token(&self, config: &Config) -> Result<String, McpError> {
+        crate::auth::vendor_secret(config, VENDOR_SONARQUBE, "SONARQUBE_TOKEN")
+            .await?
             .ok_or_else(|| {
                 auth_missing(
                     "SONARQUBE_TOKEN is required for sonarqube_* tools. Set a SonarQube \

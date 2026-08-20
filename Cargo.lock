@@ -1652,6 +1652,7 @@ dependencies = [
  "dirs",
  "dotenvy",
  "futures",
+ "hmac 0.12.1",
  "jmespath",
  "keyring",
  "pretty_assertions",
@@ -1666,6 +1667,8 @@ dependencies = [
  "serde",
  "serde_json",
  "serial_test",
+ "sha1",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-postgres",
@@ -2683,6 +2686,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.3",
+]
+
+[[package]]
+name = "sha1"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3bf829a2d51ab4a5ddf1352d8470c140cadc8301b2ae1789db023f01cedd6ba"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.2.17",
+ "digest 0.10.7",
 ]
 
 [[package]]

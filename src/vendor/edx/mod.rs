@@ -38,12 +38,9 @@ impl EdxVendor {
         }
     }
 
-    pub fn token(&self, config: &Config) -> Result<String, McpError> {
-        config
-            .get_for(VENDOR_EDX, "EDX_ACCESS_TOKEN")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+    pub async fn token(&self, config: &Config) -> Result<String, McpError> {
+        crate::auth::vendor_secret(config, VENDOR_EDX, "EDX_ACCESS_TOKEN")
+            .await?
             .ok_or_else(|| {
                 auth_missing(
                     "EDX_ACCESS_TOKEN is required for edx_discussion_* tools. Set an edX \

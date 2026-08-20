@@ -65,27 +65,27 @@ fn normalize_path_prepends_missing_leading_slash() {
 
 // ---- token lookup ----
 
-#[test]
-fn token_reads_from_slack_config_section() {
+#[tokio::test]
+async fn token_reads_from_slack_config_section() {
     let mut m = HashMap::new();
     m.insert("SLACK_TOKEN".to_string(), "xoxb-abc".to_string());
     let config = Config::from_map(m);
-    assert_eq!(SlackVendor::new().token(&config).unwrap(), "xoxb-abc");
+    assert_eq!(SlackVendor::new().token(&config).await.unwrap(), "xoxb-abc");
 }
 
-#[test]
-fn token_missing_is_auth_missing_error() {
-    let err = SlackVendor::new().token(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn token_missing_is_auth_missing_error() {
+    let err = SlackVendor::new().token(&empty_config()).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("SLACK_TOKEN"));
 }
 
-#[test]
-fn token_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn token_blank_is_treated_as_missing() {
     let mut m = HashMap::new();
     m.insert("SLACK_TOKEN".to_string(), "   ".to_string());
     let config = Config::from_map(m);
-    let err = SlackVendor::new().token(&config).unwrap_err();
+    let err = SlackVendor::new().token(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

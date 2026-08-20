@@ -26,7 +26,9 @@
 
 pub mod args;
 
-use std::sync::Arc;
+use std::path::PathBuf;
+use std::sync::{Arc, RwLock, Weak};
+use std::time::Duration;
 
 use reqwest::Client;
 use rmcp::{
@@ -78,7 +80,7 @@ use args::{
     CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
     EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
+    NinjaOneLoginArgs, NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
     SonarqubeSearchIssuesArgs, SplunkCreateJobArgs, SplunkJobResultsArgs,
     SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
 };
@@ -97,7 +99,7 @@ pub struct AtlassianServer {
 
 struct ServerState {
     client: Client,
-    config: Config,
+    config: RwLock<Config>,
     bitbucket_vendor: BitbucketVendor,
     jira_vendor: JiraVendor,
     confluence_vendor: ConfluenceVendor,
@@ -131,9 +133,17 @@ impl AtlassianServer {
     /// `JiraVendor` defers `ATLASSIAN_SITE_NAME` lookup to per-request
     /// time, so a Bitbucket-only deployment boots without Jira config.
     pub fn new() -> Result<Self, crate::error::McpError> {
+        // Snapshot the file before loading it so a change racing startup is
+        // still observed by the watcher after the server is constructed.
+        let watched_config = crate::config::global::default_path()
+            .filter(|path| path.exists())
+            .map(|path| {
+                let contents = std::fs::read(&path).ok();
+                (path, contents)
+            });
         let config = crate::config::load();
         let client = build_client()?;
-        Ok(Self::with_components(
+        let server = Self::with_components(
             config,
             client,
             BitbucketVendor::new(),
@@ -149,7 +159,11 @@ impl AtlassianServer {
             SonarqubeVendor::new(),
             SplunkVendor::new(),
             NinjaOneVendor::new(),
-        ))
+        );
+        if let Some((path, contents)) = watched_config {
+            spawn_config_watcher(&server.state, path, contents);
+        }
+        Ok(server)
     }
 
     /// Build a server from caller-supplied components. Useful when tests or
@@ -180,7 +194,7 @@ impl AtlassianServer {
         Self {
             state: Arc::new(ServerState {
                 client,
-                config,
+                config: RwLock::new(config),
                 bitbucket_vendor,
                 jira_vendor,
                 confluence_vendor,
@@ -227,152 +241,164 @@ impl AtlassianServer {
         router
     }
 
-    fn bitbucket_ctx(&self) -> HandleContext<'_> {
-        HandleContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.bitbucket_vendor,
-        )
+    fn config(&self) -> Config {
+        self.state
+            .config
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn bitbucket_ctx<'a>(&'a self, config: &'a Config) -> HandleContext<'a> {
+        HandleContext::new(&self.state.client, config, &self.state.bitbucket_vendor)
     }
 
     /// Bitbucket-only typed context for `bb_clone` and any future
     /// Bitbucket-specific operation. Carries the workspace cache so
     /// `resolve_default_workspace` lookups stay scoped to this server
     /// instance.
-    fn bitbucket_typed_ctx(&self) -> BitbucketContext<'_> {
+    fn bitbucket_typed_ctx<'a>(&'a self, config: &'a Config) -> BitbucketContext<'a> {
         BitbucketContext::new(
             &self.state.client,
-            &self.state.config,
+            config,
             &self.state.bitbucket_vendor,
             &self.state.workspace_cache,
         )
     }
 
-    fn jira_ctx(&self) -> HandleContext<'_> {
-        HandleContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.jira_vendor,
-        )
+    fn jira_ctx<'a>(&'a self, config: &'a Config) -> HandleContext<'a> {
+        HandleContext::new(&self.state.client, config, &self.state.jira_vendor)
     }
 
-    fn confluence_ctx(&self) -> HandleContext<'_> {
-        HandleContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.confluence_vendor,
-        )
+    fn confluence_ctx<'a>(&'a self, config: &'a Config) -> HandleContext<'a> {
+        HandleContext::new(&self.state.client, config, &self.state.confluence_vendor)
     }
 
     /// Zoom-specific context. Unlike the Atlassian vendors, Zoom carries its
     /// own credential lifecycle (Server-to-Server OAuth bearer), so it uses a
     /// dedicated [`ZoomContext`] rather than the vendor-neutral
     /// [`HandleContext`].
-    fn zoom_ctx(&self) -> ZoomContext<'_> {
-        ZoomContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.zoom_vendor,
-        )
+    fn zoom_ctx<'a>(&'a self, config: &'a Config) -> ZoomContext<'a> {
+        ZoomContext::new(&self.state.client, config, &self.state.zoom_vendor)
     }
 
     /// CircleCI-specific context. Like Zoom, CircleCI carries its own
     /// credential lookup (a static Bearer token from config), so it uses a
     /// dedicated [`CircleCiContext`] rather than the vendor-neutral
     /// [`HandleContext`].
-    fn circleci_ctx(&self) -> CircleCiContext<'_> {
-        CircleCiContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.circleci_vendor,
-        )
+    fn circleci_ctx<'a>(&'a self, config: &'a Config) -> CircleCiContext<'a> {
+        CircleCiContext::new(&self.state.client, config, &self.state.circleci_vendor)
     }
 
     /// Slack-specific context. Like CircleCI, Slack carries its own credential
     /// lookup (a static OAuth token from config), so it uses a dedicated
     /// [`SlackContext`] rather than the vendor-neutral [`HandleContext`].
-    fn slack_ctx(&self) -> SlackContext<'_> {
-        SlackContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.slack_vendor,
-        )
+    fn slack_ctx<'a>(&'a self, config: &'a Config) -> SlackContext<'a> {
+        SlackContext::new(&self.state.client, config, &self.state.slack_vendor)
     }
 
     /// Postman-specific context. Carries its own credential lookup (a static
     /// API key from config) and is the one vendor that authenticates via a
     /// custom `X-API-Key` header, so it uses a dedicated [`PostmanContext`].
-    fn postman_ctx(&self) -> PostmanContext<'_> {
-        PostmanContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.postman_vendor,
-        )
+    fn postman_ctx<'a>(&'a self, config: &'a Config) -> PostmanContext<'a> {
+        PostmanContext::new(&self.state.client, config, &self.state.postman_vendor)
     }
 
-    fn edx_ctx(&self) -> EdxContext<'_> {
-        EdxContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.edx_vendor,
-        )
+    fn edx_ctx<'a>(&'a self, config: &'a Config) -> EdxContext<'a> {
+        EdxContext::new(&self.state.client, config, &self.state.edx_vendor)
     }
 
     /// New Relic-specific context. Carries its own credential lookup (a static
     /// User API key from config) and authenticates via the custom `API-Key`
     /// header, so it uses a dedicated [`NewRelicContext`].
-    fn newrelic_ctx(&self) -> NewRelicContext<'_> {
-        NewRelicContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.newrelic_vendor,
-        )
+    fn newrelic_ctx<'a>(&'a self, config: &'a Config) -> NewRelicContext<'a> {
+        NewRelicContext::new(&self.state.client, config, &self.state.newrelic_vendor)
     }
 
     /// Grafana-specific context. Carries its own credential lookup (a static
     /// service-account token from config) and authenticates via
     /// `Authorization: Bearer`, so it uses a dedicated [`GrafanaContext`].
-    fn grafana_ctx(&self) -> GrafanaContext<'_> {
-        GrafanaContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.grafana_vendor,
-        )
+    fn grafana_ctx<'a>(&'a self, config: &'a Config) -> GrafanaContext<'a> {
+        GrafanaContext::new(&self.state.client, config, &self.state.grafana_vendor)
     }
 
     /// SonarQube-specific context. Like CircleCI/Grafana, Sonar carries its own
     /// credential lookup (a static user token from config) and authenticates via
     /// `Authorization: Bearer`, so it uses a dedicated [`SonarqubeContext`].
-    fn sonarqube_ctx(&self) -> SonarqubeContext<'_> {
-        SonarqubeContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.sonarqube_vendor,
-        )
+    fn sonarqube_ctx<'a>(&'a self, config: &'a Config) -> SonarqubeContext<'a> {
+        SonarqubeContext::new(&self.state.client, config, &self.state.sonarqube_vendor)
     }
 
-    fn splunk_ctx(&self) -> SplunkContext<'_> {
-        SplunkContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.splunk_vendor,
-        )
+    fn splunk_ctx<'a>(&'a self, config: &'a Config) -> SplunkContext<'a> {
+        SplunkContext::new(&self.state.client, config, &self.state.splunk_vendor)
     }
 
-    fn ninjaone_ctx(&self) -> NinjaOneContext<'_> {
-        NinjaOneContext::new(
-            &self.state.client,
-            &self.state.config,
-            &self.state.ninjaone_vendor,
-        )
+    fn ninjaone_ctx<'a>(&'a self, config: &'a Config) -> NinjaOneContext<'a> {
+        NinjaOneContext::new(&self.state.client, config, &self.state.ninjaone_vendor)
     }
 
     /// WRDS-specific context. WRDS is PostgreSQL, not HTTP, so this context
     /// carries no `reqwest::Client` — just config and the Postgres vendor.
     #[cfg(feature = "wrds")]
-    fn wrds_ctx(&self) -> WrdsContext<'_> {
-        WrdsContext::new(&self.state.config, &self.state.wrds_vendor)
+    fn wrds_ctx<'a>(&'a self, config: &'a Config) -> WrdsContext<'a> {
+        WrdsContext::new(config, &self.state.wrds_vendor)
     }
+}
+
+const CONFIG_WATCH_INTERVAL: Duration = Duration::from_millis(500);
+
+fn spawn_config_watcher(
+    state: &Arc<ServerState>,
+    path: PathBuf,
+    mut last_contents: Option<Vec<u8>>,
+) {
+    let state: Weak<ServerState> = Arc::downgrade(state);
+    let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+        tracing::warn!(path = %path.display(), "global config watcher requires a Tokio runtime");
+        return;
+    };
+    runtime.spawn(async move {
+        let mut interval = tokio::time::interval(CONFIG_WATCH_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // `interval` ticks immediately; the first comparison also closes the
+        // startup race between the initial snapshot and Config::load().
+        loop {
+            interval.tick().await;
+            let Some(state) = state.upgrade() else {
+                return;
+            };
+            let contents = match tokio::fs::read(&path).await {
+                Ok(contents) => Some(contents),
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+                Err(err) => {
+                    tracing::warn!(path = %path.display(), error = %err, "failed to watch global config");
+                    continue;
+                }
+            };
+            if contents == last_contents {
+                continue;
+            }
+            last_contents = contents;
+
+            // An editor may expose a partially-written file briefly. Keep the
+            // last known-good snapshot and retry when the bytes change again.
+            if path.exists()
+                && let Err(err) =
+                    crate::config::global::read_all_vendors(&path, crate::constants::PACKAGE_NAME)
+            {
+                tracing::warn!(path = %path.display(), error = %err, "global config changed but is not valid JSON; keeping previous config");
+                continue;
+            }
+
+            let config = crate::config::load_from_global_path(Some(&path));
+            *state
+                .config
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = config;
+            state.workspace_cache.clear();
+            tracing::info!(path = %path.display(), "reloaded global config");
+        }
+    });
 }
 
 // ============================================================================
@@ -1207,6 +1233,20 @@ impl AtlassianServer {
 
 #[tool_router(router = ninjaone_router)]
 impl AtlassianServer {
+    #[doc = include_str!("descriptions/ninjaone_login.md")]
+    #[tool(annotations(
+        read_only_hint = false,
+        destructive_hint = false,
+        idempotent_hint = false,
+        open_world_hint = true,
+    ))]
+    async fn ninjaone_login(
+        &self,
+        Parameters(args): Parameters<NinjaOneLoginArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        Ok(run_ninjaone_login(self, &args).await)
+    }
+
     #[doc = include_str!("descriptions/ninjaone_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1379,7 +1419,8 @@ async fn run_read_bb(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match handle_read(&server.bitbucket_ctx(), method, args).await {
+    let config = server.config();
+    match handle_read(&server.bitbucket_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1393,7 +1434,8 @@ async fn run_write_bb(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match handle_write(&server.bitbucket_ctx(), method, args).await {
+    let config = server.config();
+    match handle_write(&server.bitbucket_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1407,7 +1449,8 @@ async fn run_read_jira(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match handle_read(&server.jira_ctx(), method, args).await {
+    let config = server.config();
+    match handle_read(&server.jira_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1421,7 +1464,8 @@ async fn run_write_jira(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match handle_write(&server.jira_ctx(), method, args).await {
+    let config = server.config();
+    match handle_write(&server.jira_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1435,7 +1479,8 @@ async fn run_read_confluence(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match handle_read(&server.confluence_ctx(), method, args).await {
+    let config = server.config();
+    match handle_read(&server.confluence_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1449,7 +1494,8 @@ async fn run_write_confluence(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match handle_write(&server.confluence_ctx(), method, args).await {
+    let config = server.config();
+    match handle_write(&server.confluence_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1463,7 +1509,8 @@ async fn run_read_zoom(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match crate::controllers::zoom::handle_read(&server.zoom_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::zoom::handle_read(&server.zoom_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1477,7 +1524,8 @@ async fn run_write_zoom(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match crate::controllers::zoom::handle_write(&server.zoom_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::zoom::handle_write(&server.zoom_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1491,7 +1539,10 @@ async fn run_read_circleci(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match crate::controllers::circleci::handle_read(&server.circleci_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::circleci::handle_read(&server.circleci_ctx(&config), method, args)
+        .await
+    {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1505,7 +1556,10 @@ async fn run_write_circleci(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match crate::controllers::circleci::handle_write(&server.circleci_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::circleci::handle_write(&server.circleci_ctx(&config), method, args)
+        .await
+    {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1515,7 +1569,8 @@ async fn run_write_circleci(
 }
 
 async fn run_circleci_logs(server: &AtlassianServer, args: &CircleCiLogsArgs) -> CallToolResult {
-    match crate::controllers::circleci::handle_logs(&server.circleci_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::circleci::handle_logs(&server.circleci_ctx(&config), args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1529,7 +1584,8 @@ async fn run_read_slack(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match crate::controllers::slack::handle_read(&server.slack_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::slack::handle_read(&server.slack_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1543,7 +1599,8 @@ async fn run_write_slack(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match crate::controllers::slack::handle_write(&server.slack_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::slack::handle_write(&server.slack_ctx(&config), method, args).await {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1557,7 +1614,9 @@ async fn run_read_postman(
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
-    match crate::controllers::postman::handle_read(&server.postman_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::postman::handle_read(&server.postman_ctx(&config), method, args).await
+    {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
@@ -1571,11 +1630,22 @@ async fn run_write_postman(
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
-    match crate::controllers::postman::handle_write(&server.postman_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::postman::handle_write(&server.postman_ctx(&config), method, args)
+        .await
+    {
         Ok(resp) => {
             let text = truncate_for_ai(&resp.content, resp.raw_response_path.as_deref());
             CallToolResult::success(vec![Content::text(text)])
         }
+        Err(err) => error_to_result(&err),
+    }
+}
+
+async fn run_ninjaone_login(server: &AtlassianServer, args: &NinjaOneLoginArgs) -> CallToolResult {
+    let config = server.config();
+    match crate::controllers::ninjaone::login(&server.ninjaone_ctx(&config), args).await {
+        Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
@@ -1585,7 +1655,10 @@ async fn run_read_ninjaone(
     method: HttpMethod,
     args: &NinjaOneReadArgs,
 ) -> CallToolResult {
-    match crate::controllers::ninjaone::handle_read(&server.ninjaone_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::ninjaone::handle_read(&server.ninjaone_ctx(&config), method, args)
+        .await
+    {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1596,14 +1669,18 @@ async fn run_write_ninjaone(
     method: HttpMethod,
     args: &NinjaOneWriteArgs,
 ) -> CallToolResult {
-    match crate::controllers::ninjaone::handle_write(&server.ninjaone_ctx(), method, args).await {
+    let config = server.config();
+    match crate::controllers::ninjaone::handle_write(&server.ninjaone_ctx(&config), method, args)
+        .await
+    {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
 async fn run_newrelic_query(server: &AtlassianServer, args: &NewRelicQueryArgs) -> CallToolResult {
-    match crate::controllers::newrelic::query(&server.newrelic_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::newrelic::query(&server.newrelic_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1613,7 +1690,8 @@ async fn run_grafana_query_logs(
     server: &AtlassianServer,
     args: &GrafanaQueryLogsArgs,
 ) -> CallToolResult {
-    match crate::controllers::grafana::query_logs(&server.grafana_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::grafana::query_logs(&server.grafana_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1623,7 +1701,8 @@ async fn run_grafana_list_datasources(
     server: &AtlassianServer,
     args: &GrafanaListDatasourcesArgs,
 ) -> CallToolResult {
-    match crate::controllers::grafana::list_datasources(&server.grafana_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::grafana::list_datasources(&server.grafana_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1633,7 +1712,8 @@ async fn run_sonarqube_quality_gate(
     server: &AtlassianServer,
     args: &SonarqubeQualityGateArgs,
 ) -> CallToolResult {
-    match crate::controllers::sonarqube::quality_gate(&server.sonarqube_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::sonarqube::quality_gate(&server.sonarqube_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1643,21 +1723,24 @@ async fn run_sonarqube_search_issues(
     server: &AtlassianServer,
     args: &SonarqubeSearchIssuesArgs,
 ) -> CallToolResult {
-    match crate::controllers::sonarqube::search_issues(&server.sonarqube_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::sonarqube::search_issues(&server.sonarqube_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
 async fn run_sonarqube_get(server: &AtlassianServer, args: &ReadArgs) -> CallToolResult {
-    match crate::controllers::sonarqube::get(&server.sonarqube_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::sonarqube::get(&server.sonarqube_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
 async fn run_splunk_search(server: &AtlassianServer, args: &SplunkSearchArgs) -> CallToolResult {
-    match crate::controllers::splunk::search(&server.splunk_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::splunk::search(&server.splunk_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1667,7 +1750,8 @@ async fn run_splunk_create_job(
     server: &AtlassianServer,
     args: &SplunkCreateJobArgs,
 ) -> CallToolResult {
-    match crate::controllers::splunk::create_job(&server.splunk_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::splunk::create_job(&server.splunk_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1677,7 +1761,8 @@ async fn run_splunk_job_results(
     server: &AtlassianServer,
     args: &SplunkJobResultsArgs,
 ) -> CallToolResult {
-    match crate::controllers::splunk::job_results(&server.splunk_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::splunk::job_results(&server.splunk_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1687,7 +1772,8 @@ async fn run_splunk_list_saved_searches(
     server: &AtlassianServer,
     args: &SplunkListSavedSearchesArgs,
 ) -> CallToolResult {
-    match crate::controllers::splunk::list_saved_searches(&server.splunk_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::splunk::list_saved_searches(&server.splunk_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1695,7 +1781,8 @@ async fn run_splunk_list_saved_searches(
 
 #[cfg(feature = "wrds")]
 async fn run_wrds_query(server: &AtlassianServer, args: &WrdsQueryArgs) -> CallToolResult {
-    match crate::controllers::wrds::query(&server.wrds_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::wrds::query(&server.wrds_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1706,7 +1793,8 @@ async fn run_wrds_list_libraries(
     server: &AtlassianServer,
     args: &WrdsListLibrariesArgs,
 ) -> CallToolResult {
-    match crate::controllers::wrds::list_libraries(&server.wrds_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::wrds::list_libraries(&server.wrds_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1717,7 +1805,8 @@ async fn run_wrds_list_tables(
     server: &AtlassianServer,
     args: &WrdsListTablesArgs,
 ) -> CallToolResult {
-    match crate::controllers::wrds::list_tables(&server.wrds_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::wrds::list_tables(&server.wrds_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1728,7 +1817,8 @@ async fn run_wrds_describe_table(
     server: &AtlassianServer,
     args: &WrdsDescribeTableArgs,
 ) -> CallToolResult {
-    match crate::controllers::wrds::describe_table(&server.wrds_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::wrds::describe_table(&server.wrds_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1738,7 +1828,8 @@ async fn run_edx_discussion_course(
     server: &AtlassianServer,
     args: &EdxDiscussionCourseArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::course(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::course(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1748,7 +1839,8 @@ async fn run_edx_discussion_topics(
     server: &AtlassianServer,
     args: &EdxDiscussionTopicsArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::topics(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::topics(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1758,7 +1850,8 @@ async fn run_edx_discussion_threads(
     server: &AtlassianServer,
     args: &EdxDiscussionThreadsArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::threads(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::threads(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1768,7 +1861,8 @@ async fn run_edx_discussion_thread_create(
     server: &AtlassianServer,
     args: &EdxDiscussionThreadCreateArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::create_thread(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::create_thread(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1778,7 +1872,8 @@ async fn run_edx_discussion_comments(
     server: &AtlassianServer,
     args: &EdxDiscussionCommentsArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::comments(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::comments(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1788,14 +1883,16 @@ async fn run_edx_discussion_comment_create(
     server: &AtlassianServer,
     args: &EdxDiscussionCommentCreateArgs,
 ) -> CallToolResult {
-    match crate::controllers::edx::create_comment(&server.edx_ctx(), args).await {
+    let config = server.config();
+    match crate::controllers::edx::create_comment(&server.edx_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
 }
 
 async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
-    match handle_clone(&server.bitbucket_typed_ctx(), args).await {
+    let config = server.config();
+    match handle_clone(&server.bitbucket_typed_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
         Err(err) => error_to_result(&err),
     }
@@ -1814,4 +1911,73 @@ fn error_to_result(err: &crate::error::McpError) -> CallToolResult {
         .next()
         .map_or_else(String::new, |c| c.text);
     CallToolResult::error(vec![Content::text(text)])
+}
+
+#[cfg(test)]
+mod live_config_tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::config::VENDOR_BITBUCKET;
+
+    fn server_with_config(config: Config) -> AtlassianServer {
+        AtlassianServer::with_components(
+            config,
+            build_client().unwrap(),
+            BitbucketVendor::new(),
+            JiraVendor::new(),
+            ConfluenceVendor::new(),
+            ZoomVendor::new(),
+            CircleCiVendor::new(),
+            SlackVendor::new(),
+            PostmanVendor::new(),
+            EdxVendor::new(),
+            NewRelicVendor::new(),
+            GrafanaVendor::new(),
+            SonarqubeVendor::new(),
+            SplunkVendor::new(),
+            NinjaOneVendor::new(),
+        )
+    }
+
+    fn config_json(workspace: &str) -> String {
+        format!(r#"{{"bitbucket":{{"environments":{{"LIVE_RELOAD_TEST_VALUE":"{workspace}"}}}}}}"#)
+    }
+
+    #[tokio::test]
+    async fn reloads_changed_global_config_and_keeps_last_good_json() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configs.json");
+        std::fs::write(&path, config_json("before")).unwrap();
+
+        let initial = Config::load_from_sources(Some(&path), None, &HashMap::new());
+        let server = server_with_config(initial);
+        let initial_contents = std::fs::read(&path).ok();
+        spawn_config_watcher(&server.state, path.clone(), initial_contents);
+
+        std::fs::write(&path, "{").unwrap();
+        tokio::time::sleep(CONFIG_WATCH_INTERVAL * 2).await;
+        assert_eq!(
+            server
+                .config()
+                .get_for(VENDOR_BITBUCKET, "LIVE_RELOAD_TEST_VALUE"),
+            Some("before")
+        );
+
+        std::fs::write(&path, config_json("after")).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if server
+                    .config()
+                    .get_for(VENDOR_BITBUCKET, "LIVE_RELOAD_TEST_VALUE")
+                    == Some("after")
+                {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("watcher did not load the changed config");
+    }
 }

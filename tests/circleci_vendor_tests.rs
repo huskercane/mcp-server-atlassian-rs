@@ -74,27 +74,33 @@ fn normalize_path_does_not_prepend_api_version() {
 
 // ---- token lookup ----
 
-#[test]
-fn token_reads_from_circleci_config_section() {
+#[tokio::test]
+async fn token_reads_from_circleci_config_section() {
     let mut m = HashMap::new();
     m.insert("CIRCLECI_TOKEN".to_string(), "tok-abc".to_string());
     let config = Config::from_map(m);
-    assert_eq!(CircleCiVendor::new().token(&config).unwrap(), "tok-abc");
+    assert_eq!(
+        CircleCiVendor::new().token(&config).await.unwrap(),
+        "tok-abc"
+    );
 }
 
-#[test]
-fn token_missing_is_auth_missing_error() {
-    let err = CircleCiVendor::new().token(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn token_missing_is_auth_missing_error() {
+    let err = CircleCiVendor::new()
+        .token(&empty_config())
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("CIRCLECI_TOKEN"));
 }
 
-#[test]
-fn token_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn token_blank_is_treated_as_missing() {
     let mut m = HashMap::new();
     m.insert("CIRCLECI_TOKEN".to_string(), "   ".to_string());
     let config = Config::from_map(m);
-    let err = CircleCiVendor::new().token(&config).unwrap_err();
+    let err = CircleCiVendor::new().token(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

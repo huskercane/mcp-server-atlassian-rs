@@ -157,8 +157,15 @@ pub enum Resolved<'a> {
 /// read the filesystem (global config + `.env`) and `std::env`. It is
 /// intentionally side-effect free.
 pub fn load() -> Config {
+    load_from_global_path(global::default_path().as_deref())
+}
+
+/// Build the standard cascade with an explicitly selected global config.
+/// Kept crate-private for the live-config watcher, which must continue to
+/// track the exact path selected at server startup.
+pub(crate) fn load_from_global_path(global_path: Option<&Path>) -> Config {
     Config::load_from_sources(
-        global::default_path().as_deref(),
+        global_path,
         Some(Path::new(".env")),
         &env_map_from_process(),
     )

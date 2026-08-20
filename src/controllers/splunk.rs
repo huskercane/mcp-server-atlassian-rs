@@ -41,7 +41,7 @@ pub async fn search(
     ctx: &SplunkContext<'_>,
     args: &SplunkSearchArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let creds = credentials(ctx)?;
+    let creds = credentials(ctx).await?;
     let mut form = search_form(
         &args.search,
         args.earliest_time.as_deref(),
@@ -69,7 +69,7 @@ pub async fn create_job(
     ctx: &SplunkContext<'_>,
     args: &SplunkCreateJobArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let creds = credentials(ctx)?;
+    let creds = credentials(ctx).await?;
     let mut form = search_form(
         &args.search,
         args.earliest_time.as_deref(),
@@ -101,7 +101,7 @@ pub async fn job_results(
     args: &SplunkJobResultsArgs,
 ) -> Result<ControllerResponse, McpError> {
     validate_path_segment(&args.sid, "sid")?;
-    let creds = credentials(ctx)?;
+    let creds = credentials(ctx).await?;
     let mut query = QueryParams::new();
     query.insert("output_mode".into(), "json_rows".into());
     if let Some(count) = args.count {
@@ -131,7 +131,7 @@ pub async fn list_saved_searches(
     ctx: &SplunkContext<'_>,
     args: &SplunkListSavedSearchesArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let creds = credentials(ctx)?;
+    let creds = credentials(ctx).await?;
     let mut query = QueryParams::new();
     query.insert("output_mode".into(), "json".into());
     if let Some(search) = &args.search {
@@ -159,8 +159,8 @@ pub async fn list_saved_searches(
     .await
 }
 
-fn credentials(ctx: &SplunkContext<'_>) -> Result<Credentials, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+async fn credentials(ctx: &SplunkContext<'_>) -> Result<Credentials, McpError> {
+    let token = ctx.vendor.token(ctx.config).await?;
     let scheme = ctx.vendor.auth_scheme(ctx.config);
     Ok(Credentials::ApiKeyHeader {
         header_name: AUTHORIZATION.as_str().to_owned(),

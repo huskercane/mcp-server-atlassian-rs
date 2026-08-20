@@ -116,3 +116,17 @@ fn missing_auth_is_actionable() {
     assert_eq!(error.kind, ErrorKind::AuthMissing);
     assert!(error.message.contains("NINJAONE_ACCESS_TOKEN"));
 }
+
+/// The private `/ws/...` endpoints answer an unauthenticated call with the
+/// `{"resultCode","errorMessage"}` envelope, not the `{"message"}` shape the
+/// public API uses. Surfacing `errorMessage` is what turns a bare
+/// "Unauthorized" into a diagnosable "Missing or empty sessionKey."
+#[test]
+fn console_error_envelope_surfaces_error_message() {
+    let error = mcp_server_atlassian::vendor::ninjaone::error::classify(
+        reqwest::StatusCode::UNAUTHORIZED,
+        r#"{"resultCode":"FAILURE","errorMessage":"Missing or empty sessionKey."}"#,
+    );
+    assert_eq!(error.kind, ErrorKind::AuthInvalid);
+    assert!(error.message.contains("Missing or empty sessionKey."));
+}

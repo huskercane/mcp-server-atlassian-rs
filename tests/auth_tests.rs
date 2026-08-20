@@ -511,3 +511,145 @@ async fn require_for_async_runs_off_the_runtime() {
     let err = Credentials::require_for_async(&bad, V).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
+
+// ---------------------------------------------------------------------------
+// Vendor-owned secrets (NinjaOne console login)
+//
+// These go through `resolve_secret_for` rather than the Atlassian resolver,
+// but must honour identical sentinel semantics: an explicit `"keychain"` miss
+// is a hard error, an absent key falls back silently, and plaintext wins.
+// ---------------------------------------------------------------------------
+
+const NINJA: &str = mcp_server_atlassian::config::VENDOR_NINJAONE;
+
+fn ninja_password(
+    config: &Config,
+    kc: &InMemoryKeychain,
+) -> Result<Option<(String, String)>, mcp_server_atlassian::error::McpError> {
+    mcp_server_atlassian::auth::resolve_secret_for(
+        config,
+        kc,
+        NINJA,
+        SecretKind::Password,
+        "NINJAONE_EMAIL",
+        "NINJAONE_PASSWORD",
+    )
+}
+
+#[test]
+fn ninjaone_password_resolves_from_the_keychain_sentinel() {
+    let kc = empty_kc();
+    kc.set(SecretKind::Password, NINJA, "tech@example.com", "s3cret")
+        .unwrap();
+    let config = cfg(&[
+        ("NINJAONE_EMAIL", "tech@example.com"),
+        ("NINJAONE_PASSWORD", "keychain"),
+    ]);
+
+    let (principal, secret) = ninja_password(&config, &kc).unwrap().unwrap();
+    assert_eq!(principal, "tech@example.com");
+    assert_eq!(secret, "s3cret");
+}
+
+/// The entry is scoped by vendor, so a password filed under another vendor is
+/// not visible here — that is what keeps `--vendor` meaningful.
+#[test]
+fn ninjaone_password_does_not_read_another_vendors_slot() {
+    let kc = empty_kc();
+    kc.set(
+        SecretKind::Password,
+        VENDOR_JIRA,
+        "tech@example.com",
+        "wrong",
+    )
+    .unwrap();
+    let config = cfg(&[
+        ("NINJAONE_EMAIL", "tech@example.com"),
+        ("NINJAONE_PASSWORD", "keychain"),
+    ]);
+
+    let error = ninja_password(&config, &kc).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::AuthMissing);
+    assert!(error.message.contains("no keychain"), "{}", error.message);
+}
+
+#[test]
+fn ninjaone_password_sentinel_without_an_entry_is_a_hard_error() {
+    let kc = empty_kc();
+    let config = cfg(&[
+        ("NINJAONE_EMAIL", "tech@example.com"),
+        ("NINJAONE_PASSWORD", "keychain"),
+    ]);
+
+    let error = ninja_password(&config, &kc).unwrap_err();
+    assert_eq!(error.kind, ErrorKind::AuthMissing);
+    // The message must name the command that fixes it.
+    assert!(error.message.contains("creds set"), "{}", error.message);
+    assert!(error.message.contains("password"), "{}", error.message);
+}
+
+/// No `NINJAONE_PASSWORD` at all: the keychain is consulted anyway, so an
+/// operator can store the secret and omit the key entirely.
+#[test]
+fn ninjaone_password_falls_back_to_the_keychain_implicitly() {
+    let kc = empty_kc();
+    kc.set(SecretKind::Password, NINJA, "tech@example.com", "s3cret")
+        .unwrap();
+    let config = cfg(&[("NINJAONE_EMAIL", "tech@example.com")]);
+
+    let (_, secret) = ninja_password(&config, &kc).unwrap().unwrap();
+    assert_eq!(secret, "s3cret");
+}
+
+#[test]
+fn a_plaintext_ninjaone_password_still_wins() {
+    let kc = empty_kc();
+    kc.set(
+        SecretKind::Password,
+        NINJA,
+        "tech@example.com",
+        "from-keychain",
+    )
+    .unwrap();
+    let config = cfg(&[
+        ("NINJAONE_EMAIL", "tech@example.com"),
+        ("NINJAONE_PASSWORD", "from-config"),
+    ]);
+
+    let (_, secret) = ninja_password(&config, &kc).unwrap().unwrap();
+    assert_eq!(secret, "from-config");
+}
+
+#[test]
+fn the_totp_seed_uses_its_own_keychain_slot() {
+    let kc = empty_kc();
+    kc.set(SecretKind::Password, NINJA, "tech@example.com", "s3cret")
+        .unwrap();
+    kc.set(
+        SecretKind::TotpSecret,
+        NINJA,
+        "tech@example.com",
+        "otpauth://totp/x?secret=GEZDGNBVGY3TQOJQ",
+    )
+    .unwrap();
+    let config = cfg(&[
+        ("NINJAONE_EMAIL", "tech@example.com"),
+        ("NINJAONE_PASSWORD", "keychain"),
+        ("NINJAONE_TOTP_SECRET", "keychain"),
+    ]);
+
+    let (_, password) = ninja_password(&config, &kc).unwrap().unwrap();
+    let (_, seed) = mcp_server_atlassian::auth::resolve_secret_for(
+        &config,
+        &kc,
+        NINJA,
+        SecretKind::TotpSecret,
+        "NINJAONE_EMAIL",
+        "NINJAONE_TOTP_SECRET",
+    )
+    .unwrap()
+    .unwrap();
+
+    assert_eq!(password, "s3cret");
+    assert!(seed.starts_with("otpauth://"));
+}

@@ -21,6 +21,7 @@ use crate::config::Config;
 use crate::error::{McpError, auth_invalid, auth_missing};
 
 pub mod keychain;
+pub mod secrets;
 
 pub use keychain::{InMemoryKeychain, KeychainBackend, KeychainError, OsKeychain, SecretKind};
 
@@ -227,6 +228,132 @@ impl Credentials {
     }
 }
 
+/// Resolve one `(principal, secret)` pair from config + keychain for a vendor
+/// that owns its own credential lifecycle.
+///
+/// This is [`try_resolve_kind`] under a public name: vendors outside the
+/// shared Atlassian resolver (`NinjaOne`'s console login, for one) need the same
+/// `"keychain"` sentinel semantics — explicit sentinel misses are hard errors,
+/// an absent key falls back to the keychain silently — and reimplementing them
+/// per vendor is how those semantics drift apart.
+///
+/// Backend-injectable for tests; production callers want
+/// [`resolve_secret_async`].
+pub fn resolve_secret_for(
+    config: &Config,
+    backend: &dyn KeychainBackend,
+    vendor: &str,
+    kind: SecretKind,
+    principal_key: &str,
+    secret_key: &str,
+) -> Result<Option<(String, String)>, McpError> {
+    try_resolve_kind(config, backend, vendor, kind, principal_key, secret_key)
+}
+
+/// Resolve a registered vendor secret from config + keychain.
+///
+/// Looks the key up in [`secrets::VENDOR_SECRETS`] to learn its kind and which
+/// config key (if any) names the principal, then applies the same sentinel
+/// rules as every other credential. An unregistered key is read as plaintext
+/// only — a key nobody registered has no slot to expand from, and silently
+/// inventing one would file secrets where the runtime never looks.
+pub fn vendor_secret_with(
+    config: &Config,
+    backend: &dyn KeychainBackend,
+    vendor: &str,
+    secret_key: &str,
+) -> Result<Option<String>, McpError> {
+    let Some(registered) = secrets::lookup(vendor, secret_key) else {
+        return Ok(non_blank(config, vendor, secret_key).map(str::to_owned));
+    };
+    let configured = registered
+        .principal_key
+        .and_then(|key| non_blank(config, vendor, key));
+    let principal = registered.principal(configured);
+    resolve_kind_with_principal(
+        config,
+        backend,
+        vendor,
+        registered.kind,
+        principal,
+        secret_key,
+    )
+    .map(|resolved| resolved.map(|(_, secret)| secret))
+}
+
+/// Async form of [`vendor_secret_with`] against the process-wide OS keychain.
+/// This is what vendor credential lookups call on the request path.
+pub async fn vendor_secret(
+    config: &Config,
+    vendor: &'static str,
+    secret_key: &'static str,
+) -> Result<Option<String>, McpError> {
+    // Plaintext short-circuits before any thread dispatch: it is the common
+    // case, needs no I/O, and paying a `spawn_blocking` round-trip per tool
+    // call to read a string out of a map would be pure overhead. Only a
+    // sentinel or an absent key — the two cases that actually reach the OS
+    // keychain — go to the blocking pool.
+    if let Some(value) = non_blank(config, vendor, secret_key)
+        && value != "keychain"
+    {
+        return Ok(Some(value.to_owned()));
+    }
+
+    let config = config.clone();
+    tokio::task::spawn_blocking(move || {
+        vendor_secret_with(&config, os_keychain(), vendor, secret_key)
+    })
+    .await
+    .map_err(|error| {
+        crate::error::unexpected(
+            format!("credential resolution task panicked: {error}"),
+            None,
+        )
+    })?
+}
+
+fn non_blank<'a>(config: &'a Config, vendor: &str, key: &str) -> Option<&'a str> {
+    config
+        .get_for(vendor, key)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+/// Async wrapper around [`resolve_secret_for`] using the process-wide OS
+/// keychain.
+///
+/// The read happens on a blocking thread for the same reason
+/// [`Credentials::require_for_async`] does it: the platform backends are
+/// synchronous and can block on a macOS ACL prompt or a Linux D-Bus
+/// round-trip, which would stall a Tokio worker.
+pub async fn resolve_secret_async(
+    config: &Config,
+    vendor: &str,
+    kind: SecretKind,
+    principal_key: &'static str,
+    secret_key: &'static str,
+) -> Result<Option<(String, String)>, McpError> {
+    let config = config.clone();
+    let vendor = vendor.to_owned();
+    tokio::task::spawn_blocking(move || {
+        resolve_secret_for(
+            &config,
+            os_keychain(),
+            &vendor,
+            kind,
+            principal_key,
+            secret_key,
+        )
+    })
+    .await
+    .map_err(|error| {
+        crate::error::unexpected(
+            format!("credential resolution task panicked: {error}"),
+            None,
+        )
+    })?
+}
+
 /// Resolve one credential kind from config + keychain, scoped to `vendor`.
 /// Returns `Ok(Some((principal, secret)))` on success, `Ok(None)` to fall
 /// through to the next kind, and `Err(McpError)` for explicit sentinel
@@ -245,7 +372,7 @@ fn try_resolve_kind(
             // Principal absent. If the secret is an explicit sentinel,
             // that's a misconfiguration — error out so the user sees it.
             // Otherwise just fall through to the next kind.
-            if config.get_for(vendor, secret_key) == Some("keychain") {
+            if config.get_for(vendor, secret_key).map(str::trim) == Some("keychain") {
                 return Err(auth_missing(format!(
                     "vendor `{vendor}` sets {secret_key}=\"keychain\" but \
                      {principal_key} is missing"
@@ -254,8 +381,27 @@ fn try_resolve_kind(
             return Ok(None);
         }
     };
+    resolve_kind_with_principal(config, backend, vendor, kind, principal, secret_key)
+}
 
-    match config.get_for(vendor, secret_key) {
+/// The sentinel/plaintext/implicit cascade for an already-known principal.
+///
+/// Split out of [`try_resolve_kind`] because vendor tokens have no principal
+/// config key to read — their principal is the secret's own key name (see
+/// [`secrets`]) — while the resolution rules below must stay identical for
+/// every credential in the process.
+fn resolve_kind_with_principal(
+    config: &Config,
+    backend: &dyn KeychainBackend,
+    vendor: &str,
+    kind: SecretKind,
+    principal: &str,
+    secret_key: &str,
+) -> Result<Option<(String, String)>, McpError> {
+    // Trim before matching. Surrounding whitespace on a secret is never
+    // intentional — it is a copy-paste artefact — and a whitespace-only value
+    // must read as "not set" rather than as a credential made of spaces.
+    match config.get_for(vendor, secret_key).map(str::trim) {
         // Explicit sentinel — user opted in, miss is a hard error.
         Some("keychain") => match backend.get(kind, vendor, principal) {
             Ok(Some(s)) if !s.is_empty() => {

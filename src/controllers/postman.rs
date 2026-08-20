@@ -54,7 +54,7 @@ pub async fn handle_request(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
-    let key = ctx.vendor.key(ctx.config)?;
+    let key = ctx.vendor.key(ctx.config).await?;
     let creds = Credentials::ApiKeyHeader {
         header_name: API_KEY_HEADER.to_owned(),
         key,

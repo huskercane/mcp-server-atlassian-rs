@@ -93,23 +93,29 @@ fn normalize_path_prepends_missing_leading_slash() {
 
 // ---- token lookup ----
 
-#[test]
-fn token_reads_from_grafana_config_section() {
+#[tokio::test]
+async fn token_reads_from_grafana_config_section() {
     let config = config_with(&[("GRAFANA_TOKEN", "glsa_abc")]);
-    assert_eq!(GrafanaVendor::new().token(&config).unwrap(), "glsa_abc");
+    assert_eq!(
+        GrafanaVendor::new().token(&config).await.unwrap(),
+        "glsa_abc"
+    );
 }
 
-#[test]
-fn token_missing_is_auth_missing_error() {
-    let err = GrafanaVendor::new().token(&empty_config()).unwrap_err();
+#[tokio::test]
+async fn token_missing_is_auth_missing_error() {
+    let err = GrafanaVendor::new()
+        .token(&empty_config())
+        .await
+        .unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
     assert!(err.message.contains("GRAFANA_TOKEN"));
 }
 
-#[test]
-fn token_blank_is_treated_as_missing() {
+#[tokio::test]
+async fn token_blank_is_treated_as_missing() {
     let config = config_with(&[("GRAFANA_TOKEN", "   ")]);
-    let err = GrafanaVendor::new().token(&config).unwrap_err();
+    let err = GrafanaVendor::new().token(&config).await.unwrap_err();
     assert_eq!(err.kind, ErrorKind::AuthMissing);
 }
 

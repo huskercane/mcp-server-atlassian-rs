@@ -75,7 +75,7 @@ pub async fn quality_gate(
     ctx: &SonarqubeContext<'_>,
     args: &SonarqubeQualityGateArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
 
     if args.branch.is_some() && args.pull_request.is_some() {
         return Err(api_error(
@@ -137,7 +137,7 @@ pub async fn search_issues(
     ctx: &SonarqubeContext<'_>,
     args: &SonarqubeSearchIssuesArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
 
     if args.branch.is_some() && args.pull_request.is_some() {
         return Err(api_error(
@@ -199,7 +199,7 @@ pub async fn get(
     ctx: &SonarqubeContext<'_>,
     args: &ReadArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
     let fmt = args.output_format.map_or(OutputFormat::Toon, Into::into);
     let handle = HandleContext::new(ctx.client, ctx.config, ctx.vendor);

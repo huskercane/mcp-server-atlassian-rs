@@ -56,7 +56,7 @@ pub async fn handle_request(
     jq: Option<&str>,
     output_format: OutputFormat,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
     let handle = HandleContext::new(ctx.client, ctx.config, ctx.vendor);
     dispatch_with_creds(
@@ -120,7 +120,7 @@ pub async fn handle_logs(
     ctx: &CircleCiContext<'_>,
     args: &CircleCiLogsArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let token = ctx.vendor.token(ctx.config)?;
+    let token = ctx.vendor.token(ctx.config).await?;
     let project = LogProject::parse(&args.project_slug)?;
     let build = fetch_build_details(ctx, &token, &project, args.job_number).await?;
     let steps = collect_log_steps(ctx, &build).await?;

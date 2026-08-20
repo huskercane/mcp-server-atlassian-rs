@@ -50,7 +50,7 @@ pub async fn query(
     ctx: &NewRelicContext<'_>,
     args: &NewRelicQueryArgs,
 ) -> Result<ControllerResponse, McpError> {
-    let key = ctx.vendor.api_key(ctx.config)?;
+    let key = ctx.vendor.api_key(ctx.config).await?;
     let creds = Credentials::ApiKeyHeader {
         header_name: API_KEY_HEADER.to_owned(),
         key,

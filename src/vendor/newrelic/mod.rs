@@ -75,12 +75,9 @@ impl NewRelicVendor {
     /// New Relic credential entry point — the shared Atlassian resolver is never
     /// consulted. Errors with a clear, actionable message at tool-call time when
     /// the key is absent.
-    pub fn api_key(&self, config: &Config) -> Result<String, McpError> {
-        config
-            .get_for(VENDOR_NEWRELIC, "NEW_RELIC_API_KEY")
-            .map(str::trim)
-            .filter(|v| !v.is_empty())
-            .map(str::to_owned)
+    pub async fn api_key(&self, config: &Config) -> Result<String, McpError> {
+        crate::auth::vendor_secret(config, VENDOR_NEWRELIC, "NEW_RELIC_API_KEY")
+            .await?
             .ok_or_else(|| {
                 auth_missing(
                     "NEW_RELIC_API_KEY is required for newrelic_query. Set a New Relic \

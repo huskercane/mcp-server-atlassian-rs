@@ -27,13 +27,28 @@ use std::collections::HashSet;
 use std::fmt;
 use std::sync::Mutex;
 
-/// Two kinds of secret. Service-name suffix follows the variant.
+/// Kinds of secret. Service-name suffix follows the variant.
+///
+/// Names are generic rather than vendor-specific because the service string
+/// is already vendor-scoped (`…password.ninjaone`), so a second vendor with an
+/// account password would reuse the same variant rather than adding one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecretKind {
     /// Atlassian Cloud API token (paired with `ATLASSIAN_USER_EMAIL`).
     ApiToken,
     /// Bitbucket app password (paired with `ATLASSIAN_BITBUCKET_USERNAME`).
     AppPassword,
+    /// Account password for a vendor that logs in with one — currently
+    /// `NinjaOne`'s console login (paired with `NINJAONE_EMAIL`).
+    Password,
+    /// TOTP seed (`otpauth://` URI or base32), used to derive MFA codes
+    /// in-process. Paired with the same principal as [`Self::Password`].
+    TotpSecret,
+    /// Any single-string bearer credential a vendor sends as-is — an API key,
+    /// OAuth token, client secret, or session key. One variant rather than one
+    /// per vendor because the slot is already `(vendor, principal)`-scoped;
+    /// vendors holding several of these disambiguate by principal.
+    Token,
 }
 
 impl SecretKind {
@@ -45,6 +60,9 @@ impl SecretKind {
         let prefix = match self {
             Self::ApiToken => "mcp-server-atlassian.api-token",
             Self::AppPassword => "mcp-server-atlassian.app-password",
+            Self::Password => "mcp-server-atlassian.password",
+            Self::TotpSecret => "mcp-server-atlassian.totp-secret",
+            Self::Token => "mcp-server-atlassian.token",
         };
         format!("{prefix}.{vendor}")
     }
@@ -54,6 +72,9 @@ impl SecretKind {
         match self {
             Self::ApiToken => "api-token",
             Self::AppPassword => "app-password",
+            Self::Password => "password",
+            Self::TotpSecret => "totp-secret",
+            Self::Token => "token",
         }
     }
 
@@ -63,7 +84,13 @@ impl SecretKind {
         match s {
             "api-token" | "ATLASSIAN_API_TOKEN" => Some(Self::ApiToken),
             "app-password" | "ATLASSIAN_BITBUCKET_APP_PASSWORD" => Some(Self::AppPassword),
-            _ => None,
+            "password" | "NINJAONE_PASSWORD" => Some(Self::Password),
+            "totp-secret" | "NINJAONE_TOTP_SECRET" => Some(Self::TotpSecret),
+            "token" => Some(Self::Token),
+            // Every registered vendor secret is addressable by its own config
+            // key, so `--kind SLACK_TOKEN` works without memorising which
+            // generic kind it maps to.
+            other => crate::auth::secrets::lookup_by_key(other).map(|secret| secret.kind),
         }
     }
 }
