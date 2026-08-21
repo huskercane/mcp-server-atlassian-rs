@@ -41,6 +41,8 @@ pub mod data_limits {
     pub const STREAM_TOTAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
     pub const STREAM_MAX_ATTEMPTS: usize = 3;
     pub const MAX_TIME_PARTITIONS: usize = 16;
+    /// Maximum number of time-partition requests acquired concurrently.
+    pub const MAX_PARALLEL_TIME_PARTITIONS: usize = 4;
     pub const MAX_PAGE_SIZE: u32 = 100;
     pub const DEFAULT_PAGE_SIZE: u32 = 50;
 }

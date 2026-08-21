@@ -1,7 +1,8 @@
 use std::time::Duration;
 
 use mcp_server_atlassian::transport::raw_response::{
-    artifact_for_path, begin_artifact, read_artifact_chunk, save, save_artifact,
+    artifact, artifact_for_path, begin_artifact, read_artifact_chunk, remove_artifact, save,
+    save_artifact,
 };
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -9,7 +10,35 @@ use serde_json::json;
 /// The test runs side-effects on the real filesystem (matches TS behaviour);
 /// we clean up our own files to stay polite.
 async fn cleanup(path: &std::path::Path) {
-    let _ = tokio::fs::remove_file(path).await;
+    let _ = remove_artifact(path).await;
+}
+
+#[tokio::test]
+async fn removing_committed_artifact_unregisters_id_and_path() {
+    let path = save_artifact("registry-cleanup", "registered")
+        .await
+        .unwrap();
+    let metadata = artifact_for_path(&path).unwrap();
+
+    remove_artifact(&path).await.unwrap();
+
+    assert!(!path.exists());
+    assert!(artifact(&metadata.id).is_none());
+    assert!(artifact_for_path(&path).is_none());
+}
+
+#[tokio::test]
+async fn removing_missing_artifact_unregisters_stale_metadata() {
+    let path = save_artifact("registry-missing", "registered")
+        .await
+        .unwrap();
+    let metadata = artifact_for_path(&path).unwrap();
+    tokio::fs::remove_file(&path).await.unwrap();
+
+    remove_artifact(&path).await.unwrap();
+
+    assert!(artifact(&metadata.id).is_none());
+    assert!(artifact_for_path(&path).is_none());
 }
 
 #[tokio::test]

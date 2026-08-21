@@ -70,10 +70,28 @@ pub struct ArtifactWriter {
     tail: std::collections::VecDeque<u8>,
     hasher: Sha256,
     committed: bool,
+    #[cfg(test)]
+    fault: Option<ArtifactWriterFault>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactWriterFault {
+    Write,
+    Commit,
 }
 
 impl ArtifactWriter {
+    #[cfg(test)]
+    fn inject_fault(&mut self, fault: ArtifactWriterFault) {
+        self.fault = Some(fault);
+    }
+
     pub async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        #[cfg(test)]
+        if self.fault == Some(ArtifactWriterFault::Write) {
+            return Err(std::io::Error::other("injected artifact write failure"));
+        }
         let next = self
             .size
             .checked_add(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)
@@ -110,6 +128,10 @@ impl ArtifactWriter {
         let file = writer.into_inner();
         file.sync_all().await?;
         drop(file);
+        #[cfg(test)]
+        if self.fault == Some(ArtifactWriterFault::Commit) {
+            return Err(std::io::Error::other("injected artifact commit failure"));
+        }
         fs::rename(&self.partial_path, &self.path).await?;
         let metadata = ArtifactMetadata {
             id: self.id.clone(),
@@ -185,6 +207,8 @@ pub async fn begin_artifact(
         ),
         hasher: Sha256::new(),
         committed: false,
+        #[cfg(test)]
+        fault: None,
     })
 }
 
@@ -207,6 +231,23 @@ pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
         .values()
         .find(|artifact| artifact.path == path)
         .cloned()
+}
+
+/// Remove a committed artifact and forget its download metadata.
+///
+/// A missing file is treated as an already-completed removal so stale
+/// registry entries cannot outlive controller cleanup or an external unlink.
+pub async fn remove_artifact(path: &Path) -> std::io::Result<()> {
+    match fs::remove_file(path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|_, artifact| artifact.path != path);
+    Ok(())
 }
 
 fn base_dir() -> PathBuf {
@@ -505,4 +546,45 @@ fn iso_full() -> String {
     let s = sod % 60;
     let (y, mo, d) = crate::logger::days_to_ymd(days);
     format!("{y:04}-{mo:02}-{d:02}T{h:02}:{m:02}:{s:02}.{millis:03}Z")
+}
+
+#[cfg(test)]
+mod artifact_writer_fault_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn injected_write_failure_leaves_no_partial_or_registry_entry() {
+        let mut writer = begin_artifact("fault-write", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        let path = writer.path.clone();
+        let partial = writer.partial_path.clone();
+        let id = writer.id.clone();
+        writer.inject_fault(ArtifactWriterFault::Write);
+
+        assert!(writer.write_chunk(b"data").await.is_err());
+        drop(writer);
+
+        assert!(!path.exists());
+        assert!(!partial.exists());
+        assert!(artifact(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn injected_commit_failure_leaves_no_partial_or_registry_entry() {
+        let mut writer = begin_artifact("fault-commit", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        let path = writer.path.clone();
+        let partial = writer.partial_path.clone();
+        let id = writer.id.clone();
+        writer.write_chunk(b"data").await.unwrap();
+        writer.inject_fault(ArtifactWriterFault::Commit);
+
+        assert!(writer.commit().await.is_err());
+
+        assert!(!path.exists());
+        assert!(!partial.exists());
+        assert!(artifact(&id).is_none());
+    }
 }

@@ -104,6 +104,43 @@ pub struct StreamingAggregateQuota {
     pub max_decoded_bytes: u64,
 }
 
+/// Checked, concurrency-safe accounting for retained temporary artifacts.
+#[derive(Debug)]
+pub struct StreamingDiskQuota {
+    retained: AtomicU64,
+    limit: u64,
+}
+
+impl StreamingDiskQuota {
+    pub const fn new(limit: u64) -> Self {
+        Self {
+            retained: AtomicU64::new(0),
+            limit,
+        }
+    }
+
+    pub fn retain(&self, amount: u64) -> std::io::Result<u64> {
+        self.retained
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(amount).filter(|next| {
+                    next.checked_mul(2)
+                        .is_some_and(|projected| projected <= self.limit)
+                })
+            })
+            .map(|previous| previous + amount)
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "aggregate temporary/projected artifact quota exceeded or counter overflow",
+                )
+            })
+    }
+
+    pub fn retained_bytes(&self) -> u64 {
+        self.retained.load(Ordering::Acquire)
+    }
+}
+
 impl StreamingAggregateQuota {
     pub const fn new(max_encoded_bytes: u64, max_decoded_bytes: u64) -> Self {
         Self {
@@ -154,7 +191,7 @@ impl StreamingAggregateQuota {
 
 #[cfg(test)]
 mod aggregate_quota_tests {
-    use super::StreamingAggregateQuota;
+    use super::{StreamingAggregateQuota, StreamingDiskQuota};
 
     #[test]
     fn checked_aggregate_counters_reject_limits_and_overflow() {
@@ -164,6 +201,15 @@ mod aggregate_quota_tests {
         let overflow = StreamingAggregateQuota::new(u64::MAX, u64::MAX);
         overflow.add_decoded(u64::MAX).unwrap();
         assert!(overflow.add_decoded(1).is_err());
+    }
+
+    #[test]
+    fn checked_disk_counter_rejects_projection_and_overflow() {
+        let quota = StreamingDiskQuota::new(10);
+        assert_eq!(quota.retain(4).unwrap(), 4);
+        assert!(quota.retain(2).is_err());
+        let overflow = StreamingDiskQuota::new(u64::MAX);
+        assert!(overflow.retain(u64::MAX).is_err());
     }
 }
 

@@ -15,6 +15,7 @@
 //! error classification, output rendering, raw-response persistence, and
 //! JMESPath filtering — is the same code the other vendors use.
 
+use futures::{StreamExt, stream::FuturesUnordered};
 use reqwest::Client;
 
 use crate::auth::Credentials;
@@ -72,7 +73,14 @@ pub async fn query_logs(
     {
         return query_logs_partitioned(ctx, args, start, end, count).await;
     }
-    query_logs_single(ctx, args, None, MAX_STREAMED_ARTIFACT_SIZE).await
+    query_logs_single(
+        ctx,
+        args,
+        None,
+        MAX_STREAMED_ARTIFACT_SIZE,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
 }
 
 fn usable_partition_count(value: Option<u8>) -> Option<usize> {
@@ -86,6 +94,7 @@ async fn query_logs_single(
     args: &GrafanaQueryLogsArgs,
     aggregate: Option<std::sync::Arc<crate::transport::StreamingAggregateQuota>>,
     canonical_max_bytes: u64,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let token = ctx.vendor.token(ctx.config).await?;
     let creds = Credentials::Bearer { token };
@@ -120,6 +129,7 @@ async fn query_logs_single(
         MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.aggregate = aggregate;
+    policy.cancellation = cancellation.clone();
     let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
         &creds,
@@ -140,12 +150,19 @@ async fn query_logs_single(
     } else {
         crate::ingestion::RecordOrdering::Chronological
     };
-    let result =
-        normalize_loki_response(&artifact, args.jq.as_deref(), canonical_max_bytes, ordering).await;
-    let _ = tokio::fs::remove_file(&artifact.artifact.path).await;
+    let result = normalize_loki_response(
+        &artifact,
+        args.jq.as_deref(),
+        canonical_max_bytes,
+        ordering,
+        &cancellation,
+    )
+    .await;
+    let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
     result
 }
 
+#[allow(clippy::too_many_lines)] // Acquisition, drain, and cleanup form one transaction.
 async fn query_logs_partitioned(
     ctx: &GrafanaContext<'_>,
     args: &GrafanaQueryLogsArgs,
@@ -163,69 +180,90 @@ async fn query_logs_partitioned(
         MAX_STREAMED_ARTIFACT_SIZE,
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
-    let mut parts = Vec::new();
-    let mut disk = 0_u64;
-    for interval in &intervals {
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+        MAX_STREAMED_ARTIFACT_SIZE,
+    ));
+    let concurrency = count.min(crate::constants::data_limits::MAX_PARALLEL_TIME_PARTITIONS);
+    let mut active = FuturesUnordered::new();
+    let acquire = |index: usize| {
+        let interval = intervals[index].clone();
         let mut partition_args = args.clone();
         partition_args.time_partitions = None;
         partition_args.start = Some(interval.start_ns.to_string());
         partition_args.end = Some(interval.end_ns.to_string());
         partition_args.limit = args.limit;
-        let response = match query_logs_single(
-            ctx,
-            &partition_args,
-            Some(aggregate.clone()),
-            MAX_STREAMED_ARTIFACT_SIZE
-                .checked_sub(disk)
-                .ok_or_else(|| api_error("Loki aggregate disk counter overflow".to_owned()))?,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                cleanup_partition_paths(&parts).await;
-                return Err(error);
-            }
-        };
-        let path = response
-            .raw_response_path
-            .ok_or_else(|| api_error("Loki partition produced no canonical artifact".to_owned()))?;
-        disk = disk
-            .checked_add(
-                std::fs::metadata(&path)
-                    .map_err(|e| api_error(format!("Cannot account Loki partition: {e}")))?
-                    .len(),
+        let aggregate = aggregate.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            let response = query_logs_single(
+                ctx,
+                &partition_args,
+                Some(aggregate),
+                MAX_STREAMED_ARTIFACT_SIZE,
+                cancellation,
             )
-            .ok_or_else(|| api_error("Loki aggregate disk counter overflow".to_owned()))?;
-        if disk > MAX_STREAMED_ARTIFACT_SIZE {
-            let mut all = parts.clone();
-            all.push(path);
-            cleanup_partition_paths(&all).await;
-            return Err(api_error(
-                "Loki aggregate temporary/projected artifact quota exceeded".to_owned(),
-            ));
+            .await?;
+            let path = response.raw_response_path.ok_or_else(|| {
+                api_error("Loki partition produced no canonical artifact".to_owned())
+            })?;
+            Ok::<_, McpError>((index, path))
         }
-        if disk
-            .checked_mul(2)
-            .is_none_or(|projected| projected > MAX_STREAMED_ARTIFACT_SIZE)
-        {
-            let mut all = parts.clone();
-            all.push(path);
-            cleanup_partition_paths(&all).await;
-            return Err(api_error(
-                "Loki projected final plus retained partition quota exceeded".to_owned(),
-            ));
-        }
-        parts.push(path);
+    };
+    let mut next = 0;
+    while next < concurrency {
+        active.push(acquire(next));
+        next += 1;
     }
+    let mut slots = vec![None; count];
+    let mut first_error = None;
+    while let Some(result) = active.next().await {
+        match result {
+            Ok((index, path)) => {
+                let size = std::fs::metadata(&path).map(|metadata| metadata.len());
+                slots[index] = Some(path);
+                if first_error.is_none() {
+                    let retained = size
+                        .map_err(|error| std::io::Error::other(format!("metadata: {error}")))
+                        .and_then(|size| disk.retain(size));
+                    if let Err(error) = retained {
+                        cancellation.cancel();
+                        first_error =
+                            Some(api_error(format!("Cannot account Loki partition: {error}")));
+                    } else if next < count {
+                        active.push(acquire(next));
+                        next += 1;
+                    }
+                }
+            }
+            Err(error) if first_error.is_none() => {
+                cancellation.cancel();
+                first_error = Some(error);
+            }
+            Err(_) => {}
+        }
+    }
+    let parts = slots.into_iter().flatten().collect::<Vec<_>>();
+    if let Some(error) = first_error {
+        cleanup_partition_paths(&parts).await;
+        return Err(error);
+    }
+    debug_assert_eq!(
+        disk.retained_bytes(),
+        parts
+            .iter()
+            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+            .sum::<u64>()
+    );
     let result = final_partition_response(
         "grafana_loki",
         args,
         start,
         end,
         &parts,
-        &intervals[..parts.len()],
+        &intervals,
         aggregate,
+        &cancellation,
     )
     .await;
     if result.is_err() {
@@ -236,11 +274,12 @@ async fn query_logs_partitioned(
 
 async fn cleanup_partition_paths(paths: &[std::path::PathBuf]) {
     for path in paths {
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = crate::transport::raw_response::remove_artifact(path).await;
         let _ = tokio::fs::remove_file(path.with_extension("manifest.json")).await;
     }
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit lifecycle inputs keep the final commit auditable.
 async fn final_partition_response(
     vendor: &str,
     args: &GrafanaQueryLogsArgs,
@@ -249,6 +288,7 @@ async fn final_partition_response(
     paths: &[std::path::PathBuf],
     _intervals: &[crate::ingestion::QueryInterval],
     aggregate: std::sync::Arc<crate::transport::StreamingAggregateQuota>,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut validated = Vec::with_capacity(paths.len());
     let mut retained_bytes = 0_u64;
@@ -278,11 +318,12 @@ async fn final_partition_response(
     } else {
         crate::ingestion::RecordOrdering::Chronological
     };
-    let merge = crate::ingestion::merge_partitions(
+    let merge = crate::ingestion::merge_partitions_cancellable(
         paths,
         ordering,
         args.limit.map(u64::from),
         final_budget,
+        cancellation,
     )
     .await
     .map_err(|e| api_error(format!("Cannot merge Loki partitions: {e}")))?;
@@ -332,7 +373,8 @@ async fn final_partition_response(
     if let Err(error) =
         crate::ingestion::persist_manifest(&merge.artifact.artifact.path, &manifest).await
     {
-        let _ = tokio::fs::remove_file(&merge.artifact.artifact.path).await;
+        let _ =
+            crate::transport::raw_response::remove_artifact(&merge.artifact.artifact.path).await;
         return Err(api_error(format!(
             "Cannot commit final Loki manifest: {error}"
         )));
@@ -351,6 +393,7 @@ async fn normalize_loki_response(
     jq: Option<&str>,
     canonical_max_bytes: u64,
     ordering: crate::ingestion::RecordOrdering,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut items = crate::ingestion::stream_loki_response(input.artifact.path.clone(), 8);
     let mut writer = crate::transport::raw_response::begin_artifact(
@@ -363,6 +406,11 @@ async fn normalize_loki_response(
     .map_err(|error| api_error(format!("Cannot create Loki canonical artifact: {error}")))?;
     let mut records = 0_u64;
     while let Some(item) = items.recv().await {
+        if cancellation.is_cancelled() {
+            return Err(api_error(
+                "Loki partition normalization cancelled".to_owned(),
+            ));
+        }
         let item =
             item.map_err(|error| api_error(format!("Invalid Loki streams response: {error}")))?;
         let record = loki_record(item)?;
@@ -382,6 +430,11 @@ async fn normalize_loki_response(
         records = records
             .checked_add(1)
             .ok_or_else(|| api_error("Loki record count overflow".to_owned()))?;
+    }
+    if cancellation.is_cancelled() {
+        return Err(api_error(
+            "Loki partition normalization cancelled".to_owned(),
+        ));
     }
     let artifact = writer
         .commit()
@@ -420,7 +473,7 @@ async fn normalize_loki_response(
     };
     if let Err(error) = crate::ingestion::persist_manifest(&artifact.artifact.path, &manifest).await
     {
-        let _ = tokio::fs::remove_file(&artifact.artifact.path).await;
+        let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
         return Err(api_error(format!(
             "Cannot commit Loki artifact manifest: {error}"
         )));

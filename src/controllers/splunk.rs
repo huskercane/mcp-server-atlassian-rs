@@ -2,6 +2,7 @@
 
 //! Splunk search and saved-search controller path.
 
+use futures::{StreamExt, stream::FuturesUnordered};
 use reqwest::Client;
 use reqwest::header::AUTHORIZATION;
 use serde_json::{Map, Value};
@@ -61,7 +62,14 @@ pub async fn search(
     {
         return search_partitioned(ctx, args, start, end, count).await;
     }
-    search_single(ctx, args, None, MAX_STREAMED_ARTIFACT_SIZE).await
+    search_single(
+        ctx,
+        args,
+        None,
+        MAX_STREAMED_ARTIFACT_SIZE,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
 }
 
 fn is_safely_partitionable_spl(search: &str) -> bool {
@@ -77,6 +85,7 @@ async fn search_single(
     args: &SplunkSearchArgs,
     aggregate: Option<std::sync::Arc<crate::transport::StreamingAggregateQuota>>,
     canonical_max_bytes: u64,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let creds = credentials(ctx).await?;
     let mut form = search_form(
@@ -92,6 +101,7 @@ async fn search_single(
         MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.aggregate = aggregate;
+    policy.cancellation = cancellation.clone();
     let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
         &creds,
@@ -113,12 +123,14 @@ async fn search_single(
         "splunk-search",
         args.jq.as_deref(),
         canonical_max_bytes,
+        &cancellation,
     )
     .await;
-    let _ = tokio::fs::remove_file(&artifact.artifact.path).await;
+    let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
     result
 }
 
+#[allow(clippy::too_many_lines)] // Acquisition, drain, and cleanup form one transaction.
 async fn search_partitioned(
     ctx: &SplunkContext<'_>,
     args: &SplunkSearchArgs,
@@ -132,82 +144,106 @@ async fn search_partitioned(
         MAX_STREAMED_ARTIFACT_SIZE,
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
-    let mut paths = Vec::new();
-    let mut disk = 0_u64;
-    for interval in &intervals {
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+        MAX_STREAMED_ARTIFACT_SIZE,
+    ));
+    let concurrency = count.min(crate::constants::data_limits::MAX_PARALLEL_TIME_PARTITIONS);
+    let mut active = FuturesUnordered::new();
+    let acquire = |index: usize| {
+        let interval = intervals[index].clone();
         let mut partition_args = args.clone();
         partition_args.time_partitions = None;
         partition_args.earliest_time =
             Some(crate::ingestion::splunk_epoch_seconds(interval.start_ns));
         partition_args.latest_time = Some(crate::ingestion::splunk_epoch_seconds(interval.end_ns));
-        let response = match search_single(
-            ctx,
-            &partition_args,
-            Some(aggregate.clone()),
-            MAX_STREAMED_ARTIFACT_SIZE
-                .checked_sub(disk)
-                .ok_or_else(|| {
-                    api_error("Splunk aggregate disk counter overflow", Some(413), None)
-                })?,
-        )
-        .await
-        {
-            Ok(value) => value,
-            Err(error) => {
-                cleanup_splunk_partitions(&paths).await;
-                return Err(error);
-            }
-        };
-        let path = response.raw_response_path.ok_or_else(|| {
-            api_error(
-                "Splunk partition produced no canonical artifact",
-                Some(502),
-                None,
+        let aggregate = aggregate.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            let response = search_single(
+                ctx,
+                &partition_args,
+                Some(aggregate),
+                MAX_STREAMED_ARTIFACT_SIZE,
+                cancellation,
             )
-        })?;
-        disk = disk
-            .checked_add(
-                std::fs::metadata(&path)
-                    .map_err(|e| {
-                        api_error(format!("Cannot account Splunk partition: {e}"), None, None)
-                    })?
-                    .len(),
-            )
-            .ok_or_else(|| api_error("Splunk aggregate disk counter overflow", Some(413), None))?;
-        if disk > MAX_STREAMED_ARTIFACT_SIZE {
-            let mut all = paths.clone();
-            all.push(path);
-            cleanup_splunk_partitions(&all).await;
-            return Err(api_error(
-                "Splunk aggregate temporary/projected artifact quota exceeded",
-                Some(413),
-                None,
-            ));
+            .await?;
+            let path = response.raw_response_path.ok_or_else(|| {
+                api_error(
+                    "Splunk partition produced no canonical artifact",
+                    Some(502),
+                    None,
+                )
+            })?;
+            Ok::<_, McpError>((index, path))
         }
-        if disk
-            .checked_mul(2)
-            .is_none_or(|projected| projected > MAX_STREAMED_ARTIFACT_SIZE)
-        {
-            let mut all = paths.clone();
-            all.push(path);
-            cleanup_splunk_partitions(&all).await;
-            return Err(api_error(
-                "Splunk projected final plus retained partition quota exceeded",
-                Some(413),
-                None,
-            ));
-        }
-        paths.push(path);
+    };
+    let mut next = 0;
+    while next < concurrency {
+        active.push(acquire(next));
+        next += 1;
     }
-    let result =
-        splunk_final_partition_response(args, start, end, count, &paths, &intervals, &aggregate)
-            .await;
+    let mut slots = vec![None; count];
+    let mut first_error = None;
+    while let Some(result) = active.next().await {
+        match result {
+            Ok((index, path)) => {
+                let size = std::fs::metadata(&path).map(|metadata| metadata.len());
+                slots[index] = Some(path);
+                if first_error.is_none() {
+                    let retained = size
+                        .map_err(|error| std::io::Error::other(format!("metadata: {error}")))
+                        .and_then(|size| disk.retain(size));
+                    if let Err(error) = retained {
+                        cancellation.cancel();
+                        first_error = Some(api_error(
+                            format!("Cannot account Splunk partition: {error}"),
+                            Some(413),
+                            None,
+                        ));
+                    } else if next < count {
+                        active.push(acquire(next));
+                        next += 1;
+                    }
+                }
+            }
+            Err(error) if first_error.is_none() => {
+                cancellation.cancel();
+                first_error = Some(error);
+            }
+            Err(_) => {}
+        }
+    }
+    let paths = slots.into_iter().flatten().collect::<Vec<_>>();
+    if let Some(error) = first_error {
+        cleanup_splunk_partitions(&paths).await;
+        return Err(error);
+    }
+    debug_assert_eq!(
+        disk.retained_bytes(),
+        paths
+            .iter()
+            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
+            .sum::<u64>()
+    );
+    let result = splunk_final_partition_response(
+        args,
+        start,
+        end,
+        count,
+        &paths,
+        &intervals,
+        &aggregate,
+        &cancellation,
+    )
+    .await;
     if result.is_err() {
         cleanup_splunk_partitions(&paths).await;
     }
     result
 }
 
+#[allow(clippy::too_many_arguments)] // Explicit lifecycle inputs keep the final commit auditable.
 async fn splunk_final_partition_response(
     args: &SplunkSearchArgs,
     start: i128,
@@ -216,6 +252,7 @@ async fn splunk_final_partition_response(
     paths: &[std::path::PathBuf],
     _intervals: &[crate::ingestion::QueryInterval],
     aggregate: &crate::transport::StreamingAggregateQuota,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut validated = Vec::with_capacity(paths.len());
     let mut retained_bytes = 0_u64;
@@ -256,11 +293,12 @@ async fn splunk_final_partition_response(
             None,
         ));
     }
-    let merge = crate::ingestion::merge_partitions(
+    let merge = crate::ingestion::merge_partitions_cancellable(
         paths,
         crate::ingestion::RecordOrdering::Chronological,
         None,
         final_budget,
+        cancellation,
     )
     .await
     .map_err(|e| api_error(format!("Cannot merge Splunk partitions: {e}"), None, None))?;
@@ -296,7 +334,8 @@ async fn splunk_final_partition_response(
     if let Err(error) =
         crate::ingestion::persist_manifest(&merge.artifact.artifact.path, &manifest).await
     {
-        let _ = tokio::fs::remove_file(&merge.artifact.artifact.path).await;
+        let _ =
+            crate::transport::raw_response::remove_artifact(&merge.artifact.artifact.path).await;
         return Err(api_error(
             format!("Cannot commit final Splunk manifest: {error}"),
             None,
@@ -309,7 +348,7 @@ async fn splunk_final_partition_response(
 
 async fn cleanup_splunk_partitions(paths: &[std::path::PathBuf]) {
     for path in paths {
-        let _ = tokio::fs::remove_file(path).await;
+        let _ = crate::transport::raw_response::remove_artifact(path).await;
         let _ = tokio::fs::remove_file(path.with_extension("manifest.json")).await;
     }
 }
@@ -409,6 +448,7 @@ pub async fn job_results(
         "splunk-job-results",
         args.jq.as_deref(),
         MAX_STREAMED_ARTIFACT_SIZE,
+        &tokio_util::sync::CancellationToken::new(),
     )
     .await
 }
@@ -419,6 +459,7 @@ async fn normalize_streamed_response(
     prefix: &str,
     jq: Option<&str>,
     canonical_max_bytes: u64,
+    cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut items = crate::ingestion::stream_splunk_json_rows(input.artifact.path.clone(), 8);
     let mut fields = None;
@@ -438,6 +479,13 @@ async fn normalize_streamed_response(
         )
     })?;
     while let Some(item) = items.recv().await {
+        if cancellation.is_cancelled() {
+            return Err(api_error(
+                "Splunk partition normalization cancelled",
+                Some(499),
+                None,
+            ));
+        }
         match item.map_err(|error| {
             api_error(
                 format!("Invalid Splunk json_rows response: {error}"),
@@ -478,9 +526,18 @@ async fn normalize_streamed_response(
                         None,
                     )
                 })?;
-                records += 1;
+                records = records.checked_add(1).ok_or_else(|| {
+                    api_error("Splunk canonical record counter overflow", Some(413), None)
+                })?;
             }
         }
+    }
+    if cancellation.is_cancelled() {
+        return Err(api_error(
+            "Splunk partition normalization cancelled",
+            Some(499),
+            None,
+        ));
     }
     let artifact = writer.commit().await.map_err(|error| {
         api_error(
@@ -522,7 +579,7 @@ async fn normalize_streamed_response(
     };
     if let Err(error) = crate::ingestion::persist_manifest(&artifact.artifact.path, &manifest).await
     {
-        let _ = tokio::fs::remove_file(&artifact.artifact.path).await;
+        let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
         return Err(api_error(
             format!("Cannot commit Splunk artifact manifest: {error}"),
             None,

@@ -1075,14 +1075,42 @@ pub async fn persist_manifest(
     artifact_path: &Path,
     manifest: &ArtifactManifest,
 ) -> std::io::Result<PathBuf> {
+    persist_manifest_impl(artifact_path, manifest, None).await
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ManifestFault {
+    Write,
+    Sync,
+    Rename,
+}
+
+async fn persist_manifest_impl(
+    artifact_path: &Path,
+    manifest: &ArtifactManifest,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: Option<ManifestFault>,
+) -> std::io::Result<PathBuf> {
     let path = artifact_path.with_extension("manifest.json");
     let part = artifact_path.with_extension("manifest.json.part");
     let result = async {
         let bytes = serde_json::to_vec_pretty(manifest).map_err(std::io::Error::other)?;
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Write) {
+            return Err(std::io::Error::other("injected manifest write failure"));
+        }
         fs::write(&part, bytes).await?;
         let file = fs::OpenOptions::new().write(true).open(&part).await?;
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Sync) {
+            return Err(std::io::Error::other("injected manifest sync failure"));
+        }
         file.sync_all().await?;
         drop(file);
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Rename) {
+            return Err(std::io::Error::other("injected manifest rename failure"));
+        }
         fs::rename(&part, &path).await?;
         Ok(path)
     }
@@ -1403,6 +1431,40 @@ mod tests {
                 .exists()
         );
         fs::remove_dir(final_path).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn injected_manifest_failures_leave_no_sidecar_or_partial() {
+        let artifact = write_partition("manifest-injected", [record(1, "a")], 4096)
+            .await
+            .unwrap();
+        let manifest = manifest_for(&artifact, "splunk", 1);
+        for fault in [
+            ManifestFault::Write,
+            ManifestFault::Sync,
+            ManifestFault::Rename,
+        ] {
+            assert!(
+                persist_manifest_impl(&artifact.artifact.path, &manifest, Some(fault))
+                    .await
+                    .is_err()
+            );
+            assert!(
+                !artifact
+                    .artifact
+                    .path
+                    .with_extension("manifest.json")
+                    .exists()
+            );
+            assert!(
+                !artifact
+                    .artifact
+                    .path
+                    .with_extension("manifest.json.part")
+                    .exists()
+            );
+        }
+        let _ = raw_response::remove_artifact(&artifact.artifact.path).await;
     }
 
     #[tokio::test]

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::time::Duration;
 
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::controllers::splunk::{
@@ -238,6 +239,178 @@ async fn search_partitions_exact_half_open_splunk_bounds() {
     assert_eq!(manifest["query_interval"]["end_ns"], 110_000_000_000_u64);
     assert_eq!(manifest["partitions"].as_array().unwrap().len(), 2);
     cleanup(Some(artifact_path));
+}
+
+#[tokio::test]
+async fn search_partitions_merge_non_empty_results_in_planned_order() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/services/search/v2/jobs/export"))
+        .and(body_string_contains("earliest_time=100.000000000"))
+        .and(body_string_contains("latest_time=105.000000000"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_delay(Duration::from_millis(150))
+                .set_body_json(json!({
+                    "fields": ["_time", "_raw", "host"],
+                    "rows": [
+                        ["101", "first", "api-1"],
+                        ["105", "boundary", "api-1"]
+                    ]
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/services/search/v2/jobs/export"))
+        .and(body_string_contains("earliest_time=105.000000000"))
+        .and(body_string_contains("latest_time=110.000000000"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "fields": ["_time", "_raw", "host"],
+            "rows": [
+                ["105", "boundary", "api-1"],
+                ["105", "same-time-distinct", "api-1"],
+                ["109", "last", "api-1"]
+            ]
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let config = config();
+    let vendor = SplunkVendor::with_base_url(server.uri());
+    let response = search(
+        &SplunkContext::new(&client, &config, &vendor),
+        &SplunkSearchArgs {
+            search: "search index=main".into(),
+            earliest_time: Some("100".into()),
+            latest_time: Some("110".into()),
+            time_partitions: Some(2),
+            max_time: None,
+            jq: None,
+            output_format: Some(json_output()),
+        },
+    )
+    .await
+    .unwrap();
+
+    let artifact_path = response.raw_response_path.unwrap();
+    let bytes = std::fs::read(&artifact_path).unwrap();
+    let records: Vec<serde_json::Value> = bytes
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    assert_eq!(
+        records
+            .iter()
+            .map(|record| record["payload"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["first", "boundary", "same-time-distinct", "last"]
+    );
+    assert_eq!(records[1]["timestamp_ns"], records[2]["timestamp_ns"]);
+
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(artifact_path.with_extension("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(manifest["ordering"], "chronological");
+    assert_eq!(manifest["total_records"], 4);
+    assert_eq!(manifest["duplicate_count"], 1);
+    assert_eq!(manifest["partitions_requested"], 2);
+    assert_eq!(manifest["partitions_succeeded"], 2);
+    assert_eq!(manifest["partitions_failed"], 0);
+    assert_eq!(manifest["final_bytes"], u64::try_from(bytes.len()).unwrap());
+    assert_eq!(
+        manifest["final_sha256"],
+        format!("{:x}", Sha256::digest(&bytes))
+    );
+    assert_eq!(manifest["encoded_bytes"], manifest["decoded_bytes"]);
+    assert!(manifest["encoded_bytes"].as_u64().unwrap() > 0);
+    let partitions = manifest["partitions"].as_array().unwrap();
+    assert_eq!(partitions.len(), 2);
+    assert_eq!(partitions[0]["index"], 0);
+    assert_eq!(partitions[1]["index"], 1);
+    assert_eq!(partitions[0]["records"], 2);
+    assert_eq!(partitions[1]["records"], 3);
+    assert!(
+        partitions
+            .iter()
+            .map(|partition| partition["decoded_bytes"].as_u64().unwrap())
+            .sum::<u64>()
+            > manifest["final_bytes"].as_u64().unwrap()
+    );
+    cleanup(Some(artifact_path));
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn partition_failure_cancels_drains_and_schedules_nothing_later() {
+    let server = MockServer::start().await;
+    for earliest in ["0.000000000", "2.000000000", "6.000000000"] {
+        Mock::given(method("POST"))
+            .and(path("/services/search/v2/jobs/export"))
+            .and(body_string_contains(format!("earliest_time={earliest}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_delay(Duration::from_millis(200))
+                    .set_body_raw(
+                        r#"{"fields":["_time","_raw"],"rows":[]}"#,
+                        "application/json",
+                    ),
+            )
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("POST"))
+        .and(path("/services/search/v2/jobs/export"))
+        .and(body_string_contains("earliest_time=4.000000000"))
+        .respond_with(ResponseTemplate::new(500).set_body_string("injected middle failure"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/services/search/v2/jobs/export"))
+        .and(body_string_contains("earliest_time=8.000000000"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            r#"{"fields":["_time","_raw"],"rows":[]}"#,
+            "application/json",
+        ))
+        .expect(0)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let config = config();
+    let vendor = SplunkVendor::with_base_url(server.uri());
+    let error = search(
+        &SplunkContext::new(&client, &config, &vendor),
+        &SplunkSearchArgs {
+            search: "search index=main".into(),
+            earliest_time: Some("0".into()),
+            latest_time: Some("10".into()),
+            time_partitions: Some(5),
+            max_time: None,
+            jq: None,
+            output_format: Some(json_output()),
+        },
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.status_code, Some(500));
+
+    let dir = mcp_server_atlassian::transport::raw_response::init();
+    let names = std::fs::read_dir(dir)
+        .unwrap()
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect::<Vec<_>>();
+    assert!(!names.iter().any(|name| {
+        name.contains("splunk-search") || name.contains("canonical-logs") || name.ends_with(".part")
+    }));
 }
 
 #[tokio::test]
