@@ -131,12 +131,11 @@ pub async fn handle_logs(
     args: &CircleCiLogsArgs,
 ) -> Result<ControllerResponse, McpError> {
     let token = ctx.vendor.token(ctx.config).await?;
-    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-        crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
-    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     let project = LogProject::parse(&args.project_slug)?;
     let build = fetch_build_details(ctx, &token, &project, args.job_number).await?;
-    let steps = collect_log_steps(ctx, &build, args, disk.clone()).await?;
+    let steps = collect_log_steps(ctx, &build, args, disk.clone(), cancellation).await?;
 
     let response = CircleCiLogsResponse {
         project_slug: args.project_slug.clone(),
@@ -303,6 +302,7 @@ async fn collect_log_steps(
     build: &Value,
     args: &CircleCiLogsArgs,
     disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<Vec<LogStep>, McpError> {
     let Some(steps) = build.get("steps").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -317,7 +317,14 @@ async fn collect_log_steps(
         {
             continue;
         }
-        let actions = collect_log_actions(ctx, step, args.failed_only, disk.clone()).await?;
+        let actions = collect_log_actions(
+            ctx,
+            step,
+            args.failed_only,
+            disk.clone(),
+            cancellation.clone(),
+        )
+        .await?;
         if args.failed_only && actions.is_empty() {
             continue;
         }
@@ -335,6 +342,7 @@ async fn collect_log_actions(
     step: &Value,
     failed_only: bool,
     disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<Vec<LogAction>, McpError> {
     let Some(actions) = step.get("actions").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -362,12 +370,13 @@ async fn collect_log_actions(
     let mut collected: Vec<(usize, LogAction)> = stream::iter(selected)
         .map(|(action_index, action, status, exit_code)| {
             let disk = disk.clone();
+            let cancellation = cancellation.clone();
             async move {
                 let output_url = action.get("output_url").and_then(Value::as_str);
                 let (output_path, encoded_bytes, decoded_bytes, output_fetch_error) =
                     match output_url {
                         Some(url) if !url.is_empty() => {
-                            match fetch_action_output(ctx, url, disk).await {
+                            match fetch_action_output(ctx, url, disk, cancellation).await {
                                 Ok(artifact) => (
                                     Some(artifact.artifact.path),
                                     artifact.encoded_bytes,
@@ -543,6 +552,7 @@ async fn fetch_action_output(
     ctx: &CircleCiContext<'_>,
     output_url: &str,
     disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
+    cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<raw_response::StreamedArtifact, McpError> {
     let _ = ctx;
     let _permit = output_downloads().acquire().await.map_err(|err| {
@@ -557,6 +567,7 @@ async fn fetch_action_output(
         crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.disk = Some(disk);
+    policy.cancellation = cancellation;
     crate::transport::fetch_streamed_url(
         output_url,
         "circleci-action",
@@ -586,7 +597,7 @@ async fn write_complete_log_artifact(
             None,
         )
     })?;
-    writer.set_disk_quota(disk.clone());
+    writer.set_disk_quota(&disk);
     let mut sequence = 0_u64;
     for step in &response.steps {
         for action in &step.actions {

@@ -1024,7 +1024,7 @@ pub async fn merge_partitions_cancellable_reserved(
     )
     .await?;
     if let Some(disk) = disk {
-        writer.set_disk_quota(disk);
+        writer.set_disk_quota(&disk);
     }
     let mut records = 0_u64;
     let mut duplicates = 0_u64;
@@ -1161,7 +1161,12 @@ async fn persist_manifest_reserved_impl(
     let part = artifact_path.with_extension("manifest.json.part");
     let bytes = serde_json::to_vec_pretty(manifest).map_err(std::io::Error::other)?;
     let byte_count = u64::try_from(bytes.len()).map_err(std::io::Error::other)?;
-    disk.reserve(byte_count)?;
+    let mut reservation = Some(disk.lease()?);
+    reservation
+        .as_ref()
+        .expect("manifest reservation exists")
+        .grow(byte_count)
+        .await?;
     let result = async {
         #[cfg(test)]
         if fault == Some(ManifestFault::Write) {
@@ -1179,16 +1184,43 @@ async fn persist_manifest_reserved_impl(
         if fault == Some(ManifestFault::Rename) {
             return Err(std::io::Error::other("injected manifest rename failure"));
         }
-        fs::rename(&part, &path).await?;
-        raw_response::attach_sidecar_reservation(artifact_path, &disk, byte_count)?;
-        Ok(path)
+        replace_manifest_part(&part, &path).await?;
+        raw_response::attach_sidecar_reservation(artifact_path, &disk, &mut reservation)?;
+        Ok(path.clone())
     }
     .await;
     if result.is_err() {
-        let _ = fs::remove_file(&part).await;
-        let _ = disk.release(byte_count);
+        let part_cleaned = match fs::remove_file(&part).await {
+            Ok(()) => true,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(_) => false,
+        };
+        if !part_cleaned && let Some(reservation) = reservation.take() {
+            raw_response::retain_orphaned_reservation(part, reservation);
+        } else if let Some(reservation) = reservation.take() {
+            let physical_path = if path.exists() { path } else { part };
+            raw_response::retain_orphaned_reservation(physical_path, reservation);
+        }
     }
     result
+}
+
+async fn replace_manifest_part(part: &Path, path: &Path) -> std::io::Result<()> {
+    if !path.exists() {
+        return fs::rename(part, path).await;
+    }
+    let backup = path.with_extension(format!("manifest.json.replaced-{}", uuid::Uuid::new_v4()));
+    fs::rename(path, &backup).await?;
+    if let Err(error) = fs::rename(part, path).await {
+        let _ = fs::rename(&backup, path).await;
+        return Err(error);
+    }
+    if let Err(error) = fs::remove_file(&backup).await {
+        let _ = fs::remove_file(path).await;
+        let _ = fs::rename(&backup, path).await;
+        return Err(error);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1553,7 +1585,7 @@ mod tests {
             )
             .await
             .unwrap();
-            writer.set_disk_quota(quota.clone());
+            writer.set_disk_quota(&quota);
             writer.write_chunk(b"\n").await.unwrap();
             let artifact = writer.commit().await.unwrap();
             let manifest = manifest_for(&artifact, "splunk", 0);
@@ -1590,16 +1622,33 @@ mod tests {
         )
         .await
         .unwrap();
-        writer.set_disk_quota(quota.clone());
+        writer.set_disk_quota(&quota);
         writer.write_chunk(b"\n").await.unwrap();
         let artifact = writer.commit().await.unwrap();
-        let manifest = manifest_for(&artifact, "splunk", 0);
+        let mut manifest = manifest_for(&artifact, "splunk", 0);
         let manifest_path =
             persist_manifest_reserved(&artifact.artifact.path, &manifest, quota.clone())
                 .await
                 .unwrap();
         let intended = artifact.artifact.size + fs::metadata(&manifest_path).await.unwrap().len();
         assert_eq!(quota.reserved_bytes(), intended);
+        manifest
+            .diagnostics
+            .push("replacement sidecar owns only its new physical bytes".to_owned());
+        persist_manifest_reserved(&artifact.artifact.path, &manifest, quota.clone())
+            .await
+            .unwrap();
+        let replaced = artifact.artifact.size + fs::metadata(&manifest_path).await.unwrap().len();
+        assert_eq!(quota.reserved_bytes(), replaced);
+        assert!(
+            std::fs::read_dir(manifest_path.parent().unwrap())
+                .unwrap()
+                .flatten()
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .contains("manifest.json.replaced-"))
+        );
         raw_response::remove_artifact(&artifact.artifact.path)
             .await
             .unwrap();

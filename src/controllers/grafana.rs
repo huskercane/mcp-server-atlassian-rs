@@ -73,15 +73,15 @@ pub async fn query_logs(
     {
         return query_logs_partitioned(ctx, args, start, end, count).await;
     }
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     query_logs_single(
         ctx,
         args,
         None,
-        std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-            MAX_STREAMED_ARTIFACT_SIZE,
-        )),
+        disk,
         MAX_STREAMED_ARTIFACT_SIZE,
-        tokio_util::sync::CancellationToken::new(),
+        cancellation,
     )
     .await
 }
@@ -187,9 +187,7 @@ async fn query_logs_partitioned(
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-        MAX_STREAMED_ARTIFACT_SIZE,
-    ));
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     let concurrency = count.min(ctx.config.streaming_partition_concurrency());
     let mut active = FuturesUnordered::new();
     let acquire = |index: usize| {
@@ -400,7 +398,7 @@ async fn normalize_loki_response(
     )
     .await
     .map_err(|error| api_error(format!("Cannot create Loki canonical artifact: {error}")))?;
-    writer.set_disk_quota(disk.clone());
+    writer.set_disk_quota(&disk);
     let mut records = 0_u64;
     while let Some(item) = items.recv().await {
         if cancellation.is_cancelled() {

@@ -572,3 +572,70 @@ Run `cargo fmt --all`, the focused ingestion/vendor/artifact/transport tests,
 `cargo test --all-features -j 1`, and `git diff --check`. Do not claim this next
 slice complete unless concurrency remains bounded, failure cancellation is
 transactional, and the full suite passes.
+
+## Server-wide streaming disk coordination checkpoint (2026-08-21)
+
+### Completed
+
+- Replaced transaction-local aggregate disk ceilings with one process-wide
+  streaming disk coordinator. Every Splunk search/job-results, Grafana/Loki,
+  CircleCI action-output, transport-input, canonical-part, final-artifact, and
+  manifest writer now participates in the same server ceiling while retaining
+  an independent per-transaction byte total and the existing per-request byte
+  quotas.
+- Added private checked transaction and reservation identifiers. Each writer
+  grows one narrow lease before physical writes and transfers that exact lease
+  to the artifact registry on commit. A transaction cannot release another
+  transaction's bytes; release underflow, duplicate release, owner mismatch,
+  identifier overflow, reservation overflow, transaction overflow, and global
+  overflow all fail explicitly without changing accounting.
+- Reservation contention uses strict FIFO head-of-line fairness. Acquisition
+  waits are cancellation-aware and bounded by an absolute transaction
+  deadline. Cancellation and deadline races roll back a grant atomically, so a
+  timed-out waiter cannot strand bytes or disturb the holder that blocked it.
+- Preserved the final-artifact projected-space rule independently of the live
+  server-wide reservation ceiling. Successful final artifacts retain exactly
+  their artifact and manifest leases until artifact removal or process-session
+  cleanup; partition artifacts transfer no ownership until final artifact and
+  manifest commit both succeed.
+- Hardened partial-write cleanup. A write error conservatively keeps its lease
+  until the partial is physically deleted. Failed deletion retains an internal
+  orphan lease for later filesystem reconciliation instead of releasing bytes
+  early. Artifact removal likewise releases registry leases only after the
+  artifact, manifest, and manifest partial are gone.
+- Made reserved manifest replacement portable and transactional on Windows by
+  using a same-directory backup/rename/remove sequence. The superseded
+  sidecar lease is released only after its physical backup is removed, and
+  replacement rollback restores the prior sidecar on failure.
+- Session cleanup now clears registry and orphan leases only after the process
+  artifact directory is physically removed. Reconciliation removes missing
+  registry entries, missing sidecar leases, and cleaned orphan leases.
+  Abandoned-session scavenging retains directories whose PID is live and is
+  deliberately conservative when process inspection itself fails, preventing
+  deletion of artifacts owned by another live process.
+- Preserved all public tool schemas, partition eligibility and exact bound
+  handling, `STREAMING_PARTITION_CONCURRENCY`, its default of four, and its
+  1-16 bound.
+- Added deterministic focused coverage for independent Splunk/Loki
+  transactions sharing one ceiling, CircleCI competition, FIFO wake order,
+  peak bounds, quota exhaustion and overflow, cancellation/deadline rollback,
+  transaction isolation, double-release rejection, acquisition rollback,
+  artifact/manifest ownership transitions and replacement, failed cleanup,
+  live-process scavenging, and registry/filesystem/reservation reconciliation.
+
+### Verification
+
+- `cargo fmt --all`
+- Focused ingestion, Splunk normalization/controller, Grafana/Loki
+  normalization/controller, CircleCI controller, raw-artifact, tool-schema,
+  and streaming-transport tests, including non-empty multipart ordering in
+  both directions
+- `cargo check --all-features`
+- `cargo test --all-features -j 1` (full suite passed)
+- `git diff --check`
+
+`cargo clippy --all-features --all-targets -- -D warnings` reaches the project
+and reports exactly the documented five pre-existing warnings and no warning
+from this slice: `cast_possible_truncation` and `cast_possible_wrap` in
+`src/transport/response_cache.rs`, `too_many_lines` and `map_unwrap_or` in the
+generic transport, and `map_unwrap_or` in `src/vendor/ninjaone/mod.rs`.

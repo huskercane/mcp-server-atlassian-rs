@@ -27,6 +27,14 @@ use crate::constants::UNSCOPED_PACKAGE_NAME;
 
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static ARTIFACTS: OnceLock<RwLock<HashMap<String, RegisteredArtifact>>> = OnceLock::new();
+static ORPHANED_RESERVATIONS: OnceLock<std::sync::Mutex<Vec<OrphanedReservation>>> =
+    OnceLock::new();
+
+#[derive(Debug)]
+struct OrphanedReservation {
+    path: PathBuf,
+    _reservation: super::StreamingDiskLease,
+}
 
 #[derive(Debug)]
 struct RegisteredArtifact {
@@ -36,20 +44,8 @@ struct RegisteredArtifact {
 
 #[derive(Debug)]
 struct DiskReservation {
-    quota: std::sync::Arc<super::StreamingDiskQuota>,
-    artifact_bytes: u64,
-    sidecar_bytes: u64,
-}
-
-impl Drop for DiskReservation {
-    fn drop(&mut self) {
-        let total = self
-            .artifact_bytes
-            .checked_add(self.sidecar_bytes)
-            .expect("registered disk reservation total is checked at acquisition");
-        let released = self.quota.release(total);
-        debug_assert!(released.is_ok());
-    }
+    artifact: super::StreamingDiskLease,
+    sidecar: Option<super::StreamingDiskLease>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -94,7 +90,7 @@ pub struct ArtifactWriter {
     tail: std::collections::VecDeque<u8>,
     hasher: Sha256,
     committed: bool,
-    disk_quota: Option<std::sync::Arc<super::StreamingDiskQuota>>,
+    disk_reservation: Option<super::StreamingDiskLease>,
     #[cfg(test)]
     fault: Option<ArtifactWriterFault>,
 }
@@ -107,9 +103,13 @@ enum ArtifactWriterFault {
 }
 
 impl ArtifactWriter {
-    pub fn set_disk_quota(&mut self, quota: std::sync::Arc<super::StreamingDiskQuota>) {
+    pub fn set_disk_quota(&mut self, quota: &std::sync::Arc<super::StreamingDiskQuota>) {
         debug_assert_eq!(self.size, 0);
-        self.disk_quota = Some(quota);
+        self.disk_reservation = Some(
+            quota
+                .lease()
+                .expect("new streaming disk transaction accepts a writer lease"),
+        );
     }
 
     #[cfg(test)]
@@ -118,10 +118,6 @@ impl ArtifactWriter {
     }
 
     pub async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()> {
-        #[cfg(test)]
-        if self.fault == Some(ArtifactWriterFault::Write) {
-            return Err(std::io::Error::other("injected artifact write failure"));
-        }
         let next = self
             .size
             .checked_add(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)
@@ -132,21 +128,19 @@ impl ArtifactWriter {
                 format!("streamed artifact exceeds {} bytes", self.max_bytes),
             ));
         }
-        if let Some(quota) = &self.disk_quota {
-            quota.reserve(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)?;
+        let byte_count = u64::try_from(bytes.len()).map_err(std::io::Error::other)?;
+        if let Some(reservation) = &self.disk_reservation {
+            reservation.grow(byte_count).await?;
         }
-        if let Err(error) = self
-            .writer
+        #[cfg(test)]
+        if self.fault == Some(ArtifactWriterFault::Write) {
+            return Err(std::io::Error::other("injected artifact write failure"));
+        }
+        self.writer
             .as_mut()
             .expect("artifact writer is open")
             .write_all(bytes)
-            .await
-        {
-            if let Some(quota) = &self.disk_quota {
-                let _ = quota.release(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
-            }
-            return Err(error);
-        }
+            .await?;
         let head_limit = crate::constants::data_limits::STREAM_PREVIEW_HEAD_SIZE;
         if self.head.len() < head_limit {
             let take = (head_limit - self.head.len()).min(bytes.len());
@@ -188,11 +182,13 @@ impl ArtifactWriter {
                 self.id.clone(),
                 RegisteredArtifact {
                     metadata: metadata.clone(),
-                    disk: self.disk_quota.take().map(|quota| DiskReservation {
-                        quota,
-                        artifact_bytes: self.size,
-                        sidecar_bytes: 0,
-                    }),
+                    disk: self
+                        .disk_reservation
+                        .take()
+                        .map(|artifact| DiskReservation {
+                            artifact,
+                            sidecar: None,
+                        }),
                 },
             );
         self.committed = true;
@@ -210,9 +206,15 @@ impl ArtifactWriter {
 impl Drop for ArtifactWriter {
     fn drop(&mut self) {
         if !self.committed {
-            let _ = std::fs::remove_file(&self.partial_path);
-            if let Some(quota) = &self.disk_quota {
-                let _ = quota.release(self.size);
+            let cleaned = match std::fs::remove_file(&self.partial_path) {
+                Ok(()) => true,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+                Err(_) => false,
+            };
+            if cleaned {
+                self.disk_reservation.take();
+            } else if let Some(reservation) = self.disk_reservation.take() {
+                retain_orphaned_reservation(self.partial_path.clone(), reservation);
             }
         }
     }
@@ -260,7 +262,7 @@ pub async fn begin_artifact(
         ),
         hasher: Sha256::new(),
         committed: false,
-        disk_quota: None,
+        disk_reservation: None,
         #[cfg(test)]
         fault: None,
     })
@@ -287,6 +289,61 @@ pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
         .map(|registered| registered.metadata.clone())
 }
 
+/// Reconcile externally removed artifacts with the in-memory registry. This
+/// keeps reservations conservative until every physical sidecar is gone.
+pub(crate) fn reconcile_missing_artifacts() {
+    let mut entries = artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    entries.retain(|_, registered| {
+        let path = &registered.metadata.path;
+        let manifest = path.with_extension("manifest.json");
+        let manifest_part = path.with_extension("manifest.json.part");
+        if path.exists() {
+            if !manifest.exists()
+                && !manifest_part.exists()
+                && let Some(disk) = &mut registered.disk
+            {
+                disk.sidecar.take();
+            }
+            return true;
+        }
+        for sidecar in [&manifest, &manifest_part] {
+            match std::fs::remove_file(sidecar) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return true,
+            }
+        }
+        false
+    });
+    drop(entries);
+    reconcile_orphaned_reservations();
+}
+
+fn orphaned_reservations() -> &'static std::sync::Mutex<Vec<OrphanedReservation>> {
+    ORPHANED_RESERVATIONS.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+pub(crate) fn retain_orphaned_reservation(path: PathBuf, reservation: super::StreamingDiskLease) {
+    if path.exists() {
+        orphaned_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(OrphanedReservation {
+                path,
+                _reservation: reservation,
+            });
+    }
+}
+
+fn reconcile_orphaned_reservations() {
+    orphaned_reservations()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .retain(|orphan| orphan.path.exists());
+}
+
 /// Remove a committed artifact and forget its download metadata.
 ///
 /// A missing file is treated as an already-completed removal so stale
@@ -311,6 +368,7 @@ pub async fn remove_artifact(path: &Path) -> std::io::Result<()> {
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .retain(|_, artifact| artifact.metadata.path != path);
+    reconcile_orphaned_reservations();
     Ok(())
 }
 
@@ -318,7 +376,7 @@ pub async fn remove_artifact(path: &Path) -> std::io::Result<()> {
 pub(crate) fn attach_sidecar_reservation(
     artifact_path: &Path,
     quota: &std::sync::Arc<super::StreamingDiskQuota>,
-    bytes: u64,
+    reservation: &mut Option<super::StreamingDiskLease>,
 ) -> std::io::Result<()> {
     let mut entries = artifacts()
         .write()
@@ -331,14 +389,13 @@ pub(crate) fn attach_sidecar_reservation(
         .disk
         .as_mut()
         .ok_or_else(|| std::io::Error::other("artifact has no disk reservation"))?;
-    if !std::sync::Arc::ptr_eq(&disk.quota, quota) {
+    let sidecar = reservation
+        .as_ref()
+        .ok_or_else(|| std::io::Error::other("sidecar reservation was already transferred"))?;
+    if !disk.artifact.same_transaction(quota) || !sidecar.same_transaction(quota) {
         return Err(std::io::Error::other("sidecar uses a different disk quota"));
     }
-    let old = disk.sidecar_bytes;
-    if old != 0 {
-        quota.release(old)?;
-    }
-    disk.sidecar_bytes = bytes;
+    disk.sidecar = reservation.take();
     Ok(())
 }
 
@@ -368,22 +425,38 @@ pub fn init() -> PathBuf {
 /// Remove artifacts owned by this process. Forced termination cannot run this
 /// hook; the next process startup removes the abandoned session directory.
 pub fn cleanup_current_session() {
+    let mut cleaned = false;
     if let Some(dir) = SESSION_DIR.get() {
         match std::fs::remove_dir_all(dir) {
-            Ok(()) => debug!(dir = %dir.display(), "removed temporary response artifacts"),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Ok(()) => {
+                cleaned = true;
+                debug!(dir = %dir.display(), "removed temporary response artifacts");
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => cleaned = true,
             Err(err) => {
                 debug!(%err, dir = %dir.display(), "failed to remove temporary response artifacts");
             }
         }
     }
-    artifacts()
-        .write()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clear();
+    if cleaned {
+        artifacts()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+        orphaned_reservations()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clear();
+    } else {
+        reconcile_missing_artifacts();
+    }
 }
 
 fn cleanup_abandoned(base: &Path) {
+    cleanup_abandoned_with(base, process_is_running);
+}
+
+fn cleanup_abandoned_with(base: &Path, is_running: impl Fn(u32) -> bool) {
     let Ok(entries) = std::fs::read_dir(base) else {
         return;
     };
@@ -404,7 +477,7 @@ fn cleanup_abandoned(base: &Path) {
         else {
             continue;
         };
-        if !process_is_running(pid) {
+        if !is_running(pid) {
             let _ = std::fs::remove_dir_all(path);
         }
     }
@@ -412,18 +485,30 @@ fn cleanup_abandoned(base: &Path) {
 
 #[cfg(windows)]
 fn process_is_running(pid: u32) -> bool {
-    Command::new("tasklist")
+    let Ok(output) = Command::new("tasklist")
         .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
         .output()
-        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return true;
+    }
+    String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\""))
 }
 
 #[cfg(not(windows))]
 fn process_is_running(pid: u32) -> bool {
-    Command::new("ps")
+    let Ok(output) = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "pid="])
         .output()
-        .is_ok_and(|output| !output.stdout.is_empty())
+    else {
+        return true;
+    };
+    if !output.status.success() {
+        return output.status.code() != Some(1);
+    }
+    !output.stdout.is_empty()
 }
 
 /// Write the raw API response to disk and return the path written. Returns
@@ -692,11 +777,11 @@ mod artifact_writer_fault_tests {
         let mut first = begin_artifact("reserved-first", "txt", "text/plain", 16)
             .await
             .unwrap();
-        first.set_disk_quota(quota.clone());
+        first.set_disk_quota(&quota);
         let mut second = begin_artifact("reserved-second", "txt", "text/plain", 16)
             .await
             .unwrap();
-        second.set_disk_quota(quota.clone());
+        second.set_disk_quota(&quota);
 
         first.write_chunk(b"1234").await.unwrap();
         assert!(second.write_chunk(b"5678").await.is_err());
@@ -713,7 +798,7 @@ mod artifact_writer_fault_tests {
         let mut writer = begin_artifact("reserved-commit", "txt", "text/plain", 16)
             .await
             .unwrap();
-        writer.set_disk_quota(quota.clone());
+        writer.set_disk_quota(&quota);
         writer.write_chunk(b"data").await.unwrap();
         let artifact = writer.commit().await.unwrap();
         assert_eq!(quota.reserved_bytes(), 4);
@@ -730,10 +815,72 @@ mod artifact_writer_fault_tests {
         let mut writer = begin_artifact("reserved-fault", "txt", "text/plain", 16)
             .await
             .unwrap();
-        writer.set_disk_quota(quota.clone());
+        writer.set_disk_quota(&quota);
         writer.write_chunk(b"data").await.unwrap();
         writer.inject_fault(ArtifactWriterFault::Commit);
         assert!(writer.commit().await.is_err());
         assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn acquired_write_reservation_rolls_back_only_after_partial_cleanup() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let mut writer = begin_artifact("reserved-write-fault", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        let partial = writer.partial_path.clone();
+        writer.set_disk_quota(&quota);
+        writer.inject_fault(ArtifactWriterFault::Write);
+        assert!(writer.write_chunk(b"data").await.is_err());
+        assert_eq!(quota.reserved_bytes(), 4);
+        drop(writer);
+        assert!(!partial.exists());
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_file_reconciliation_removes_sidecars_registry_and_reservations() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(32));
+        let mut writer = begin_artifact("reserved-reconcile", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        writer.set_disk_quota(&quota);
+        writer.write_chunk(b"data").await.unwrap();
+        let committed = writer.commit().await.unwrap();
+        let sidecar = committed.artifact.path.with_extension("manifest.json");
+        let sidecar_reservation = quota.lease().unwrap();
+        sidecar_reservation.grow(3).await.unwrap();
+        let mut sidecar_reservation = Some(sidecar_reservation);
+        fs::write(&sidecar, b"{}\n").await.unwrap();
+        attach_sidecar_reservation(&committed.artifact.path, &quota, &mut sidecar_reservation)
+            .unwrap();
+        assert_eq!(quota.reserved_bytes(), 7);
+
+        fs::remove_file(&committed.artifact.path).await.unwrap();
+        reconcile_missing_artifacts();
+        assert!(!sidecar.exists());
+        assert!(artifact(&committed.artifact.id).is_none());
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn abandoned_scavenging_keeps_live_process_sessions() {
+        let base = tempfile::tempdir().unwrap();
+        let live = base
+            .path()
+            .join(format!("session-{}-live", std::process::id()));
+        let abandoned = base.path().join("session-4294967295-abandoned");
+        std::fs::create_dir_all(&live).unwrap();
+        std::fs::create_dir_all(&abandoned).unwrap();
+        std::fs::write(live.join("artifact"), b"live").unwrap();
+        std::fs::write(abandoned.join("artifact"), b"stale").unwrap();
+        let legacy = base.path().join("legacy-artifact");
+        std::fs::write(&legacy, b"stale").unwrap();
+
+        cleanup_abandoned_with(base.path(), |pid| pid == std::process::id());
+
+        assert!(live.exists());
+        assert!(!abandoned.exists());
+        assert!(!legacy.exists());
     }
 }

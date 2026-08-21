@@ -62,15 +62,15 @@ pub async fn search(
     {
         return search_partitioned(ctx, args, start, end, count).await;
     }
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     search_single(
         ctx,
         args,
         None,
-        std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-            MAX_STREAMED_ARTIFACT_SIZE,
-        )),
+        disk,
         MAX_STREAMED_ARTIFACT_SIZE,
-        tokio_util::sync::CancellationToken::new(),
+        cancellation,
     )
     .await
 }
@@ -151,9 +151,7 @@ async fn search_partitioned(
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
     let cancellation = tokio_util::sync::CancellationToken::new();
-    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-        MAX_STREAMED_ARTIFACT_SIZE,
-    ));
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     let concurrency = count.min(ctx.config.streaming_partition_concurrency());
     let mut active = FuturesUnordered::new();
     let acquire = |index: usize| {
@@ -419,14 +417,14 @@ pub async fn job_results(
         &format!("/services/search/v2/jobs/{}/results", args.sid),
         &query,
     );
-    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
-        MAX_STREAMED_ARTIFACT_SIZE,
-    ));
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let disk = crate::transport::StreamingDiskQuota::server_transaction(cancellation.clone());
     let mut policy = crate::transport::StreamingPolicy::new(
         MAX_STREAMED_ARTIFACT_SIZE,
         MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.disk = Some(disk.clone());
+    policy.cancellation = cancellation.clone();
     let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
         &creds,
@@ -448,7 +446,7 @@ pub async fn job_results(
         args.jq.as_deref(),
         MAX_STREAMED_ARTIFACT_SIZE,
         disk,
-        &tokio_util::sync::CancellationToken::new(),
+        &cancellation,
     )
     .await;
     let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
@@ -481,7 +479,7 @@ async fn normalize_streamed_response(
             None,
         )
     })?;
-    writer.set_disk_quota(disk.clone());
+    writer.set_disk_quota(&disk);
     while let Some(item) = items.recv().await {
         if cancellation.is_cancelled() {
             return Err(api_error(

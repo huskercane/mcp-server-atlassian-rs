@@ -30,11 +30,11 @@ mod response_cache;
 /// [`crate::vendor::bitbucket::error`].
 pub use crate::vendor::bitbucket::error as bitbucket_error;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use futures::TryStreamExt as _;
@@ -105,57 +105,522 @@ pub struct StreamingAggregateQuota {
     pub max_decoded_bytes: u64,
 }
 
-/// Checked, concurrency-safe accounting for retained temporary artifacts.
+/// One request's private view of the process-wide streaming disk coordinator.
+/// The owner identifier and its reservation leases never cross a public tool
+/// boundary.
 #[derive(Debug)]
 pub struct StreamingDiskQuota {
-    reserved: AtomicU64,
-    peak: AtomicU64,
+    coordinator: Arc<StreamingDiskCoordinator>,
+    owner: u64,
+    cancellation: CancellationToken,
+    deadline: tokio::time::Instant,
+}
+
+#[derive(Debug)]
+struct StreamingDiskCoordinator {
+    limit: u64,
+    state: Mutex<StreamingDiskState>,
+}
+
+// Waiters use strict FIFO ordering. A request at the head of the queue is the
+// only request considered until enough bytes are released for it, preventing
+// smaller later writes from starving an earlier writer. Every wait is bounded
+// by its transaction cancellation token and absolute deadline.
+
+#[derive(Debug, Default)]
+struct StreamingDiskState {
+    reserved: u64,
+    peak: u64,
+    next_reservation: u64,
+    next_waiter: u64,
+    transactions: HashMap<u64, TransactionReservation>,
+    reservations: HashMap<u64, OwnedReservation>,
+    waiters: VecDeque<ReservationWaiter>,
+}
+
+#[derive(Debug)]
+struct TransactionReservation {
+    reserved: u64,
     limit: u64,
 }
 
-impl StreamingDiskQuota {
-    pub const fn new(limit: u64) -> Self {
+#[derive(Debug)]
+struct OwnedReservation {
+    owner: u64,
+    amount: u64,
+}
+
+#[derive(Debug)]
+struct ReservationWaiter {
+    id: u64,
+    reservation: u64,
+    owner: u64,
+    amount: u64,
+    status: Arc<AtomicU8>,
+    notify: Arc<tokio::sync::Notify>,
+}
+
+/// A narrow, exactly-once reservation owned by one writer or committed file.
+#[derive(Debug)]
+pub(crate) struct StreamingDiskLease {
+    transaction: Arc<StreamingDiskQuota>,
+    reservation: u64,
+}
+
+static STREAMING_DISK_COORDINATOR: OnceLock<Arc<StreamingDiskCoordinator>> = OnceLock::new();
+static NEXT_STREAMING_TRANSACTION: AtomicU64 = AtomicU64::new(1);
+
+impl StreamingDiskCoordinator {
+    fn new(limit: u64) -> Self {
         Self {
-            reserved: AtomicU64::new(0),
-            peak: AtomicU64::new(0),
             limit,
+            state: Mutex::new(StreamingDiskState::default()),
         }
     }
 
-    pub fn reserve(&self, amount: u64) -> std::io::Result<u64> {
-        let next = self
-            .reserved
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current
-                    .checked_add(amount)
-                    .filter(|next| *next <= self.limit)
-            })
-            .map(|previous| previous + amount)
-            .map_err(|_| {
-                std::io::Error::new(
-                    std::io::ErrorKind::FileTooLarge,
-                    "aggregate disk reservation quota exceeded or counter overflow",
-                )
-            })?;
-        self.peak.fetch_max(next, Ordering::AcqRel);
-        Ok(next)
+    fn register_transaction(&self, owner: u64, limit: u64) {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transactions
+            .insert(owner, TransactionReservation { reserved: 0, limit });
     }
 
-    pub fn release(&self, amount: u64) -> std::io::Result<u64> {
-        self.reserved
+    fn register_reservation(&self, owner: u64) -> std::io::Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !state.transactions.contains_key(&owner) {
+            return Err(std::io::Error::other(
+                "disk reservation transaction is closed",
+            ));
+        }
+        state.next_reservation = state
+            .next_reservation
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("disk reservation identifier overflow"))?;
+        let reservation = state.next_reservation;
+        state
+            .reservations
+            .insert(reservation, OwnedReservation { owner, amount: 0 });
+        Ok(reservation)
+    }
+
+    fn can_grant(state: &StreamingDiskState, limit: u64, amount: u64) -> bool {
+        state
+            .reserved
+            .checked_add(amount)
+            .is_some_and(|next| next <= limit)
+    }
+
+    fn grant_locked(
+        state: &mut StreamingDiskState,
+        limit: u64,
+        reservation: u64,
+        owner: u64,
+        amount: u64,
+    ) -> std::io::Result<u64> {
+        let transaction = state
+            .transactions
+            .get(&owner)
+            .ok_or_else(|| std::io::Error::other("disk reservation transaction is closed"))?;
+        let transaction_next = transaction
+            .reserved
+            .checked_add(amount)
+            .filter(|next| *next <= transaction.limit)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "transaction disk reservation quota exceeded or counter overflow",
+                )
+            })?;
+        let global_next = state
+            .reserved
+            .checked_add(amount)
+            .filter(|next| *next <= limit)
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    "server-wide disk reservation quota exceeded or counter overflow",
+                )
+            })?;
+        let reservation_entry = state.reservations.get(&reservation).ok_or_else(|| {
+            std::io::Error::other("disk reservation lease is no longer registered")
+        })?;
+        if reservation_entry.owner != owner {
+            return Err(std::io::Error::other("disk reservation owner mismatch"));
+        }
+        let reservation_next = reservation_entry
+            .amount
+            .checked_add(amount)
+            .ok_or_else(|| std::io::Error::other("disk reservation counter overflow"))?;
+        state.reserved = global_next;
+        state.peak = state.peak.max(global_next);
+        state
+            .transactions
+            .get_mut(&owner)
+            .expect("transaction validated above")
+            .reserved = transaction_next;
+        state
+            .reservations
+            .get_mut(&reservation)
+            .expect("reservation validated above")
+            .amount = reservation_next;
+        Ok(reservation_next)
+    }
+
+    fn wake_waiters_locked(state: &mut StreamingDiskState, limit: u64) {
+        while !state.waiters.is_empty() {
+            let amount = state.waiters.front().expect("waiter exists").amount;
+            if !Self::can_grant(state, limit, amount) {
+                break;
+            }
+            let waiter = state.waiters.pop_front().expect("front waiter exists");
+            if Self::grant_locked(
+                state,
+                limit,
+                waiter.reservation,
+                waiter.owner,
+                waiter.amount,
+            )
+            .is_ok()
+            {
+                waiter.status.store(1, Ordering::Release);
+            } else {
+                waiter.status.store(2, Ordering::Release);
+            }
+            waiter.notify.notify_one();
+        }
+    }
+
+    async fn acquire(
+        &self,
+        reservation: u64,
+        owner: u64,
+        amount: u64,
+        cancellation: &CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> std::io::Result<u64> {
+        if amount == 0 {
+            let state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            return state
+                .reservations
+                .get(&reservation)
+                .filter(|entry| entry.owner == owner)
+                .map(|entry| entry.amount)
+                .ok_or_else(|| std::io::Error::other("disk reservation owner mismatch"));
+        }
+        let status = Arc::new(AtomicU8::new(0));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let waiter_id;
+        {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let transaction = state
+                .transactions
+                .get(&owner)
+                .ok_or_else(|| std::io::Error::other("disk reservation transaction is closed"))?;
+            transaction
+                .reserved
+                .checked_add(amount)
+                .filter(|next| *next <= transaction.limit)
+                .ok_or_else(|| {
+                    std::io::Error::new(
+                        std::io::ErrorKind::FileTooLarge,
+                        "transaction disk reservation quota exceeded or counter overflow",
+                    )
+                })?;
+            if state.waiters.is_empty() && Self::can_grant(&state, self.limit, amount) {
+                return Self::grant_locked(&mut state, self.limit, reservation, owner, amount);
+            }
+            state.next_waiter = state
+                .next_waiter
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("disk waiter identifier overflow"))?;
+            waiter_id = state.next_waiter;
+            state.waiters.push_back(ReservationWaiter {
+                id: waiter_id,
+                reservation,
+                owner,
+                amount,
+                status: status.clone(),
+                notify: notify.clone(),
+            });
+        }
+        let outcome = tokio::select! {
+            biased;
+            () = cancellation.cancelled() => Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "disk reservation wait cancelled")),
+            () = tokio::time::sleep_until(deadline) => Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "disk reservation wait deadline exceeded")),
+            () = notify.notified() => Ok(()),
+        };
+        if outcome.is_err() || status.load(Ordering::Acquire) != 1 {
+            let mut state = self
+                .state
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if let Some(index) = state
+                .waiters
+                .iter()
+                .position(|waiter| waiter.id == waiter_id)
+            {
+                state.waiters.remove(index);
+                status.store(2, Ordering::Release);
+                Self::wake_waiters_locked(&mut state, self.limit);
+            } else if status.swap(2, Ordering::AcqRel) == 1 {
+                Self::release_locked(&mut state, reservation, owner, amount)?;
+                Self::wake_waiters_locked(&mut state, self.limit);
+            }
+            return outcome.and(Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "disk reservation waiter could not be granted",
+            )));
+        }
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        Ok(state
+            .reservations
+            .get(&reservation)
+            .expect("granted reservation remains registered")
+            .amount)
+    }
+
+    fn release_locked(
+        state: &mut StreamingDiskState,
+        reservation: u64,
+        owner: u64,
+        amount: u64,
+    ) -> std::io::Result<u64> {
+        let entry = state
+            .reservations
+            .get(&reservation)
+            .ok_or_else(|| std::io::Error::other("disk reservation already released"))?;
+        if entry.owner != owner {
+            return Err(std::io::Error::other("disk reservation owner mismatch"));
+        }
+        let reservation_next = entry
+            .amount
+            .checked_sub(amount)
+            .ok_or_else(|| std::io::Error::other("disk reservation release underflow"))?;
+        let transaction = state
+            .transactions
+            .get(&owner)
+            .ok_or_else(|| std::io::Error::other("disk reservation transaction is closed"))?;
+        let transaction_next = transaction
+            .reserved
+            .checked_sub(amount)
+            .ok_or_else(|| std::io::Error::other("transaction reservation release underflow"))?;
+        let global_next = state
+            .reserved
+            .checked_sub(amount)
+            .ok_or_else(|| std::io::Error::other("server reservation release underflow"))?;
+        state
+            .reservations
+            .get_mut(&reservation)
+            .expect("reservation validated above")
+            .amount = reservation_next;
+        state
+            .transactions
+            .get_mut(&owner)
+            .expect("transaction validated above")
+            .reserved = transaction_next;
+        state.reserved = global_next;
+        Ok(reservation_next)
+    }
+
+    fn release(&self, reservation: u64, owner: u64, amount: u64) -> std::io::Result<u64> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let remaining = Self::release_locked(&mut state, reservation, owner, amount)?;
+        Self::wake_waiters_locked(&mut state, self.limit);
+        Ok(remaining)
+    }
+
+    fn unregister_reservation(&self, reservation: u64, owner: u64) -> std::io::Result<()> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let entry = state
+            .reservations
+            .get(&reservation)
+            .ok_or_else(|| std::io::Error::other("disk reservation already released"))?;
+        if entry.owner != owner {
+            return Err(std::io::Error::other("disk reservation owner mismatch"));
+        }
+        if entry.amount != 0 {
+            return Err(std::io::Error::other(
+                "cannot unregister a live disk reservation",
+            ));
+        }
+        state.reservations.remove(&reservation);
+        Ok(())
+    }
+}
+
+impl StreamingDiskQuota {
+    fn next_owner() -> u64 {
+        NEXT_STREAMING_TRANSACTION
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_sub(amount)
+                current.checked_add(1)
             })
-            .map(|previous| previous - amount)
-            .map_err(|_| std::io::Error::other("disk reservation release underflow"))
+            .expect("streaming disk transaction identifier space exhausted")
+    }
+
+    #[cfg(test)]
+    pub fn new(limit: u64) -> Self {
+        let coordinator = Arc::new(StreamingDiskCoordinator::new(limit));
+        let owner = Self::next_owner();
+        coordinator.register_transaction(owner, limit);
+        Self {
+            coordinator,
+            owner,
+            cancellation: CancellationToken::new(),
+            deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+        }
+    }
+
+    fn with_coordinator(
+        coordinator: Arc<StreamingDiskCoordinator>,
+        limit: u64,
+        cancellation: CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> Arc<Self> {
+        let owner = Self::next_owner();
+        coordinator.register_transaction(owner, limit);
+        Arc::new(Self {
+            coordinator,
+            owner,
+            cancellation,
+            deadline,
+        })
+    }
+
+    pub fn server_transaction(cancellation: CancellationToken) -> Arc<Self> {
+        raw_response::reconcile_missing_artifacts();
+        let limit = crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE;
+        let coordinator = STREAMING_DISK_COORDINATOR
+            .get_or_init(|| Arc::new(StreamingDiskCoordinator::new(limit)))
+            .clone();
+        Self::with_coordinator(
+            coordinator,
+            limit,
+            cancellation,
+            tokio::time::Instant::now()
+                + crate::constants::data_limits::STREAM_TOTAL_REQUEST_TIMEOUT,
+        )
+    }
+
+    pub(crate) fn lease(self: &Arc<Self>) -> std::io::Result<StreamingDiskLease> {
+        let reservation = self.coordinator.register_reservation(self.owner)?;
+        Ok(StreamingDiskLease {
+            transaction: self.clone(),
+            reservation,
+        })
     }
 
     pub fn reserved_bytes(&self) -> u64 {
-        self.reserved.load(Ordering::Acquire)
+        self.coordinator
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .transactions
+            .get(&self.owner)
+            .map_or(0, |transaction| transaction.reserved)
     }
 
     pub fn peak_reserved_bytes(&self) -> u64 {
-        self.peak.load(Ordering::Acquire)
+        self.coordinator
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .peak
+    }
+}
+
+impl Drop for StreamingDiskQuota {
+    fn drop(&mut self) {
+        let mut state = self
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let removable = state
+            .transactions
+            .get(&self.owner)
+            .is_some_and(|transaction| transaction.reserved == 0)
+            && !state
+                .reservations
+                .values()
+                .any(|reservation| reservation.owner == self.owner)
+            && !state
+                .waiters
+                .iter()
+                .any(|waiter| waiter.owner == self.owner);
+        if removable {
+            state.transactions.remove(&self.owner);
+        }
+    }
+}
+
+impl StreamingDiskLease {
+    pub(crate) async fn grow(&self, amount: u64) -> std::io::Result<u64> {
+        self.transaction
+            .coordinator
+            .acquire(
+                self.reservation,
+                self.transaction.owner,
+                amount,
+                &self.transaction.cancellation,
+                self.transaction.deadline,
+            )
+            .await
+    }
+
+    pub(crate) fn shrink(&self, amount: u64) -> std::io::Result<u64> {
+        self.transaction
+            .coordinator
+            .release(self.reservation, self.transaction.owner, amount)
+    }
+
+    pub(crate) fn amount(&self) -> u64 {
+        self.transaction
+            .coordinator
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .reservations
+            .get(&self.reservation)
+            .filter(|reservation| reservation.owner == self.transaction.owner)
+            .map_or(0, |reservation| reservation.amount)
+    }
+
+    pub(crate) fn same_transaction(&self, transaction: &Arc<StreamingDiskQuota>) -> bool {
+        Arc::ptr_eq(&self.transaction, transaction)
+    }
+}
+
+impl Drop for StreamingDiskLease {
+    fn drop(&mut self) {
+        let amount = self.amount();
+        if amount != 0 {
+            let released = self.shrink(amount);
+            debug_assert!(released.is_ok());
+        }
+        let unregistered = self
+            .transaction
+            .coordinator
+            .unregister_reservation(self.reservation, self.transaction.owner);
+        debug_assert!(unregistered.is_ok());
     }
 }
 
@@ -209,7 +674,21 @@ impl StreamingAggregateQuota {
 
 #[cfg(test)]
 mod aggregate_quota_tests {
-    use super::{StreamingAggregateQuota, StreamingDiskQuota};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tokio_util::sync::CancellationToken;
+
+    use super::{StreamingAggregateQuota, StreamingDiskCoordinator, StreamingDiskQuota};
+
+    fn shared_transaction(
+        coordinator: &Arc<StreamingDiskCoordinator>,
+        limit: u64,
+        cancellation: CancellationToken,
+        deadline: tokio::time::Instant,
+    ) -> Arc<StreamingDiskQuota> {
+        StreamingDiskQuota::with_coordinator(coordinator.clone(), limit, cancellation, deadline)
+    }
 
     #[test]
     fn checked_aggregate_counters_reject_limits_and_overflow() {
@@ -221,18 +700,141 @@ mod aggregate_quota_tests {
         assert!(overflow.add_decoded(1).is_err());
     }
 
-    #[test]
-    fn checked_disk_reservation_rejects_quota_underflow_and_overflow() {
-        let quota = StreamingDiskQuota::new(10);
-        assert_eq!(quota.reserve(4).unwrap(), 4);
-        assert_eq!(quota.reserve(6).unwrap(), 10);
-        assert!(quota.reserve(1).is_err());
-        assert_eq!(quota.release(6).unwrap(), 4);
-        assert_eq!(quota.release(4).unwrap(), 0);
-        assert!(quota.release(1).is_err());
-        let overflow = StreamingDiskQuota::new(u64::MAX);
-        overflow.reserve(u64::MAX).unwrap();
-        assert!(overflow.reserve(1).is_err());
+    #[tokio::test]
+    async fn checked_disk_reservation_rejects_quota_underflow_and_overflow() {
+        let quota = std::sync::Arc::new(StreamingDiskQuota::new(10));
+        let lease = quota.lease().unwrap();
+        assert_eq!(lease.grow(4).await.unwrap(), 4);
+        assert_eq!(lease.grow(6).await.unwrap(), 10);
+        assert!(lease.grow(1).await.is_err());
+        assert_eq!(lease.shrink(6).unwrap(), 4);
+        assert_eq!(lease.shrink(4).unwrap(), 0);
+        assert!(lease.shrink(1).is_err());
+        let overflow = std::sync::Arc::new(StreamingDiskQuota::new(u64::MAX));
+        let overflow_lease = overflow.lease().unwrap();
+        overflow_lease.grow(u64::MAX).await.unwrap();
+        assert!(overflow_lease.grow(1).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn independent_splunk_and_loki_transactions_share_one_ceiling() {
+        let coordinator = Arc::new(StreamingDiskCoordinator::new(10));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let splunk = shared_transaction(&coordinator, 10, CancellationToken::new(), deadline);
+        let loki = shared_transaction(&coordinator, 10, CancellationToken::new(), deadline);
+        let splunk_file = splunk.lease().unwrap();
+        let loki_file = loki.lease().unwrap();
+        splunk_file.grow(6).await.unwrap();
+        let waiting = tokio::spawn(async move {
+            let result = loki_file.grow(5).await;
+            (loki_file, result)
+        });
+        tokio::task::yield_now().await;
+        assert!(!waiting.is_finished());
+        assert_eq!(coordinator.state.lock().unwrap().reserved, 6);
+        splunk_file.shrink(1).unwrap();
+        let (loki_file, result) = waiting.await.unwrap();
+        assert_eq!(result.unwrap(), 5);
+        assert_eq!(splunk.reserved_bytes(), 5);
+        assert_eq!(loki.reserved_bytes(), 5);
+        assert!(coordinator.state.lock().unwrap().peak <= 10);
+        drop(splunk_file);
+        drop(loki_file);
+        assert_eq!(splunk.reserved_bytes(), 0);
+        assert_eq!(loki.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn circleci_waits_behind_ingestion_in_fifo_order() {
+        let coordinator = Arc::new(StreamingDiskCoordinator::new(4));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let holder = shared_transaction(&coordinator, 4, CancellationToken::new(), deadline);
+        let splunk = shared_transaction(&coordinator, 4, CancellationToken::new(), deadline);
+        let circleci = shared_transaction(&coordinator, 4, CancellationToken::new(), deadline);
+        let held = holder.lease().unwrap();
+        held.grow(4).await.unwrap();
+        let first_lease = splunk.lease().unwrap();
+        let first = tokio::spawn(async move {
+            first_lease.grow(3).await.unwrap();
+            first_lease
+        });
+        while coordinator.state.lock().unwrap().waiters.len() != 1 {
+            tokio::task::yield_now().await;
+        }
+        let second_lease = circleci.lease().unwrap();
+        let second = tokio::spawn(async move {
+            second_lease.grow(3).await.unwrap();
+            second_lease
+        });
+        while coordinator.state.lock().unwrap().waiters.len() != 2 {
+            tokio::task::yield_now().await;
+        }
+        held.shrink(3).unwrap();
+        let first_lease = first.await.unwrap();
+        assert!(!second.is_finished());
+        drop(first_lease);
+        let second_lease = second.await.unwrap();
+        assert_eq!(circleci.reserved_bytes(), 3);
+        drop(second_lease);
+        drop(held);
+        assert_eq!(coordinator.state.lock().unwrap().reserved, 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_rolls_back_only_the_waiting_transaction() {
+        let coordinator = Arc::new(StreamingDiskCoordinator::new(4));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let holder = shared_transaction(&coordinator, 4, CancellationToken::new(), deadline);
+        let cancellation = CancellationToken::new();
+        let waiter = shared_transaction(&coordinator, 4, cancellation.clone(), deadline);
+        let held = holder.lease().unwrap();
+        held.grow(4).await.unwrap();
+        let waiting_lease = waiter.lease().unwrap();
+        let waiting = tokio::spawn(async move { waiting_lease.grow(1).await });
+        while coordinator.state.lock().unwrap().waiters.is_empty() {
+            tokio::task::yield_now().await;
+        }
+        cancellation.cancel();
+        let error = waiting.await.unwrap().unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::Interrupted);
+        assert_eq!(waiter.reserved_bytes(), 0);
+        assert_eq!(holder.reserved_bytes(), 4);
+        assert!(coordinator.state.lock().unwrap().waiters.is_empty());
+        drop(held);
+        assert_eq!(coordinator.state.lock().unwrap().reserved, 0);
+    }
+
+    #[tokio::test]
+    async fn deadline_quota_exhaustion_and_owner_isolation_are_explicit() {
+        let coordinator = Arc::new(StreamingDiskCoordinator::new(2));
+        let holder = shared_transaction(
+            &coordinator,
+            2,
+            CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        );
+        let waiter = shared_transaction(
+            &coordinator,
+            2,
+            CancellationToken::new(),
+            tokio::time::Instant::now() + Duration::from_millis(10),
+        );
+        let held = holder.lease().unwrap();
+        held.grow(2).await.unwrap();
+        let waiting = waiter.lease().unwrap();
+        let error = waiting.grow(1).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::TimedOut);
+        assert_eq!(waiter.reserved_bytes(), 0);
+        assert!(
+            coordinator
+                .release(held.reservation, waiter.owner, 1)
+                .is_err()
+        );
+        assert_eq!(holder.reserved_bytes(), 2);
+        assert!(waiting.shrink(1).is_err());
+        drop(waiting);
+        drop(held);
+        assert_eq!(coordinator.state.lock().unwrap().reserved, 0);
     }
 }
 
@@ -420,7 +1022,7 @@ async fn persist_decoded_response(
     .await
     .map_err(|error| unexpected(format!("failed to create streamed artifact: {error}"), None))?;
     if let Some(disk) = &policy.disk {
-        writer.set_disk_quota(disk.clone());
+        writer.set_disk_quota(disk);
     }
     let mut buffer = vec![0_u8; crate::constants::data_limits::STREAM_WRITE_BUFFER_SIZE];
     loop {
