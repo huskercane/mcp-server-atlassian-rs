@@ -8,6 +8,7 @@ use super::markdown::{format_heading, format_separator};
 
 /// ~10k tokens at 4 chars/token. Controls when we start truncating.
 pub const MAX_RESPONSE_CHARS: usize = 40_000;
+const HEAD_RESPONSE_CHARS: usize = 5_000;
 
 /// Truncate over-budget content and append a guidance block with a pointer
 /// to the on-disk raw response. Returns the original content unchanged when
@@ -17,28 +18,42 @@ pub fn truncate_for_ai(content: &str, raw_response_path: Option<&Path>) -> Strin
         return content.to_owned();
     }
 
-    let mut cutoff = MAX_RESPONSE_CHARS;
-    let search_start = MAX_RESPONSE_CHARS.saturating_sub(500);
+    let mut cutoff = HEAD_RESPONSE_CHARS;
+    while cutoff > 0 && !content.is_char_boundary(cutoff) {
+        cutoff -= 1;
+    }
+    let search_start = HEAD_RESPONSE_CHARS.saturating_sub(500);
 
-    if let Some(last_newline) = content[..MAX_RESPONSE_CHARS].rfind('\n')
+    if let Some(last_newline) = content[..cutoff].rfind('\n')
         && last_newline > search_start
     {
         cutoff = last_newline;
     }
 
-    // Snap cutoff to a UTF-8 boundary (for content with multi-byte runs)
-    while cutoff > 0 && !content.is_char_boundary(cutoff) {
-        cutoff -= 1;
+    let tail_budget = MAX_RESPONSE_CHARS - cutoff;
+    let mut tail_start = content.len().saturating_sub(tail_budget);
+    while tail_start < content.len() && !content.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    // Avoid beginning with a partial line, but do not throw away most of the
+    // tail when a response contains one exceptionally long line.
+    if let Some(first_newline) = content[tail_start..]
+        .get(..500)
+        .and_then(|tail| tail.find('\n'))
+    {
+        tail_start += first_newline + 1;
     }
 
-    let truncated_size = cutoff;
+    let truncated_size = cutoff + content.len().saturating_sub(tail_start);
     let original_size = content.len();
     let percent = percent_ratio(truncated_size, original_size);
     let tokens_k = rough_k_tokens(truncated_size);
     let orig_k = rough_k_chars(original_size);
 
-    let mut out = String::with_capacity(truncated_size + 512);
+    let mut out = String::with_capacity(truncated_size + 768);
     out.push_str(&content[..cutoff]);
+    out.push_str("\n\n--- Middle omitted; preserving response tail ---\n\n");
+    out.push_str(&content[tail_start..]);
     out.push('\n');
     out.push_str(format_separator());
     out.push('\n');

@@ -19,6 +19,7 @@ use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -38,12 +39,18 @@ fn logs_args(uid: &str, query: &str) -> GrafanaQueryLogsArgs {
         query: query.to_string(),
         start: None,
         end: None,
+        time_partitions: None,
         limit: None,
         direction: None,
         step: None,
         jq: None,
         output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
     }
+}
+
+fn remove_artifact(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    let _ = std::fs::remove_file(path.with_extension("manifest.json"));
 }
 
 #[tokio::test]
@@ -86,7 +93,23 @@ async fn query_logs_proxies_logql_with_bearer_and_params() {
     let resp = query_logs(&ctx, &args).await.unwrap();
     assert!(resp.content.contains("boom happened"));
     if let Some(p) = resp.raw_response_path {
-        let _ = std::fs::remove_file(p);
+        let bytes = std::fs::read(&p).unwrap();
+        let line: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(line["timestamp_ns"], json!(1_700_000_000_000_000_000_u64));
+        assert_eq!(line["payload"], "boom happened");
+        assert_eq!(line["labels"], json!({"app":"api","level":"error"}));
+        assert_eq!(line["source"], "loki:{\"app\":\"api\"}");
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(p.with_extension("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["completeness"], "complete");
+        assert_eq!(manifest["total_records"], 1);
+        assert_eq!(manifest["encoded_bytes"], manifest["decoded_bytes"]);
+        assert_eq!(
+            manifest["final_sha256"],
+            format!("{:x}", Sha256::digest(&bytes))
+        );
+        remove_artifact(&p);
     }
 }
 
@@ -115,10 +138,59 @@ async fn query_logs_omits_unset_optional_params() {
     let resp = query_logs(&ctx, &logs_args("loki-prod", "{job=\"app\"}"))
         .await
         .unwrap();
-    assert!(resp.content.contains("success"));
+    assert!(resp.content.contains("Grafana/Loki canonical"));
     if let Some(p) = resp.raw_response_path {
-        let _ = std::fs::remove_file(p);
+        assert!(std::fs::read(&p).unwrap().is_empty());
+        let manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(p.with_extension("manifest.json")).unwrap())
+                .unwrap();
+        assert_eq!(manifest["completeness"], "complete");
+        assert_eq!(manifest["total_records"], 0);
+        remove_artifact(&p);
     }
+}
+
+#[tokio::test]
+async fn query_logs_partitions_exact_half_open_nanosecond_bounds() {
+    let server = MockServer::start().await;
+    for (start, end) in [("100", "105"), ("105", "110")] {
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/datasources/proxy/uid/loki-prod/loki/api/v1/query_range",
+            ))
+            .and(query_param("start", start))
+            .and(query_param("end", end))
+            .and(query_param("limit", "10"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(
+                json!({"status":"success","data":{"resultType":"streams","result":[]}}),
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let client = build_client().unwrap();
+    let vendor = GrafanaVendor::with_base_url(server.uri());
+    let config = Config::from_map(creds());
+    let mut args = logs_args("loki-prod", "{app=\"api\"}");
+    args.start = Some("100".into());
+    args.end = Some("110".into());
+    args.limit = Some(10);
+    args.direction = Some("forward".into());
+    args.time_partitions = Some(2);
+    let response = query_logs(&GrafanaContext::new(&client, &config, &vendor), &args)
+        .await
+        .unwrap();
+    let artifact_path = response.raw_response_path.unwrap();
+    assert!(std::fs::read(&artifact_path).unwrap().is_empty());
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(artifact_path.with_extension("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(manifest["query_interval"]["start_ns"], 100);
+    assert_eq!(manifest["query_interval"]["end_ns"], 110);
+    assert_eq!(manifest["partitions"].as_array().unwrap().len(), 2);
+    remove_artifact(&artifact_path);
 }
 
 #[tokio::test]
@@ -149,7 +221,7 @@ async fn list_datasources_sends_bearer_and_filters_loki() {
     assert!(resp.content.contains("loki-prod"));
     assert!(!resp.content.contains("prom-1"));
     if let Some(p) = resp.raw_response_path {
-        let _ = std::fs::remove_file(p);
+        remove_artifact(&p);
     }
 }
 

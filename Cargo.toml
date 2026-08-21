@@ -46,7 +46,7 @@ rmcp                = { version = "=3.1.2", features = ["transport-io", "transpo
 tokio               = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "signal", "io-std", "fs", "sync", "time", "process"] }
 axum                = "=0.8.9"
 tower-http          = { version = "=0.7.0", features = ["cors", "limit"] }
-tokio-util          = { version = "=0.7.19", features = ["rt"] }
+tokio-util          = { version = "=0.7.19", features = ["rt", "io"] }
 futures             = "=0.3.34"
 serde               = { version = "=1.0.229", features = ["derive"] }
 serde_json          = "=1.0.151"
@@ -64,7 +64,8 @@ sha2                = "=0.10.9"
 dirs                = "=6.0.0"
 uuid                = { version = "=1.24.0", features = ["v4"] }
 regex               = "=1.13.1"
-reqwest             = { version = "=0.13.4", default-features = false, features = ["json", "form", "rustls", "charset", "http2"] }
+reqwest             = { version = "=0.13.4", default-features = false, features = ["json", "form", "stream", "rustls", "charset", "http2", "gzip", "brotli", "deflate", "zstd"] }
+async-compression   = { version = "=0.4.36", features = ["tokio", "gzip", "brotli", "deflate", "zstd"] }
 url                 = "=2.5.8"
 jmespath            = "=0.5.0"
 toon-format         = { version = "=0.5.0", default-features = false }
@@ -75,6 +76,7 @@ atomicwrites        = "0.4.4"
 rpassword           = "7"
 httpdate            = "1"
 zstd                = "0.13"
+chrono              = { version = "=0.4.45", default-features = false, features = ["std"] }
 
 # --- WRDS (feature = "wrds") --------------------------------------------------
 # WRDS is PostgreSQL-only; these back the `wrds_*` tools. `with-serde_json-1`

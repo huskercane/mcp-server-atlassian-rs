@@ -79,10 +79,46 @@ pub struct CircleCiLogsArgs {
     /// CircleCI job number from `/workflow/{workflow-id}/job`.
     pub job_number: u64,
 
+    /// Retrieve only this one-based CircleCI step number. Omit to consider all
+    /// steps in the job.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_number: Option<usize>,
+
+    /// Retrieve only actions whose status is failed or whose exit code is
+    /// non-zero. This avoids downloading successful action output.
+    #[serde(default)]
+    pub failed_only: bool,
+
+    /// Return error-relevant lines with surrounding context instead of the
+    /// normal head/tail preview. The complete selected logs are still saved.
+    #[serde(default)]
+    pub condensed: bool,
+
+    /// Number of lines before and after each condensed match (default 3,
+    /// maximum 20).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_lines: Option<usize>,
+
     /// Output format: "toon" (default, 30-60% fewer tokens) or "json".
     /// TOON is optimized for LLMs with tabular arrays and minimal syntax.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_format: Option<OutputFormatArg>,
+}
+
+/// Arguments for resumably reading a server-owned temporary artifact.
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactReadArgs {
+    /// Opaque artifact ID returned by a tool such as `circleci_logs`.
+    pub artifact_id: String,
+
+    /// Zero-based byte offset. Use the prior response's `nextOffset` to resume.
+    #[serde(default)]
+    pub offset: u64,
+
+    /// Maximum bytes to return. Defaults to 64 KiB and is capped at 1 MiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<usize>,
 }
 
 /// Arguments for `bb_clone`.
@@ -277,6 +313,12 @@ pub struct GrafanaQueryLogsArgs {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end: Option<String>,
 
+    /// Split an absolute range into this many requests (2-16). Until the
+    /// partition merge slice lands, the returned artifact is a partition-set
+    /// manifest whose entries identify the retained canonical NDJSON parts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_partitions: Option<u8>,
+
     /// Max number of log lines to return (Loki defaults to 100). Keep this small
     /// to reduce token costs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -446,6 +488,11 @@ pub struct SplunkSearchArgs {
     /// Inclusive latest time, such as `now` or an ISO timestamp.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latest_time: Option<String>,
+
+    /// Split an absolute range into this many requests (2-16). Relative or
+    /// imprecise bounds always retain the single-request path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_partitions: Option<u8>,
 
     /// Maximum seconds Splunk may run the search before finalizing it.
     #[serde(default, skip_serializing_if = "Option::is_none")]

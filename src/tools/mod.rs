@@ -77,12 +77,13 @@ use crate::vendor::wrds::WrdsVendor;
 use crate::vendor::zoom::ZoomVendor;
 use crate::workspace::WorkspaceCache;
 use args::{
-    CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs,
-    EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs, EdxDiscussionThreadsArgs,
-    EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs, NewRelicQueryArgs,
-    NinjaOneLoginArgs, NinjaOneReadArgs, NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs,
-    SonarqubeSearchIssuesArgs, SplunkCreateJobArgs, SplunkJobResultsArgs,
-    SplunkListSavedSearchesArgs, SplunkSearchArgs, WriteArgs,
+    ArtifactReadArgs, CircleCiLogsArgs, CloneArgs, EdxDiscussionCommentCreateArgs,
+    EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs, EdxDiscussionThreadCreateArgs,
+    EdxDiscussionThreadsArgs, EdxDiscussionTopicsArgs, GrafanaListDatasourcesArgs,
+    GrafanaQueryLogsArgs, NewRelicQueryArgs, NinjaOneLoginArgs, NinjaOneReadArgs,
+    NinjaOneWriteArgs, ReadArgs, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs,
+    SplunkCreateJobArgs, SplunkJobResultsArgs, SplunkListSavedSearchesArgs, SplunkSearchArgs,
+    WriteArgs,
 };
 #[cfg(feature = "wrds")]
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
@@ -227,6 +228,7 @@ impl AtlassianServer {
             + Self::confluence_router()
             + Self::zoom_router()
             + Self::circleci_router()
+            + Self::artifact_router()
             + Self::slack_router()
             + Self::postman_router()
             + Self::edx_discussion_router()
@@ -342,6 +344,55 @@ impl AtlassianServer {
     #[cfg(feature = "wrds")]
     fn wrds_ctx<'a>(&'a self, config: &'a Config) -> WrdsContext<'a> {
         WrdsContext::new(config, &self.state.wrds_vendor)
+    }
+}
+
+#[tool_router(router = artifact_router)]
+impl AtlassianServer {
+    #[tool(
+        description = "Read a resumable byte chunk from a temporary artifact returned by another tool. Data is base64 encoded; continue with nextOffset until eof is true.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    async fn artifact_read(
+        &self,
+        Parameters(args): Parameters<ArtifactReadArgs>,
+    ) -> Result<CallToolResult, RmcpError> {
+        use base64::Engine as _;
+        let max_bytes = args.max_bytes.unwrap_or(65_536).clamp(1, 1_048_576);
+        match crate::transport::raw_response::read_artifact_chunk(
+            &args.artifact_id,
+            args.offset,
+            max_bytes,
+        )
+        .await
+        {
+            Ok(Some((metadata, data, next_offset, eof))) => {
+                let value = serde_json::json!({
+                    "artifactId": metadata.id,
+                    "filename": metadata.filename,
+                    "offset": args.offset.min(metadata.size),
+                    "nextOffset": next_offset,
+                    "totalBytes": metadata.size,
+                    "eof": eof,
+                    "encoding": "base64",
+                    "data": base64::engine::general_purpose::STANDARD.encode(data),
+                });
+                Ok(CallToolResult::success(vec![Content::text(
+                    value.to_string(),
+                )]))
+            }
+            Ok(None) => Ok(CallToolResult::error(vec![Content::text(
+                "Artifact not found or expired",
+            )])),
+            Err(err) => Ok(CallToolResult::error(vec![Content::text(format!(
+                "Failed to read artifact: {err}"
+            ))])),
+        }
     }
 }
 

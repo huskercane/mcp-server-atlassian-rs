@@ -188,7 +188,13 @@ async fn get_json_response_is_classified_and_persisted() {
         other => panic!("expected JSON, got {other:?}"),
     }
     let path = resp.raw_response_path.expect("raw path for JSON response");
-    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian/"));
+    assert!(
+        path.starts_with(
+            std::env::temp_dir()
+                .join("mcp")
+                .join("mcp-server-atlassian")
+        )
+    );
     let _ = std::fs::remove_file(&path);
 }
 

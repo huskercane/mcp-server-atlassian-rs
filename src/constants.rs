@@ -30,6 +30,17 @@ pub mod network_timeouts {
 
 pub mod data_limits {
     pub const MAX_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+    /// Hard decoded-byte ceiling for streamed log artifacts. This is enforced
+    /// while consuming the body, including chunked responses.
+    pub const MAX_STREAMED_ARTIFACT_SIZE: u64 = 512 * 1024 * 1024;
+    pub const STREAM_WRITE_BUFFER_SIZE: usize = 64 * 1024;
+    pub const STREAM_PREVIEW_HEAD_SIZE: usize = 5 * 1024;
+    pub const STREAM_PREVIEW_TAIL_SIZE: usize = 30 * 1024;
+    pub const MAX_STREAM_RECORD_SIZE: usize = 1024 * 1024;
+    pub const STREAM_IDLE_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+    pub const STREAM_TOTAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_mins(2);
+    pub const STREAM_MAX_ATTEMPTS: usize = 3;
+    pub const MAX_TIME_PARTITIONS: usize = 16;
     pub const MAX_PAGE_SIZE: u32 = 100;
     pub const DEFAULT_PAGE_SIZE: u32 = 50;
 }

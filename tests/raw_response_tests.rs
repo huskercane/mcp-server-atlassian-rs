@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use mcp_server_atlassian::transport::raw_response::save;
+use mcp_server_atlassian::transport::raw_response::{
+    artifact_for_path, begin_artifact, read_artifact_chunk, save, save_artifact,
+};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
@@ -8,6 +10,49 @@ use serde_json::json;
 /// we clean up our own files to stay polite.
 async fn cleanup(path: &std::path::Path) {
     let _ = tokio::fs::remove_file(path).await;
+}
+
+#[tokio::test]
+async fn artifact_chunks_resume_by_byte_offset() {
+    let path = save_artifact("chunk-test", "abcdefghij").await.unwrap();
+    let artifact = artifact_for_path(&path).unwrap();
+    let (_, first, next, eof) = read_artifact_chunk(&artifact.id, 0, 4)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first, b"abcd");
+    assert_eq!(next, 4);
+    assert!(!eof);
+    let (_, second, next, eof) = read_artifact_chunk(&artifact.id, next, 20)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(second, b"efghij");
+    assert_eq!(next, 10);
+    assert!(eof);
+    cleanup(&path).await;
+}
+
+#[tokio::test]
+async fn streamed_artifact_enforces_limit_and_hashes_incrementally() {
+    let mut writer = begin_artifact("bounded-test", "ndjson", "application/x-ndjson", 6)
+        .await
+        .unwrap();
+    writer.write_chunk(b"abc").await.unwrap();
+    writer.write_chunk(b"def").await.unwrap();
+    let err = writer.write_chunk(b"g").await.unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::FileTooLarge);
+    let artifact = writer.commit().await.unwrap();
+    assert_eq!(artifact.artifact.size, 6);
+    assert_eq!(
+        artifact.sha256,
+        "bef57ec7f53a6d40beb640a780a639c83bc29ac8a9816f1fc6c5c6dcd93c4721"
+    );
+    assert_eq!(
+        tokio::fs::read(&artifact.artifact.path).await.unwrap(),
+        b"abcdef"
+    );
+    cleanup(&artifact.artifact.path).await;
 }
 
 #[tokio::test]
@@ -24,7 +69,13 @@ async fn writes_file_under_tmp_mcp() {
     .await
     .expect("raw response should be written");
 
-    assert!(path.starts_with("/tmp/mcp/mcp-server-atlassian/"));
+    assert!(
+        path.starts_with(
+            std::env::temp_dir()
+                .join("mcp")
+                .join("mcp-server-atlassian")
+        )
+    );
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())

@@ -138,8 +138,47 @@ async fn modern_tools_list_is_stateless_deterministic_and_cacheable() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("tool name"))
         .collect();
-    assert_eq!(names.len(), 63);
+    assert_eq!(names.len(), 64);
+    assert!(names.contains(&"artifact_read"));
     assert!(names.windows(2).all(|pair| pair[0] <= pair[1]));
+}
+
+#[tokio::test]
+async fn artifact_download_supports_byte_range_resume() {
+    let path = mcp_server_atlassian::transport::raw_response::save_artifact(
+        "range-test",
+        "0123456789abcdef",
+    )
+    .await
+    .expect("save artifact");
+    let artifact = mcp_server_atlassian::transport::raw_response::artifact_for_path(&path)
+        .expect("registered artifact");
+    let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
+    let response = reqwest::Client::new()
+        .get(format!("{base}/artifacts/{}", artifact.id))
+        .header(reqwest::header::RANGE, "bytes=4-9")
+        .send()
+        .await
+        .expect("range download");
+
+    assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+    assert_eq!(response.headers()[reqwest::header::ACCEPT_RANGES], "bytes");
+    assert_eq!(
+        response.headers()[reqwest::header::CONTENT_RANGE],
+        "bytes 4-9/16"
+    );
+    assert_eq!(response.text().await.unwrap(), "456789");
+
+    let stale = reqwest::Client::new()
+        .get(format!("{base}/artifacts/{}", artifact.id))
+        .header(reqwest::header::RANGE, "bytes=4-9")
+        .header(reqwest::header::IF_RANGE, "\"stale-etag\"")
+        .send()
+        .await
+        .expect("stale If-Range download");
+    assert_eq!(stale.status(), StatusCode::OK);
+    assert_eq!(stale.text().await.unwrap(), "0123456789abcdef");
+    let _ = tokio::fs::remove_file(path).await;
 }
 
 #[tokio::test]

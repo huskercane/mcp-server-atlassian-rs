@@ -12,6 +12,7 @@ use mcp_server_atlassian::tools::args::{
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::splunk::SplunkVendor;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -52,6 +53,7 @@ async fn export_search_posts_urlencoded_form_with_bearer_token() {
         search: "search index=main".into(),
         earliest_time: Some("-15m".into()),
         latest_time: Some("now".into()),
+        time_partitions: None,
         max_time: None,
         jq: Some("rows".into()),
         output_format: Some(json_output()),
@@ -59,7 +61,23 @@ async fn export_search_posts_urlencoded_form_with_bearer_token() {
 
     let response = search(&ctx, &args).await.unwrap();
     assert!(response.content.contains("api-1"));
-    cleanup(response.raw_response_path);
+    let artifact = response.raw_response_path.unwrap();
+    let canonical_bytes = std::fs::read(&artifact).unwrap();
+    let canonical = String::from_utf8(canonical_bytes.clone()).unwrap();
+    assert!(canonical.contains("\"source\":\"splunk:{\\\"host\\\":\\\"api-1\\\"}\""));
+    assert!(canonical.contains("\"count\":4"));
+    let manifest_path = artifact.with_extension("manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(manifest["total_records"], 1);
+    assert_eq!(
+        manifest["final_sha256"],
+        format!("{:x}", Sha256::digest(&canonical_bytes))
+    );
+    assert!(manifest["encoded_bytes"].as_u64().unwrap() > 0);
+    assert!(response.content.contains("Start of response"));
+    cleanup(Some(artifact));
 }
 
 #[tokio::test]
@@ -175,8 +193,103 @@ async fn invalid_sid_is_rejected_before_dispatch() {
     assert_eq!(error.status_code, Some(400));
 }
 
+#[tokio::test]
+async fn search_partitions_exact_half_open_splunk_bounds() {
+    let server = MockServer::start().await;
+    for (earliest, latest) in [
+        ("100.000000000", "105.000000000"),
+        ("105.000000000", "110.000000000"),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/services/search/v2/jobs/export"))
+            .and(body_string_contains(format!("earliest_time={earliest}")))
+            .and(body_string_contains(format!("latest_time={latest}")))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_raw(r#"{"fields":["_time"],"rows":[]}"#, "application/json"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let client = build_client().unwrap();
+    let config = config();
+    let vendor = SplunkVendor::with_base_url(server.uri());
+    let args = SplunkSearchArgs {
+        search: "search index=main".into(),
+        earliest_time: Some("100".into()),
+        latest_time: Some("110".into()),
+        time_partitions: Some(2),
+        max_time: None,
+        jq: None,
+        output_format: Some(json_output()),
+    };
+    let response = search(&SplunkContext::new(&client, &config, &vendor), &args)
+        .await
+        .unwrap();
+    let artifact_path = response.raw_response_path.unwrap();
+    assert!(std::fs::read(&artifact_path).unwrap().is_empty());
+    let manifest: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(artifact_path.with_extension("manifest.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(manifest["completeness"], "complete");
+    assert_eq!(manifest["query_interval"]["start_ns"], 100_000_000_000_u64);
+    assert_eq!(manifest["query_interval"]["end_ns"], 110_000_000_000_u64);
+    assert_eq!(manifest["partitions"].as_array().unwrap().len(), 2);
+    cleanup(Some(artifact_path));
+}
+
+#[tokio::test]
+async fn json_rows_structural_and_timestamp_errors_are_explicit() {
+    let cases = [
+        (r#"{"rows":[["api-1"]]}"#, "missing fields"),
+        (r#"{"fields":["host","host"],"rows":[["a","b"]]}"#, "unique"),
+        (r#"{"fields":["host"],"rows":[["a","b"]]}"#, "row width"),
+        (
+            r#"{"fields":["_time"],"rows":[["not-a-time"]]}"#,
+            "Invalid Splunk `_time`",
+        ),
+        (
+            r#"{"fields":["host"],"rows":[["unterminated"]"#,
+            "Invalid Splunk json_rows",
+        ),
+    ];
+    for (body, expected) in cases {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/services/search/v2/jobs/export"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, "application/json"))
+            .mount(&server)
+            .await;
+        let client = build_client().unwrap();
+        let config = config();
+        let vendor = SplunkVendor::with_base_url(server.uri());
+        let error = search(
+            &SplunkContext::new(&client, &config, &vendor),
+            &SplunkSearchArgs {
+                search: "search index=main".into(),
+                earliest_time: None,
+                latest_time: None,
+                time_partitions: None,
+                max_time: None,
+                jq: None,
+                output_format: Some(json_output()),
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error.message.contains(expected),
+            "{} did not contain {expected}",
+            error.message
+        );
+    }
+}
+
 fn cleanup(path: Option<std::path::PathBuf>) {
     if let Some(path) = path {
+        let _ = std::fs::remove_file(path.with_extension("manifest.json"));
         let _ = std::fs::remove_file(path);
     }
 }

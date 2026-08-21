@@ -195,6 +195,10 @@ async fn logs_fetches_build_details_and_flattens_action_output() {
         &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
             project_slug: "gh/acme/web".into(),
             job_number: 123,
+            step_number: None,
+            failed_only: false,
+            condensed: false,
+            context_lines: None,
             output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
         },
     )
@@ -206,7 +210,16 @@ async fn logs_fetches_build_details_and_flattens_action_output() {
     assert!(resp.content.contains("running 1 test"));
     assert!(resp.content.contains("test redos_flag ... FAILED"));
     assert!(!resp.content.contains("output_url"));
-    assert!(resp.raw_response_path.is_none());
+    let raw_path = resp
+        .raw_response_path
+        .expect("complete logs should be saved");
+    assert!(
+        tokio::fs::read_to_string(&raw_path)
+            .await
+            .unwrap()
+            .contains("test redos_flag ... FAILED")
+    );
+    let _ = tokio::fs::remove_file(raw_path).await;
 }
 
 #[tokio::test]
@@ -221,6 +234,10 @@ async fn logs_rejects_non_vcs_project_slug() {
         &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
             project_slug: "circleci/org-id/project-id".into(),
             job_number: 123,
+            step_number: None,
+            failed_only: false,
+            condensed: false,
+            context_lines: None,
             output_format: None,
         },
     )
@@ -229,6 +246,73 @@ async fn logs_rejects_non_vcs_project_slug() {
 
     assert_eq!(err.kind, ErrorKind::ApiError);
     assert!(err.message.contains("GitHub/Bitbucket"));
+}
+
+#[tokio::test]
+async fn logs_failed_only_skips_successful_outputs_and_condenses_errors() {
+    let server = MockServer::start().await;
+    let success_url = format!("{}/output/success", server.uri());
+    let failed_url = format!("{}/output/failed", server.uri());
+
+    Mock::given(method("GET"))
+        .and(path("/project/github/acme/web/124"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "steps": [{
+                "name": "Run tests",
+                "actions": [
+                    {"name": "setup", "status": "success", "exit_code": 0, "output_url": success_url},
+                    {"name": "tests", "status": "failed", "exit_code": 1, "output_url": failed_url}
+                ]
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/output/success"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!([{"message": "SHOULD NOT FETCH\n"}])),
+        )
+        .expect(0)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/output/failed"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"message": "ordinary line\n"},
+            {"message": "AssertionError: expected true\n"},
+            {"message": "nearby context\n"}
+        ])))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let config = Config::from_map(creds());
+    let vendor = vendor(&server);
+    let ctx = CircleCiContext::new(&client, &config, &vendor);
+    let resp = handle_logs(
+        &ctx,
+        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+            project_slug: "gh/acme/web".into(),
+            job_number: 124,
+            step_number: Some(1),
+            failed_only: true,
+            condensed: true,
+            context_lines: Some(1),
+            output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+        },
+    )
+    .await
+    .unwrap();
+
+    assert!(resp.content.contains("Condensed error context"));
+    assert!(resp.content.contains("AssertionError"));
+    assert!(!resp.content.contains("SHOULD NOT FETCH"));
+    let raw_path = resp.raw_response_path.unwrap();
+    let full = tokio::fs::read_to_string(&raw_path).await.unwrap();
+    assert!(full.contains("AssertionError"));
+    assert!(!full.contains("SHOULD NOT FETCH"));
+    let _ = tokio::fs::remove_file(raw_path).await;
 }
 
 #[tokio::test]

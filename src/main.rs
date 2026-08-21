@@ -8,14 +8,15 @@
 
 use std::process::ExitCode;
 
-use mcp_server_atlassian::{cli, logger, server};
+use mcp_server_atlassian::{cli, logger, server, transport::raw_response};
 
 #[tokio::main]
 async fn main() -> ExitCode {
     logger::init();
+    raw_response::init();
 
     let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
+    let exit = if args.len() > 1 {
         cli::run(args).await
     } else {
         let mode = std::env::var("TRANSPORT_MODE")
@@ -36,5 +37,7 @@ async fn main() -> ExitCode {
                 ExitCode::FAILURE
             }
         }
-    }
+    };
+    raw_response::cleanup_current_session();
+    exit
 }

@@ -15,6 +15,7 @@ pub mod constants;
 pub mod controllers;
 pub mod error;
 pub mod format;
+pub mod ingestion;
 pub mod logger;
 pub mod pagination;
 pub mod server;

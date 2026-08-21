@@ -31,11 +31,21 @@ mod response_cache;
 pub use crate::vendor::bitbucket::error as bitbucket_error;
 
 use std::collections::BTreeMap;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use reqwest::header::{ACCEPT, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue};
+use futures::TryStreamExt as _;
+use reqwest::header::{
+    ACCEPT, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_TYPE, HeaderName, HeaderValue,
+};
 use reqwest::{Client, Method, StatusCode};
 use serde_json::Value;
+use tokio::io::{AsyncBufRead, AsyncRead, AsyncReadExt, BufReader};
+use tokio_util::io::StreamReader;
+use tokio_util::sync::CancellationToken;
 use tracing::debug;
 
 use crate::auth::Credentials;
@@ -44,6 +54,419 @@ use crate::constants::{data_limits::MAX_RESPONSE_SIZE, network_timeouts::DEFAULT
 use crate::error::{McpError, OriginalError, api_error, auth_invalid, unexpected};
 use crate::vendor::Vendor;
 use crate::vendor::bitbucket::BitbucketVendor;
+
+/// Stream a successful upstream body directly into an atomic artifact. The
+/// byte ceiling is checked for every decoded chunk, so transfer-encoded
+/// responses cannot bypass it by omitting Content-Length.
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_streamed_artifact(
+    _client: &Client,
+    vendor: &dyn Vendor,
+    credentials: &Credentials,
+    config: &Config,
+    path: &str,
+    options: RequestOptions,
+    filename_prefix: &str,
+    extension: &str,
+    content_type: &str,
+    max_bytes: u64,
+) -> Result<raw_response::StreamedArtifact, McpError> {
+    fetch_streamed_artifact_with_policy(
+        vendor,
+        credentials,
+        config,
+        path,
+        options,
+        filename_prefix,
+        extension,
+        content_type,
+        StreamingPolicy::new(max_bytes, max_bytes),
+    )
+    .await
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingPolicy {
+    pub max_encoded_bytes: u64,
+    pub max_decoded_bytes: u64,
+    pub idle_read_timeout: Duration,
+    pub total_deadline: Duration,
+    pub max_attempts: usize,
+    pub cancellation: CancellationToken,
+    pub aggregate: Option<Arc<StreamingAggregateQuota>>,
+}
+
+#[derive(Debug)]
+pub struct StreamingAggregateQuota {
+    encoded: AtomicU64,
+    decoded: AtomicU64,
+    pub max_encoded_bytes: u64,
+    pub max_decoded_bytes: u64,
+}
+
+impl StreamingAggregateQuota {
+    pub const fn new(max_encoded_bytes: u64, max_decoded_bytes: u64) -> Self {
+        Self {
+            encoded: AtomicU64::new(0),
+            decoded: AtomicU64::new(0),
+            max_encoded_bytes,
+            max_decoded_bytes,
+        }
+    }
+
+    fn add(counter: &AtomicU64, amount: u64, limit: u64, label: &str) -> std::io::Result<()> {
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_add(amount).filter(|next| *next <= limit)
+            })
+            .map(|_| ())
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::FileTooLarge,
+                    format!("aggregate {label} quota exceeded or counter overflow"),
+                )
+            })
+    }
+
+    pub fn add_encoded(&self, amount: u64) -> std::io::Result<()> {
+        Self::add(
+            &self.encoded,
+            amount,
+            self.max_encoded_bytes,
+            "encoded-byte",
+        )
+    }
+    pub fn add_decoded(&self, amount: u64) -> std::io::Result<()> {
+        Self::add(
+            &self.decoded,
+            amount,
+            self.max_decoded_bytes,
+            "decoded-byte",
+        )
+    }
+    pub fn encoded_bytes(&self) -> u64 {
+        self.encoded.load(Ordering::Acquire)
+    }
+    pub fn decoded_bytes(&self) -> u64 {
+        self.decoded.load(Ordering::Acquire)
+    }
+}
+
+#[cfg(test)]
+mod aggregate_quota_tests {
+    use super::StreamingAggregateQuota;
+
+    #[test]
+    fn checked_aggregate_counters_reject_limits_and_overflow() {
+        let quota = StreamingAggregateQuota::new(3, u64::MAX);
+        quota.add_encoded(2).unwrap();
+        assert!(quota.add_encoded(2).is_err());
+        let overflow = StreamingAggregateQuota::new(u64::MAX, u64::MAX);
+        overflow.add_decoded(u64::MAX).unwrap();
+        assert!(overflow.add_decoded(1).is_err());
+    }
+}
+
+impl StreamingPolicy {
+    pub fn new(max_encoded_bytes: u64, max_decoded_bytes: u64) -> Self {
+        Self {
+            max_encoded_bytes,
+            max_decoded_bytes,
+            idle_read_timeout: crate::constants::data_limits::STREAM_IDLE_READ_TIMEOUT,
+            total_deadline: crate::constants::data_limits::STREAM_TOTAL_REQUEST_TIMEOUT,
+            max_attempts: crate::constants::data_limits::STREAM_MAX_ATTEMPTS,
+            cancellation: CancellationToken::new(),
+            aggregate: None,
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn fetch_streamed_artifact_with_policy(
+    vendor: &dyn Vendor,
+    credentials: &Credentials,
+    config: &Config,
+    path: &str,
+    options: RequestOptions,
+    filename_prefix: &str,
+    extension: &str,
+    content_type: &str,
+    policy: StreamingPolicy,
+) -> Result<raw_response::StreamedArtifact, McpError> {
+    let base = vendor.base_url(config)?;
+    let url = normalize_url_with_base(&base, path);
+    let method = options.method.unwrap_or(HttpMethod::Get);
+    let (auth_name, auth_header) = validate_auth(credentials)?;
+    let client = streaming_client()?;
+    let attempts = policy.max_attempts.max(1);
+    let deadline = tokio::time::Instant::now() + policy.total_deadline;
+    for attempt in 1..=attempts {
+        if policy.cancellation.is_cancelled() {
+            return Err(api_error("streaming request cancelled", Some(499), None));
+        }
+        let remaining = remaining_until(deadline)?;
+        let request = build_request(
+            client,
+            method,
+            &url,
+            &auth_name,
+            &auth_header,
+            &options,
+            remaining,
+        );
+        let response = tokio::select! {
+            () = policy.cancellation.cancelled() => return Err(api_error("streaming request cancelled", Some(499), None)),
+            result = tokio::time::timeout(remaining, request.send()) => match result {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) if attempt < attempts && (error.is_connect() || error.is_timeout()) => { retry_stream_attempt(attempt, &policy, deadline).await?; continue; }
+                Ok(Err(error)) => return Err(map_reqwest_error(&error, &url)),
+                Err(_) if attempt < attempts => { retry_stream_attempt(attempt, &policy, deadline).await?; continue; }
+                Err(_) => return Err(api_error("streaming request exceeded total deadline", Some(408), None)),
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            if attempt < attempts && matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+                retry_stream_attempt(attempt, &policy, deadline).await?;
+                continue;
+            }
+            let body = response.text().await.unwrap_or_default();
+            return Err(vendor.classify_error(status, &body));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > policy.max_encoded_bytes)
+        {
+            return Err(api_error(
+                "encoded response exceeds streamed artifact limit",
+                Some(413),
+                None,
+            ));
+        }
+        return tokio::time::timeout(
+            remaining_until(deadline)?,
+            persist_decoded_response(response, filename_prefix, extension, content_type, &policy),
+        )
+        .await
+        .map_err(|_| api_error("streaming request exceeded total deadline", Some(408), None))?;
+    }
+    unreachable!("bounded streaming retry loop returns")
+}
+
+type BoxRead = Pin<Box<dyn AsyncRead + Send>>;
+type BoxBufRead = Pin<Box<dyn AsyncBufRead + Send>>;
+
+fn decoded_reader(
+    response: reqwest::Response,
+    policy: &StreamingPolicy,
+    encoded: Arc<AtomicU64>,
+) -> Result<BoxRead, McpError> {
+    let encodings = response
+        .headers()
+        .get_all(CONTENT_ENCODING)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_ascii_lowercase)
+        .collect::<Vec<_>>();
+    let encoded_limit = policy.max_encoded_bytes;
+    let aggregate = policy.aggregate.clone();
+    let stream = response
+        .bytes_stream()
+        .map_err(std::io::Error::other)
+        .and_then(move |chunk| {
+            let counter = encoded.clone();
+            let aggregate = aggregate.clone();
+            async move {
+                let amount = u64::try_from(chunk.len()).map_err(std::io::Error::other)?;
+                let next = counter
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                        current
+                            .checked_add(amount)
+                            .filter(|value| *value <= encoded_limit)
+                    })
+                    .map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::FileTooLarge,
+                            "encoded response exceeds streamed artifact limit or counter overflow",
+                        )
+                    })?;
+                let _ = next;
+                if let Some(aggregate) = &aggregate {
+                    aggregate.add_encoded(amount)?;
+                }
+                Ok(chunk)
+            }
+        });
+    let mut reader: BoxRead = Box::pin(StreamReader::new(stream));
+    for encoding in encodings.iter().rev() {
+        let buffered: BoxBufRead = Box::pin(BufReader::with_capacity(
+            crate::constants::data_limits::STREAM_WRITE_BUFFER_SIZE,
+            reader,
+        ));
+        reader = match encoding.as_str() {
+            "identity" => Box::pin(buffered),
+            "gzip" | "x-gzip" => Box::pin(async_compression::tokio::bufread::GzipDecoder::new(
+                buffered,
+            )),
+            "br" => Box::pin(async_compression::tokio::bufread::BrotliDecoder::new(
+                buffered,
+            )),
+            "deflate" => Box::pin(async_compression::tokio::bufread::DeflateDecoder::new(
+                buffered,
+            )),
+            "zstd" => Box::pin(async_compression::tokio::bufread::ZstdDecoder::new(
+                buffered,
+            )),
+            other => {
+                return Err(api_error(
+                    format!("unsupported Content-Encoding: {other}"),
+                    Some(415),
+                    None,
+                ));
+            }
+        };
+    }
+    Ok(reader)
+}
+
+async fn persist_decoded_response(
+    response: reqwest::Response,
+    filename_prefix: &str,
+    extension: &str,
+    content_type: &str,
+    policy: &StreamingPolicy,
+) -> Result<raw_response::StreamedArtifact, McpError> {
+    let encoded = std::sync::Arc::new(AtomicU64::new(0));
+    let mut reader = decoded_reader(response, policy, encoded.clone())?;
+    let mut writer = raw_response::begin_artifact(
+        filename_prefix,
+        extension,
+        content_type,
+        policy.max_decoded_bytes,
+    )
+    .await
+    .map_err(|error| unexpected(format!("failed to create streamed artifact: {error}"), None))?;
+    let mut buffer = vec![0_u8; crate::constants::data_limits::STREAM_WRITE_BUFFER_SIZE];
+    loop {
+        let read = tokio::select! {
+            () = policy.cancellation.cancelled() => return Err(api_error("streaming request cancelled", Some(499), None)),
+            result = tokio::time::timeout(policy.idle_read_timeout, reader.read(&mut buffer)) => result
+                .map_err(|_| api_error("streaming response idle-read timeout", Some(408), None))?
+                .map_err(|error| {
+                    let status = (error.kind() == std::io::ErrorKind::FileTooLarge).then_some(413);
+                    api_error(format!("failed to decode streaming response: {error}"), status, None)
+                })?,
+        };
+        if read == 0 {
+            break;
+        }
+        if let Some(aggregate) = &policy.aggregate {
+            let read = u64::try_from(read).map_err(|error| {
+                api_error(
+                    format!("decoded byte count overflow: {error}"),
+                    Some(413),
+                    None,
+                )
+            })?;
+            aggregate
+                .add_decoded(read)
+                .map_err(|error| api_error(error.to_string(), Some(413), None))?;
+        }
+        writer.write_chunk(&buffer[..read]).await.map_err(|error| {
+            let status = (error.kind() == std::io::ErrorKind::FileTooLarge).then_some(413);
+            api_error(
+                format!("failed to persist decoded response: {error}"),
+                status,
+                None,
+            )
+        })?;
+    }
+    let mut artifact = writer.commit().await.map_err(|error| {
+        unexpected(format!("failed to commit streamed artifact: {error}"), None)
+    })?;
+    artifact.encoded_bytes = encoded.load(Ordering::Relaxed);
+    artifact.decoded_bytes = artifact.artifact.size;
+    Ok(artifact)
+}
+
+/// Stream an absolute, unauthenticated URL (for example a signed log-output
+/// URL) through the same explicit wire accounting and decoder path.
+pub async fn fetch_streamed_url(
+    url: &str,
+    filename_prefix: &str,
+    extension: &str,
+    content_type: &str,
+    policy: StreamingPolicy,
+) -> Result<raw_response::StreamedArtifact, McpError> {
+    let client = streaming_client()?;
+    let deadline = tokio::time::Instant::now() + policy.total_deadline;
+    for attempt in 1..=policy.max_attempts.max(1) {
+        let remaining = remaining_until(deadline)?;
+        let response = tokio::select! {
+            () = policy.cancellation.cancelled() => return Err(api_error("streaming request cancelled", Some(499), None)),
+            result = tokio::time::timeout(remaining, client.get(url).timeout(remaining).send()) => match result {
+                Ok(Ok(response)) => response,
+                Ok(Err(error)) if attempt < policy.max_attempts && (error.is_connect() || error.is_timeout()) => { retry_stream_attempt(attempt, &policy, deadline).await?; continue; }
+                Ok(Err(error)) => return Err(map_reqwest_error(&error, url)),
+                Err(_) if attempt < policy.max_attempts => { retry_stream_attempt(attempt, &policy, deadline).await?; continue; }
+                Err(_) => return Err(api_error("streaming request exceeded total deadline", Some(408), None)),
+            }
+        };
+        let status = response.status();
+        if !status.is_success() {
+            if attempt < policy.max_attempts && matches!(status.as_u16(), 429 | 502 | 503 | 504) {
+                retry_stream_attempt(attempt, &policy, deadline).await?;
+                continue;
+            }
+            let body = response.text().await.unwrap_or_default();
+            return Err(api_error(
+                format!("streaming request failed with status {}", status.as_u16()),
+                Some(status.as_u16()),
+                Some(OriginalError::String(body)),
+            ));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > policy.max_encoded_bytes)
+        {
+            return Err(api_error(
+                "encoded response exceeds streamed artifact limit",
+                Some(413),
+                None,
+            ));
+        }
+        return tokio::time::timeout(
+            remaining_until(deadline)?,
+            persist_decoded_response(response, filename_prefix, extension, content_type, &policy),
+        )
+        .await
+        .map_err(|_| api_error("streaming request exceeded total deadline", Some(408), None))?;
+    }
+    unreachable!("bounded streaming retry loop returns")
+}
+
+fn remaining_until(deadline: tokio::time::Instant) -> Result<Duration, McpError> {
+    deadline
+        .checked_duration_since(tokio::time::Instant::now())
+        .filter(|remaining| !remaining.is_zero())
+        .ok_or_else(|| api_error("streaming request exceeded total deadline", Some(408), None))
+}
+
+async fn retry_stream_attempt(
+    attempt: usize,
+    policy: &StreamingPolicy,
+    deadline: tokio::time::Instant,
+) -> Result<(), McpError> {
+    let delay = Duration::from_millis(100_u64.saturating_mul(1_u64 << attempt.min(5)));
+    tokio::select! {
+        () = policy.cancellation.cancelled() => Err(api_error("streaming request cancelled", Some(499), None)),
+        () = tokio::time::sleep_until(deadline) => Err(api_error("streaming request exceeded total deadline", Some(408), None)),
+        () = tokio::time::sleep(delay) => Ok(()),
+    }
+}
 
 /// HTTP verb set accepted by the generic API client. Mirrors the TS
 /// `RequestOptions.method` union.
@@ -326,6 +749,34 @@ pub fn build_client() -> Result<Client, McpError> {
         ))
         .build()
         .map_err(|e| unexpected(format!("failed to build HTTP client: {e}"), None))
+}
+
+/// Dedicated client for ingestion bodies. Automatic decompression is disabled
+/// so the transport can account for wire bytes before bounded decoding.
+fn streaming_client() -> Result<&'static Client, McpError> {
+    static CLIENT: OnceLock<Result<Client, String>> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .user_agent(format!(
+                    "{}/{}",
+                    crate::constants::UNSCOPED_PACKAGE_NAME,
+                    crate::constants::VERSION
+                ))
+                .gzip(false)
+                .brotli(false)
+                .deflate(false)
+                .zstd(false)
+                .build()
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .map_err(|error| {
+            unexpected(
+                format!("failed to build streaming HTTP client: {error}"),
+                None,
+            )
+        })
 }
 
 // ---- helpers ----

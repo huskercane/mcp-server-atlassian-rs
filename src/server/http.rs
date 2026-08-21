@@ -18,13 +18,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Router;
-use axum::extract::Request;
+use axum::body::Body;
+use axum::extract::{Path as AxumPath, Request};
 use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any_service, get};
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
+use tokio_util::io::ReaderStream;
 use tokio_util::sync::CancellationToken;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 use tower_http::limit::RequestBodyLimitLayer;
@@ -121,9 +124,97 @@ pub fn build_app_with_cancel(
     // as well.
     Router::new()
         .route("/", get(health))
+        .route("/artifacts/{id}", get(download_artifact))
         .merge(mcp_routes)
         .layer(middleware::from_fn(origin_allowlist))
         .layer(cors)
+}
+
+async fn download_artifact(AxumPath(id): AxumPath<String>, request: Request) -> Response {
+    let Some(artifact) = crate::transport::raw_response::artifact(&id) else {
+        return (StatusCode::NOT_FOUND, "Artifact not found or expired").into_response();
+    };
+    let requested_range = request
+        .headers()
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_owned);
+    let if_range_matches = request
+        .headers()
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+        .is_none_or(|value| value == artifact.etag);
+    let effective_range = requested_range.as_deref().filter(|_| if_range_matches);
+    let range = match effective_range.map(|value| parse_range(value, artifact.size)) {
+        Some(None) => {
+            return Response::builder()
+                .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                .header(header::CONTENT_RANGE, format!("bytes */{}", artifact.size))
+                .body(Body::empty())
+                .unwrap_or_else(|_| Response::new(Body::empty()));
+        }
+        Some(Some(range)) => range,
+        None => (0, artifact.size.saturating_sub(1)),
+    };
+    let (start, end) = range;
+    let length = if artifact.size == 0 {
+        0
+    } else {
+        end - start + 1
+    };
+    let Ok(mut file) = tokio::fs::File::open(&artifact.path).await else {
+        return (StatusCode::GONE, "Artifact is no longer available").into_response();
+    };
+    if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let stream = ReaderStream::new(file.take(length));
+    let status = if effective_range.is_some() {
+        StatusCode::PARTIAL_CONTENT
+    } else {
+        StatusCode::OK
+    };
+    let mut builder = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, artifact.content_type)
+        .header(header::CONTENT_LENGTH, length)
+        .header(header::ACCEPT_RANGES, "bytes")
+        .header(header::ETAG, artifact.etag)
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{}\"", artifact.filename),
+        );
+    if status == StatusCode::PARTIAL_CONTENT {
+        builder = builder.header(
+            header::CONTENT_RANGE,
+            format!("bytes {start}-{end}/{}", artifact.size),
+        );
+    }
+    builder
+        .body(Body::from_stream(stream))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn parse_range(value: &str, size: u64) -> Option<(u64, u64)> {
+    let range = value.strip_prefix("bytes=")?;
+    if range.contains(',') || size == 0 {
+        return None;
+    }
+    let (start, end) = range.split_once('-')?;
+    if start.is_empty() {
+        let suffix = end.parse::<u64>().ok()?.min(size);
+        return (suffix > 0).then_some((size - suffix, size - 1));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if start >= size {
+        return None;
+    }
+    let end = if end.is_empty() {
+        size - 1
+    } else {
+        end.parse::<u64>().ok()?.min(size - 1)
+    };
+    (start <= end).then_some((start, end))
 }
 
 /// Build the app without an externally-owned cancellation token. Convenience

@@ -9,15 +9,289 @@
 //! cooperatively async — a heavy traffic burst can't block tokio worker
 //! threads on `mkdir`/`write` syscalls.
 
+use std::collections::HashMap;
 use std::fmt::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use serde::Serialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tokio::fs;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use tracing::debug;
 
 use crate::constants::UNSCOPED_PACKAGE_NAME;
+
+static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
+static ARTIFACTS: OnceLock<RwLock<HashMap<String, ArtifactMetadata>>> = OnceLock::new();
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactMetadata {
+    pub id: String,
+    #[serde(skip)]
+    pub path: PathBuf,
+    pub filename: String,
+    pub content_type: String,
+    pub size: u64,
+    pub etag: String,
+}
+
+/// Metadata produced while an artifact is written incrementally.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamedArtifact {
+    #[serde(flatten)]
+    pub artifact: ArtifactMetadata,
+    pub sha256: String,
+    pub head: String,
+    pub tail: String,
+    /// Bytes received from the HTTP body before content decoding. For locally
+    /// generated artifacts this is equal to the artifact size.
+    pub encoded_bytes: u64,
+    /// Bytes emitted after content decoding and persisted to the artifact.
+    pub decoded_bytes: u64,
+}
+
+/// Same-filesystem atomic artifact writer with bounded preview state.
+pub struct ArtifactWriter {
+    id: String,
+    filename: String,
+    path: PathBuf,
+    partial_path: PathBuf,
+    content_type: String,
+    writer: Option<BufWriter<fs::File>>,
+    size: u64,
+    max_bytes: u64,
+    head: Vec<u8>,
+    tail: std::collections::VecDeque<u8>,
+    hasher: Sha256,
+    committed: bool,
+}
+
+impl ArtifactWriter {
+    pub async fn write_chunk(&mut self, bytes: &[u8]) -> std::io::Result<()> {
+        let next = self
+            .size
+            .checked_add(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)
+            .ok_or_else(|| std::io::Error::other("streamed artifact byte counter overflow"))?;
+        if next > self.max_bytes {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                format!("streamed artifact exceeds {} bytes", self.max_bytes),
+            ));
+        }
+        let head_limit = crate::constants::data_limits::STREAM_PREVIEW_HEAD_SIZE;
+        if self.head.len() < head_limit {
+            let take = (head_limit - self.head.len()).min(bytes.len());
+            self.head.extend_from_slice(&bytes[..take]);
+        }
+        let tail_limit = crate::constants::data_limits::STREAM_PREVIEW_TAIL_SIZE;
+        self.tail.extend(bytes.iter().copied());
+        while self.tail.len() > tail_limit {
+            self.tail.pop_front();
+        }
+        self.hasher.update(bytes);
+        self.writer
+            .as_mut()
+            .expect("artifact writer is open")
+            .write_all(bytes)
+            .await?;
+        self.size = next;
+        Ok(())
+    }
+
+    pub async fn commit(mut self) -> std::io::Result<StreamedArtifact> {
+        let mut writer = self.writer.take().expect("artifact writer is open");
+        writer.flush().await?;
+        let file = writer.into_inner();
+        file.sync_all().await?;
+        drop(file);
+        fs::rename(&self.partial_path, &self.path).await?;
+        let metadata = ArtifactMetadata {
+            id: self.id.clone(),
+            path: self.path.clone(),
+            filename: self.filename.clone(),
+            content_type: self.content_type.clone(),
+            size: self.size,
+            etag: format!("\"{}-{}\"", self.id, self.size),
+        };
+        artifacts()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(self.id.clone(), metadata.clone());
+        self.committed = true;
+        Ok(StreamedArtifact {
+            artifact: metadata,
+            sha256: format!("{:x}", self.hasher.clone().finalize()),
+            head: String::from_utf8_lossy(&self.head).into_owned(),
+            tail: String::from_utf8_lossy(self.tail.make_contiguous()).into_owned(),
+            encoded_bytes: self.size,
+            decoded_bytes: self.size,
+        })
+    }
+}
+
+impl Drop for ArtifactWriter {
+    fn drop(&mut self) {
+        if !self.committed {
+            let _ = std::fs::remove_file(&self.partial_path);
+        }
+    }
+}
+
+pub async fn begin_artifact(
+    filename_prefix: &str,
+    extension: &str,
+    content_type: &str,
+    max_bytes: u64,
+) -> std::io::Result<ArtifactWriter> {
+    let dir = init();
+    fs::create_dir_all(&dir).await?;
+    let safe_prefix: String = filename_prefix
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let id = uuid::Uuid::new_v4().to_string();
+    let extension = extension.trim_start_matches('.');
+    let filename = format!("{safe_prefix}-{id}.{extension}");
+    let path = dir.join(&filename);
+    let partial_path = dir.join(format!(".{filename}.part"));
+    let file = fs::File::create(&partial_path).await?;
+    Ok(ArtifactWriter {
+        id,
+        filename,
+        path,
+        partial_path,
+        content_type: content_type.to_owned(),
+        writer: Some(BufWriter::with_capacity(
+            crate::constants::data_limits::STREAM_WRITE_BUFFER_SIZE,
+            file,
+        )),
+        size: 0,
+        max_bytes,
+        head: Vec::with_capacity(crate::constants::data_limits::STREAM_PREVIEW_HEAD_SIZE),
+        tail: std::collections::VecDeque::with_capacity(
+            crate::constants::data_limits::STREAM_PREVIEW_TAIL_SIZE,
+        ),
+        hasher: Sha256::new(),
+        committed: false,
+    })
+}
+
+fn artifacts() -> &'static RwLock<HashMap<String, ArtifactMetadata>> {
+    ARTIFACTS.get_or_init(|| RwLock::new(HashMap::new()))
+}
+
+pub fn artifact(id: &str) -> Option<ArtifactMetadata> {
+    artifacts()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(id)
+        .cloned()
+}
+
+pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
+    artifacts()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .find(|artifact| artifact.path == path)
+        .cloned()
+}
+
+fn base_dir() -> PathBuf {
+    std::env::temp_dir().join("mcp").join(UNSCOPED_PACKAGE_NAME)
+}
+
+/// Prepare a process-owned artifact directory and remove artifacts left by
+/// processes that are no longer running. Safe to call more than once.
+pub fn init() -> PathBuf {
+    SESSION_DIR
+        .get_or_init(|| {
+            let base = base_dir();
+            let _ = std::fs::create_dir_all(&base);
+            cleanup_abandoned(&base);
+            let dir = base.join(format!(
+                "session-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let _ = std::fs::create_dir_all(&dir);
+            dir
+        })
+        .clone()
+}
+
+/// Remove artifacts owned by this process. Forced termination cannot run this
+/// hook; the next process startup removes the abandoned session directory.
+pub fn cleanup_current_session() {
+    if let Some(dir) = SESSION_DIR.get() {
+        match std::fs::remove_dir_all(dir) {
+            Ok(()) => debug!(dir = %dir.display(), "removed temporary response artifacts"),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(err) => {
+                debug!(%err, dir = %dir.display(), "failed to remove temporary response artifacts");
+            }
+        }
+    }
+    artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clear();
+}
+
+fn cleanup_abandoned(base: &Path) {
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_file() {
+            // Clean up files created by the legacy flat-directory layout.
+            let _ = std::fs::remove_file(path);
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let Some(pid) = name
+            .strip_prefix("session-")
+            .and_then(|rest| rest.split('-').next())
+            .and_then(|pid| pid.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        if !process_is_running(pid) {
+            let _ = std::fs::remove_dir_all(path);
+        }
+    }
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .output()
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(&format!("\"{pid}\"")))
+}
+
+#[cfg(not(windows))]
+fn process_is_running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "pid="])
+        .output()
+        .is_ok_and(|output| !output.stdout.is_empty())
+}
 
 /// Write the raw API response to disk and return the path written. Returns
 /// `None` on any failure — parity with TS behaviour, which logs but does not
@@ -30,9 +304,7 @@ pub async fn save(
     status_code: u16,
     duration: Duration,
 ) -> Option<PathBuf> {
-    let dir = PathBuf::from("/tmp")
-        .join("mcp")
-        .join(UNSCOPED_PACKAGE_NAME);
+    let dir = init();
     if let Err(err) = fs::create_dir_all(&dir).await {
         debug!(%err, dir = %dir.display(), "failed to create raw response dir");
         return None;
@@ -60,6 +332,87 @@ pub async fn save(
             None
         }
     }
+}
+
+/// Save a large, already-rendered tool artifact without wrapping it in the
+/// generic JSON API-response envelope.
+pub async fn save_artifact(filename_prefix: &str, content: &str) -> Option<PathBuf> {
+    let dir = init();
+    if fs::create_dir_all(&dir).await.is_err() {
+        return None;
+    }
+    let safe_prefix: String = filename_prefix
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let id = uuid::Uuid::new_v4().to_string();
+    let filename = format!("{safe_prefix}-{id}.log");
+    let path = dir.join(&filename);
+    let partial_path = dir.join(format!(".{filename}.part"));
+    let write_result = async {
+        let mut file = fs::File::create(&partial_path).await?;
+        file.write_all(content.as_bytes()).await?;
+        file.flush().await?;
+        drop(file);
+        fs::rename(&partial_path, &path).await
+    }
+    .await;
+    match write_result {
+        Ok(()) => {
+            let size = u64::try_from(content.len()).unwrap_or(u64::MAX);
+            let metadata = ArtifactMetadata {
+                id: id.clone(),
+                path: path.clone(),
+                filename,
+                content_type: "text/plain; charset=utf-8".to_owned(),
+                size,
+                etag: format!("\"{id}-{size}\""),
+            };
+            artifacts()
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .insert(id, metadata);
+            debug!(path = %path.display(), bytes = content.len(), "saved tool artifact");
+            Some(path)
+        }
+        Err(err) => {
+            let _ = fs::remove_file(&partial_path).await;
+            debug!(%err, path = %path.display(), "failed to save tool artifact");
+            None
+        }
+    }
+}
+
+pub async fn read_artifact_chunk(
+    id: &str,
+    offset: u64,
+    max_bytes: usize,
+) -> std::io::Result<Option<(ArtifactMetadata, Vec<u8>, u64, bool)>> {
+    use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+    let Some(metadata) = artifact(id) else {
+        return Ok(None);
+    };
+    let offset = offset.min(metadata.size);
+    let mut file = fs::File::open(&metadata.path).await?;
+    file.seek(std::io::SeekFrom::Start(offset)).await?;
+    let remaining = metadata.size.saturating_sub(offset);
+    let read_len = usize::try_from(remaining.min(max_bytes as u64)).unwrap_or(max_bytes);
+    let mut data = vec![0; read_len];
+    file.read_exact(&mut data).await?;
+    let next_offset = offset + u64::try_from(data.len()).unwrap_or(0);
+    Ok(Some((
+        metadata,
+        data,
+        next_offset,
+        next_offset >= remaining + offset,
+    )))
 }
 
 fn generate_filename() -> String {

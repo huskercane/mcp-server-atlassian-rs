@@ -33,6 +33,10 @@ fn oversized_content_is_truncated_and_annotated() {
     assert!(out.contains("This response was truncated"));
     assert!(out.contains("To access the complete data"));
     assert!(!out.contains("The full raw API response is saved at"));
+    assert!(
+        out.contains(&"y".repeat(1_000)),
+        "response tail should be retained"
+    );
 }
 
 #[test]
@@ -47,17 +51,17 @@ fn includes_raw_path_when_provided() {
 #[test]
 fn truncates_at_newline_when_one_is_nearby() {
     let mut content = String::new();
-    // first block: 39_600 'a's
-    content.push_str(&"a".repeat(39_600));
+    // first block: newline within the head budget's 500-char snap window
+    content.push_str(&"a".repeat(4_600));
     content.push('\n');
     // filler past the threshold
-    content.push_str(&"b".repeat(1_000));
+    content.push_str(&"b".repeat(40_000));
     assert!(content.len() > MAX_RESPONSE_CHARS);
 
     let out = truncate_for_ai(&content, None);
     let body_end = out
-        .find("\n---")
-        .expect("guidance block present after truncation");
+        .find("\n\n--- Middle omitted")
+        .expect("middle omission marker present after head");
     let body = &out[..body_end];
     // The final line of the kept body must be a complete run of 'a's (i.e. the
     // cut happened at the newline, not mid-word).
@@ -65,4 +69,23 @@ fn truncates_at_newline_when_one_is_nearby() {
         body.ends_with(&"a".repeat(100)),
         "cut should align to newline"
     );
+}
+
+#[test]
+fn head_and_tail_splits_are_utf8_safe() {
+    let content = format!("{}END-OF-LOG", "é".repeat(25_000));
+
+    let out = truncate_for_ai(&content, None);
+
+    assert!(out.contains("--- Middle omitted; preserving response tail ---"));
+    assert!(out.contains("END-OF-LOG"));
+}
+
+#[test]
+fn long_unbroken_tail_is_preserved() {
+    let content = format!("{}TAIL-SENTINEL", "x".repeat(MAX_RESPONSE_CHARS + 5_000));
+
+    let out = truncate_for_ai(&content, None);
+
+    assert!(out.contains("TAIL-SENTINEL"));
 }

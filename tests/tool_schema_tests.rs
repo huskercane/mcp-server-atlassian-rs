@@ -4,9 +4,22 @@
 use mcp_server_atlassian::config::Config;
 use mcp_server_atlassian::tools::AtlassianServer;
 use mcp_server_atlassian::tools::args::{
-    CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs, SonarqubeQualityGateArgs,
-    SonarqubeSearchIssuesArgs, WriteArgs,
+    ArtifactReadArgs, CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs,
+    SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, WriteArgs,
 };
+
+#[test]
+fn artifact_read_args_support_resume_offsets() {
+    let args: ArtifactReadArgs = serde_json::from_value(json!({
+        "artifactId": "artifact-123",
+        "offset": 65536,
+        "maxBytes": 32768
+    }))
+    .unwrap();
+    assert_eq!(args.artifact_id, "artifact-123");
+    assert_eq!(args.offset, 65_536);
+    assert_eq!(args.max_bytes, Some(32_768));
+}
 use mcp_server_atlassian::transport::build_client;
 use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
 use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
@@ -92,11 +105,19 @@ fn circleci_logs_args_use_camel_case_json() {
     let args: CircleCiLogsArgs = serde_json::from_value(json!({
         "projectSlug": "gh/acme/web",
         "jobNumber": 123,
+        "stepNumber": 2,
+        "failedOnly": true,
+        "condensed": true,
+        "contextLines": 5,
         "outputFormat": "json"
     }))
     .unwrap();
     assert_eq!(args.project_slug, "gh/acme/web");
     assert_eq!(args.job_number, 123);
+    assert_eq!(args.step_number, Some(2));
+    assert!(args.failed_only);
+    assert!(args.condensed);
+    assert_eq!(args.context_lines, Some(5));
     assert_eq!(args.output_format, Some(OutputFormatArg::Json));
 }
 
