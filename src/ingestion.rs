@@ -980,6 +980,25 @@ pub async fn merge_partitions_cancellable(
     max_bytes: u64,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> std::io::Result<MergeResult> {
+    merge_partitions_cancellable_reserved(
+        paths,
+        ordering,
+        result_limit,
+        max_bytes,
+        cancellation,
+        None,
+    )
+    .await
+}
+
+pub async fn merge_partitions_cancellable_reserved(
+    paths: &[PathBuf],
+    ordering: RecordOrdering,
+    result_limit: Option<u64>,
+    max_bytes: u64,
+    cancellation: &tokio_util::sync::CancellationToken,
+    disk: Option<std::sync::Arc<crate::transport::StreamingDiskQuota>>,
+) -> std::io::Result<MergeResult> {
     let reverse = ordering == RecordOrdering::ReverseChronological;
     let mut readers = Vec::with_capacity(paths.len());
     for path in paths {
@@ -1004,6 +1023,9 @@ pub async fn merge_partitions_cancellable(
         max_bytes,
     )
     .await?;
+    if let Some(disk) = disk {
+        writer.set_disk_quota(disk);
+    }
     let mut records = 0_u64;
     let mut duplicates = 0_u64;
     let mut last_key = None;
@@ -1078,6 +1100,14 @@ pub async fn persist_manifest(
     persist_manifest_impl(artifact_path, manifest, None).await
 }
 
+pub async fn persist_manifest_reserved(
+    artifact_path: &Path,
+    manifest: &ArtifactManifest,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
+) -> std::io::Result<PathBuf> {
+    persist_manifest_reserved_impl(artifact_path, manifest, disk, None).await
+}
+
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ManifestFault {
@@ -1117,6 +1147,46 @@ async fn persist_manifest_impl(
     .await;
     if result.is_err() {
         let _ = fs::remove_file(&part).await;
+    }
+    result
+}
+
+async fn persist_manifest_reserved_impl(
+    artifact_path: &Path,
+    manifest: &ArtifactManifest,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
+    #[cfg_attr(not(test), allow(unused_variables))] fault: Option<ManifestFault>,
+) -> std::io::Result<PathBuf> {
+    let path = artifact_path.with_extension("manifest.json");
+    let part = artifact_path.with_extension("manifest.json.part");
+    let bytes = serde_json::to_vec_pretty(manifest).map_err(std::io::Error::other)?;
+    let byte_count = u64::try_from(bytes.len()).map_err(std::io::Error::other)?;
+    disk.reserve(byte_count)?;
+    let result = async {
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Write) {
+            return Err(std::io::Error::other("injected manifest write failure"));
+        }
+        fs::write(&part, bytes).await?;
+        let file = fs::OpenOptions::new().write(true).open(&part).await?;
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Sync) {
+            return Err(std::io::Error::other("injected manifest sync failure"));
+        }
+        file.sync_all().await?;
+        drop(file);
+        #[cfg(test)]
+        if fault == Some(ManifestFault::Rename) {
+            return Err(std::io::Error::other("injected manifest rename failure"));
+        }
+        fs::rename(&part, &path).await?;
+        raw_response::attach_sidecar_reservation(artifact_path, &disk, byte_count)?;
+        Ok(path)
+    }
+    .await;
+    if result.is_err() {
+        let _ = fs::remove_file(&part).await;
+        let _ = disk.release(byte_count);
     }
     result
 }
@@ -1465,6 +1535,76 @@ mod tests {
             );
         }
         let _ = raw_response::remove_artifact(&artifact.artifact.path).await;
+    }
+
+    #[tokio::test]
+    async fn reserved_manifest_transitions_roll_back_or_retain_only_live_files() {
+        for fault in [
+            ManifestFault::Write,
+            ManifestFault::Sync,
+            ManifestFault::Rename,
+        ] {
+            let quota = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(4096));
+            let mut writer = raw_response::begin_artifact(
+                "reserved-manifest-fault",
+                "ndjson",
+                "application/x-ndjson",
+                4096,
+            )
+            .await
+            .unwrap();
+            writer.set_disk_quota(quota.clone());
+            writer.write_chunk(b"\n").await.unwrap();
+            let artifact = writer.commit().await.unwrap();
+            let manifest = manifest_for(&artifact, "splunk", 0);
+            assert!(
+                persist_manifest_reserved_impl(
+                    &artifact.artifact.path,
+                    &manifest,
+                    quota.clone(),
+                    Some(fault),
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(quota.reserved_bytes(), artifact.artifact.size);
+            assert!(
+                !artifact
+                    .artifact
+                    .path
+                    .with_extension("manifest.json.part")
+                    .exists()
+            );
+            raw_response::remove_artifact(&artifact.artifact.path)
+                .await
+                .unwrap();
+            assert_eq!(quota.reserved_bytes(), 0);
+        }
+
+        let quota = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(4096));
+        let mut writer = raw_response::begin_artifact(
+            "reserved-manifest-success",
+            "ndjson",
+            "application/x-ndjson",
+            4096,
+        )
+        .await
+        .unwrap();
+        writer.set_disk_quota(quota.clone());
+        writer.write_chunk(b"\n").await.unwrap();
+        let artifact = writer.commit().await.unwrap();
+        let manifest = manifest_for(&artifact, "splunk", 0);
+        let manifest_path =
+            persist_manifest_reserved(&artifact.artifact.path, &manifest, quota.clone())
+                .await
+                .unwrap();
+        let intended = artifact.artifact.size + fs::metadata(&manifest_path).await.unwrap().len();
+        assert_eq!(quota.reserved_bytes(), intended);
+        raw_response::remove_artifact(&artifact.artifact.path)
+            .await
+            .unwrap();
+        assert_eq!(quota.reserved_bytes(), 0);
+        assert!(!manifest_path.exists());
     }
 
     #[tokio::test]

@@ -172,6 +172,17 @@ pub(crate) fn load_from_global_path(global_path: Option<&Path>) -> Config {
 }
 
 impl Config {
+    /// Internal streaming acquisition ceiling. This is deliberately absent
+    /// from public tool schemas and is clamped to the planner's hard ceiling.
+    pub(crate) fn streaming_partition_concurrency(&self) -> usize {
+        self.get("STREAMING_PARTITION_CONCURRENCY")
+            .and_then(|value| value.parse::<usize>().ok())
+            .filter(|value| {
+                (1..=crate::constants::data_limits::MAX_TIME_PARTITIONS).contains(value)
+            })
+            .unwrap_or(crate::constants::data_limits::DEFAULT_PARALLEL_TIME_PARTITIONS)
+    }
+
     /// Pure builder used by tests and by [`load`]. Priority is applied as
     /// follows:
     ///
@@ -544,4 +555,29 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
 /// Cross-platform `~/.mcp/configs.json` resolver.
 pub fn default_global_path() -> Option<PathBuf> {
     global::default_path()
+}
+
+#[cfg(test)]
+mod streaming_config_tests {
+    use super::Config;
+    use std::collections::HashMap;
+
+    #[test]
+    fn partition_concurrency_defaults_and_stays_within_planner_ceiling() {
+        assert_eq!(Config::default().streaming_partition_concurrency(), 4);
+        for (configured, expected) in [("1", 1), ("8", 8), ("16", 16)] {
+            let config = Config::from_map(HashMap::from([(
+                "STREAMING_PARTITION_CONCURRENCY".to_owned(),
+                configured.to_owned(),
+            )]));
+            assert_eq!(config.streaming_partition_concurrency(), expected);
+        }
+        for invalid in ["0", "17", "invalid"] {
+            let config = Config::from_map(HashMap::from([(
+                "STREAMING_PARTITION_CONCURRENCY".to_owned(),
+                invalid.to_owned(),
+            )]));
+            assert_eq!(config.streaming_partition_concurrency(), 4);
+        }
+    }
 }

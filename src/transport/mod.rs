@@ -94,6 +94,7 @@ pub struct StreamingPolicy {
     pub max_attempts: usize,
     pub cancellation: CancellationToken,
     pub aggregate: Option<Arc<StreamingAggregateQuota>>,
+    pub disk: Option<Arc<StreamingDiskQuota>>,
 }
 
 #[derive(Debug)]
@@ -107,37 +108,54 @@ pub struct StreamingAggregateQuota {
 /// Checked, concurrency-safe accounting for retained temporary artifacts.
 #[derive(Debug)]
 pub struct StreamingDiskQuota {
-    retained: AtomicU64,
+    reserved: AtomicU64,
+    peak: AtomicU64,
     limit: u64,
 }
 
 impl StreamingDiskQuota {
     pub const fn new(limit: u64) -> Self {
         Self {
-            retained: AtomicU64::new(0),
+            reserved: AtomicU64::new(0),
+            peak: AtomicU64::new(0),
             limit,
         }
     }
 
-    pub fn retain(&self, amount: u64) -> std::io::Result<u64> {
-        self.retained
+    pub fn reserve(&self, amount: u64) -> std::io::Result<u64> {
+        let next = self
+            .reserved
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
-                current.checked_add(amount).filter(|next| {
-                    next.checked_mul(2)
-                        .is_some_and(|projected| projected <= self.limit)
-                })
+                current
+                    .checked_add(amount)
+                    .filter(|next| *next <= self.limit)
             })
             .map(|previous| previous + amount)
             .map_err(|_| {
                 std::io::Error::new(
                     std::io::ErrorKind::FileTooLarge,
-                    "aggregate temporary/projected artifact quota exceeded or counter overflow",
+                    "aggregate disk reservation quota exceeded or counter overflow",
                 )
-            })
+            })?;
+        self.peak.fetch_max(next, Ordering::AcqRel);
+        Ok(next)
     }
 
-    pub fn retained_bytes(&self) -> u64 {
-        self.retained.load(Ordering::Acquire)
+    pub fn release(&self, amount: u64) -> std::io::Result<u64> {
+        self.reserved
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                current.checked_sub(amount)
+            })
+            .map(|previous| previous - amount)
+            .map_err(|_| std::io::Error::other("disk reservation release underflow"))
+    }
+
+    pub fn reserved_bytes(&self) -> u64 {
+        self.reserved.load(Ordering::Acquire)
+    }
+
+    pub fn peak_reserved_bytes(&self) -> u64 {
+        self.peak.load(Ordering::Acquire)
     }
 }
 
@@ -204,12 +222,17 @@ mod aggregate_quota_tests {
     }
 
     #[test]
-    fn checked_disk_counter_rejects_projection_and_overflow() {
+    fn checked_disk_reservation_rejects_quota_underflow_and_overflow() {
         let quota = StreamingDiskQuota::new(10);
-        assert_eq!(quota.retain(4).unwrap(), 4);
-        assert!(quota.retain(2).is_err());
+        assert_eq!(quota.reserve(4).unwrap(), 4);
+        assert_eq!(quota.reserve(6).unwrap(), 10);
+        assert!(quota.reserve(1).is_err());
+        assert_eq!(quota.release(6).unwrap(), 4);
+        assert_eq!(quota.release(4).unwrap(), 0);
+        assert!(quota.release(1).is_err());
         let overflow = StreamingDiskQuota::new(u64::MAX);
-        assert!(overflow.retain(u64::MAX).is_err());
+        overflow.reserve(u64::MAX).unwrap();
+        assert!(overflow.reserve(1).is_err());
     }
 }
 
@@ -223,6 +246,7 @@ impl StreamingPolicy {
             max_attempts: crate::constants::data_limits::STREAM_MAX_ATTEMPTS,
             cancellation: CancellationToken::new(),
             aggregate: None,
+            disk: None,
         }
     }
 }
@@ -395,6 +419,9 @@ async fn persist_decoded_response(
     )
     .await
     .map_err(|error| unexpected(format!("failed to create streamed artifact: {error}"), None))?;
+    if let Some(disk) = &policy.disk {
+        writer.set_disk_quota(disk.clone());
+    }
     let mut buffer = vec![0_u8; crate::constants::data_limits::STREAM_WRITE_BUFFER_SIZE];
     loop {
         let read = tokio::select! {

@@ -26,7 +26,31 @@ use tracing::debug;
 use crate::constants::UNSCOPED_PACKAGE_NAME;
 
 static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
-static ARTIFACTS: OnceLock<RwLock<HashMap<String, ArtifactMetadata>>> = OnceLock::new();
+static ARTIFACTS: OnceLock<RwLock<HashMap<String, RegisteredArtifact>>> = OnceLock::new();
+
+#[derive(Debug)]
+struct RegisteredArtifact {
+    metadata: ArtifactMetadata,
+    disk: Option<DiskReservation>,
+}
+
+#[derive(Debug)]
+struct DiskReservation {
+    quota: std::sync::Arc<super::StreamingDiskQuota>,
+    artifact_bytes: u64,
+    sidecar_bytes: u64,
+}
+
+impl Drop for DiskReservation {
+    fn drop(&mut self) {
+        let total = self
+            .artifact_bytes
+            .checked_add(self.sidecar_bytes)
+            .expect("registered disk reservation total is checked at acquisition");
+        let released = self.quota.release(total);
+        debug_assert!(released.is_ok());
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +94,7 @@ pub struct ArtifactWriter {
     tail: std::collections::VecDeque<u8>,
     hasher: Sha256,
     committed: bool,
+    disk_quota: Option<std::sync::Arc<super::StreamingDiskQuota>>,
     #[cfg(test)]
     fault: Option<ArtifactWriterFault>,
 }
@@ -82,6 +107,11 @@ enum ArtifactWriterFault {
 }
 
 impl ArtifactWriter {
+    pub fn set_disk_quota(&mut self, quota: std::sync::Arc<super::StreamingDiskQuota>) {
+        debug_assert_eq!(self.size, 0);
+        self.disk_quota = Some(quota);
+    }
+
     #[cfg(test)]
     fn inject_fault(&mut self, fault: ArtifactWriterFault) {
         self.fault = Some(fault);
@@ -102,6 +132,21 @@ impl ArtifactWriter {
                 format!("streamed artifact exceeds {} bytes", self.max_bytes),
             ));
         }
+        if let Some(quota) = &self.disk_quota {
+            quota.reserve(u64::try_from(bytes.len()).map_err(std::io::Error::other)?)?;
+        }
+        if let Err(error) = self
+            .writer
+            .as_mut()
+            .expect("artifact writer is open")
+            .write_all(bytes)
+            .await
+        {
+            if let Some(quota) = &self.disk_quota {
+                let _ = quota.release(u64::try_from(bytes.len()).unwrap_or(u64::MAX));
+            }
+            return Err(error);
+        }
         let head_limit = crate::constants::data_limits::STREAM_PREVIEW_HEAD_SIZE;
         if self.head.len() < head_limit {
             let take = (head_limit - self.head.len()).min(bytes.len());
@@ -113,11 +158,6 @@ impl ArtifactWriter {
             self.tail.pop_front();
         }
         self.hasher.update(bytes);
-        self.writer
-            .as_mut()
-            .expect("artifact writer is open")
-            .write_all(bytes)
-            .await?;
         self.size = next;
         Ok(())
     }
@@ -144,7 +184,17 @@ impl ArtifactWriter {
         artifacts()
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert(self.id.clone(), metadata.clone());
+            .insert(
+                self.id.clone(),
+                RegisteredArtifact {
+                    metadata: metadata.clone(),
+                    disk: self.disk_quota.take().map(|quota| DiskReservation {
+                        quota,
+                        artifact_bytes: self.size,
+                        sidecar_bytes: 0,
+                    }),
+                },
+            );
         self.committed = true;
         Ok(StreamedArtifact {
             artifact: metadata,
@@ -161,6 +211,9 @@ impl Drop for ArtifactWriter {
     fn drop(&mut self) {
         if !self.committed {
             let _ = std::fs::remove_file(&self.partial_path);
+            if let Some(quota) = &self.disk_quota {
+                let _ = quota.release(self.size);
+            }
         }
     }
 }
@@ -207,12 +260,13 @@ pub async fn begin_artifact(
         ),
         hasher: Sha256::new(),
         committed: false,
+        disk_quota: None,
         #[cfg(test)]
         fault: None,
     })
 }
 
-fn artifacts() -> &'static RwLock<HashMap<String, ArtifactMetadata>> {
+fn artifacts() -> &'static RwLock<HashMap<String, RegisteredArtifact>> {
     ARTIFACTS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
@@ -221,7 +275,7 @@ pub fn artifact(id: &str) -> Option<ArtifactMetadata> {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(id)
-        .cloned()
+        .map(|registered| registered.metadata.clone())
 }
 
 pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
@@ -229,8 +283,8 @@ pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
-        .find(|artifact| artifact.path == path)
-        .cloned()
+        .find(|artifact| artifact.metadata.path == path)
+        .map(|registered| registered.metadata.clone())
 }
 
 /// Remove a committed artifact and forget its download metadata.
@@ -243,10 +297,48 @@ pub async fn remove_artifact(path: &Path) -> std::io::Result<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
+    for sidecar in [
+        path.with_extension("manifest.json"),
+        path.with_extension("manifest.json.part"),
+    ] {
+        match fs::remove_file(sidecar).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
     artifacts()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|_, artifact| artifact.path != path);
+        .retain(|_, artifact| artifact.metadata.path != path);
+    Ok(())
+}
+
+/// Transfer a successfully committed sidecar reservation to its artifact.
+pub(crate) fn attach_sidecar_reservation(
+    artifact_path: &Path,
+    quota: &std::sync::Arc<super::StreamingDiskQuota>,
+    bytes: u64,
+) -> std::io::Result<()> {
+    let mut entries = artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let registered = entries
+        .values_mut()
+        .find(|entry| entry.metadata.path == artifact_path)
+        .ok_or_else(|| std::io::Error::other("artifact is not registered"))?;
+    let disk = registered
+        .disk
+        .as_mut()
+        .ok_or_else(|| std::io::Error::other("artifact has no disk reservation"))?;
+    if !std::sync::Arc::ptr_eq(&disk.quota, quota) {
+        return Err(std::io::Error::other("sidecar uses a different disk quota"));
+    }
+    let old = disk.sidecar_bytes;
+    if old != 0 {
+        quota.release(old)?;
+    }
+    disk.sidecar_bytes = bytes;
     Ok(())
 }
 
@@ -418,7 +510,13 @@ pub async fn save_artifact(filename_prefix: &str, content: &str) -> Option<PathB
             artifacts()
                 .write()
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .insert(id, metadata);
+                .insert(
+                    id,
+                    RegisteredArtifact {
+                        metadata,
+                        disk: None,
+                    },
+                );
             debug!(path = %path.display(), bytes = content.len(), "saved tool artifact");
             Some(path)
         }
@@ -586,5 +684,56 @@ mod artifact_writer_fault_tests {
         assert!(!path.exists());
         assert!(!partial.exists());
         assert!(artifact(&id).is_none());
+    }
+
+    #[tokio::test]
+    async fn concurrent_writers_never_exceed_quota_and_roll_back_failures() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(6));
+        let mut first = begin_artifact("reserved-first", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        first.set_disk_quota(quota.clone());
+        let mut second = begin_artifact("reserved-second", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        second.set_disk_quota(quota.clone());
+
+        first.write_chunk(b"1234").await.unwrap();
+        assert!(second.write_chunk(b"5678").await.is_err());
+        assert_eq!(quota.reserved_bytes(), 4);
+        assert!(quota.peak_reserved_bytes() <= 6);
+        drop(second);
+        drop(first);
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn committed_reservation_is_released_once_after_cleanup() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let mut writer = begin_artifact("reserved-commit", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        writer.set_disk_quota(quota.clone());
+        writer.write_chunk(b"data").await.unwrap();
+        let artifact = writer.commit().await.unwrap();
+        assert_eq!(quota.reserved_bytes(), 4);
+
+        remove_artifact(&artifact.artifact.path).await.unwrap();
+        assert_eq!(quota.reserved_bytes(), 0);
+        remove_artifact(&artifact.artifact.path).await.unwrap();
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn commit_failure_releases_full_reservation() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let mut writer = begin_artifact("reserved-fault", "txt", "text/plain", 16)
+            .await
+            .unwrap();
+        writer.set_disk_quota(quota.clone());
+        writer.write_chunk(b"data").await.unwrap();
+        writer.inject_fault(ArtifactWriterFault::Commit);
+        assert!(writer.commit().await.is_err());
+        assert_eq!(quota.reserved_bytes(), 0);
     }
 }

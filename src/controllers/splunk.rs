@@ -20,7 +20,7 @@ use crate::tools::args::{
     SplunkSearchArgs,
 };
 use crate::transport::HttpMethod;
-use crate::transport::{RequestOptions, fetch_streamed_artifact};
+use crate::transport::RequestOptions;
 use crate::vendor::splunk::{
     SAVED_SEARCHES_PATH, SEARCH_EXPORT_PATH, SEARCH_JOBS_PATH, SplunkVendor,
 };
@@ -66,6 +66,9 @@ pub async fn search(
         ctx,
         args,
         None,
+        std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+            MAX_STREAMED_ARTIFACT_SIZE,
+        )),
         MAX_STREAMED_ARTIFACT_SIZE,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -84,6 +87,7 @@ async fn search_single(
     ctx: &SplunkContext<'_>,
     args: &SplunkSearchArgs,
     aggregate: Option<std::sync::Arc<crate::transport::StreamingAggregateQuota>>,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     canonical_max_bytes: u64,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
@@ -101,6 +105,7 @@ async fn search_single(
         MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.aggregate = aggregate;
+    policy.disk = Some(disk.clone());
     policy.cancellation = cancellation.clone();
     let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
@@ -123,6 +128,7 @@ async fn search_single(
         "splunk-search",
         args.jq.as_deref(),
         canonical_max_bytes,
+        disk,
         &cancellation,
     )
     .await;
@@ -148,7 +154,7 @@ async fn search_partitioned(
     let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
-    let concurrency = count.min(crate::constants::data_limits::MAX_PARALLEL_TIME_PARTITIONS);
+    let concurrency = count.min(ctx.config.streaming_partition_concurrency());
     let mut active = FuturesUnordered::new();
     let acquire = |index: usize| {
         let interval = intervals[index].clone();
@@ -159,11 +165,13 @@ async fn search_partitioned(
         partition_args.latest_time = Some(crate::ingestion::splunk_epoch_seconds(interval.end_ns));
         let aggregate = aggregate.clone();
         let cancellation = cancellation.clone();
+        let disk = disk.clone();
         async move {
             let response = search_single(
                 ctx,
                 &partition_args,
                 Some(aggregate),
+                disk,
                 MAX_STREAMED_ARTIFACT_SIZE,
                 cancellation,
             )
@@ -188,23 +196,10 @@ async fn search_partitioned(
     while let Some(result) = active.next().await {
         match result {
             Ok((index, path)) => {
-                let size = std::fs::metadata(&path).map(|metadata| metadata.len());
                 slots[index] = Some(path);
-                if first_error.is_none() {
-                    let retained = size
-                        .map_err(|error| std::io::Error::other(format!("metadata: {error}")))
-                        .and_then(|size| disk.retain(size));
-                    if let Err(error) = retained {
-                        cancellation.cancel();
-                        first_error = Some(api_error(
-                            format!("Cannot account Splunk partition: {error}"),
-                            Some(413),
-                            None,
-                        ));
-                    } else if next < count {
-                        active.push(acquire(next));
-                        next += 1;
-                    }
+                if first_error.is_none() && next < count {
+                    active.push(acquire(next));
+                    next += 1;
                 }
             }
             Err(error) if first_error.is_none() => {
@@ -219,13 +214,6 @@ async fn search_partitioned(
         cleanup_splunk_partitions(&paths).await;
         return Err(error);
     }
-    debug_assert_eq!(
-        disk.retained_bytes(),
-        paths
-            .iter()
-            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
-            .sum::<u64>()
-    );
     let result = splunk_final_partition_response(
         args,
         start,
@@ -234,6 +222,7 @@ async fn search_partitioned(
         &paths,
         &intervals,
         &aggregate,
+        disk,
         &cancellation,
     )
     .await;
@@ -252,6 +241,7 @@ async fn splunk_final_partition_response(
     paths: &[std::path::PathBuf],
     _intervals: &[crate::ingestion::QueryInterval],
     aggregate: &crate::transport::StreamingAggregateQuota,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut validated = Vec::with_capacity(paths.len());
@@ -293,12 +283,13 @@ async fn splunk_final_partition_response(
             None,
         ));
     }
-    let merge = crate::ingestion::merge_partitions_cancellable(
+    let merge = crate::ingestion::merge_partitions_cancellable_reserved(
         paths,
         crate::ingestion::RecordOrdering::Chronological,
         None,
         final_budget,
         cancellation,
+        Some(disk.clone()),
     )
     .await
     .map_err(|e| api_error(format!("Cannot merge Splunk partitions: {e}"), None, None))?;
@@ -332,7 +323,8 @@ async fn splunk_final_partition_response(
         completeness_reason: None,
     };
     if let Err(error) =
-        crate::ingestion::persist_manifest(&merge.artifact.artifact.path, &manifest).await
+        crate::ingestion::persist_manifest_reserved(&merge.artifact.artifact.path, &manifest, disk)
+            .await
     {
         let _ =
             crate::transport::raw_response::remove_artifact(&merge.artifact.artifact.path).await;
@@ -427,8 +419,15 @@ pub async fn job_results(
         &format!("/services/search/v2/jobs/{}/results", args.sid),
         &query,
     );
-    let artifact = fetch_streamed_artifact(
-        ctx.client,
+    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+        MAX_STREAMED_ARTIFACT_SIZE,
+    ));
+    let mut policy = crate::transport::StreamingPolicy::new(
+        MAX_STREAMED_ARTIFACT_SIZE,
+        MAX_STREAMED_ARTIFACT_SIZE,
+    );
+    policy.disk = Some(disk.clone());
+    let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
         &creds,
         ctx.config,
@@ -440,17 +439,20 @@ pub async fn job_results(
         "splunk-job-results",
         "json",
         "application/json",
-        MAX_STREAMED_ARTIFACT_SIZE,
+        policy,
     )
     .await?;
-    normalize_streamed_response(
+    let result = normalize_streamed_response(
         &artifact,
         "splunk-job-results",
         args.jq.as_deref(),
         MAX_STREAMED_ARTIFACT_SIZE,
+        disk,
         &tokio_util::sync::CancellationToken::new(),
     )
-    .await
+    .await;
+    let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
+    result
 }
 
 #[allow(clippy::too_many_lines)] // Commit and manifest sequencing is intentionally kept in one auditable transaction.
@@ -459,6 +461,7 @@ async fn normalize_streamed_response(
     prefix: &str,
     jq: Option<&str>,
     canonical_max_bytes: u64,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut items = crate::ingestion::stream_splunk_json_rows(input.artifact.path.clone(), 8);
@@ -478,6 +481,7 @@ async fn normalize_streamed_response(
             None,
         )
     })?;
+    writer.set_disk_quota(disk.clone());
     while let Some(item) = items.recv().await {
         if cancellation.is_cancelled() {
             return Err(api_error(
@@ -577,7 +581,8 @@ async fn normalize_streamed_response(
         completeness: crate::ingestion::Completeness::Complete,
         completeness_reason: None,
     };
-    if let Err(error) = crate::ingestion::persist_manifest(&artifact.artifact.path, &manifest).await
+    if let Err(error) =
+        crate::ingestion::persist_manifest_reserved(&artifact.artifact.path, &manifest, disk).await
     {
         let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
         return Err(api_error(

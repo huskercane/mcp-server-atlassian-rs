@@ -470,6 +470,68 @@ final manifests, lifecycle cleanup, and this parallel-acquisition checkpoint.
 Any future work is optional hardening or addressing the separately documented
 Clippy baseline; no required implementation item remains in the handoff below.
 
+## Continuous disk reservation production-hardening checkpoint (2026-08-21)
+
+### Completed
+
+- Replaced post-commit retained-part accounting with one checked atomic disk
+  reservation shared by every concurrently active transport-input, canonical
+  partition, final-artifact, and manifest write in a streaming-ingestion
+  transaction. Chunk writers reserve before each filesystem write; manifest
+  writers reserve their complete serialized size before creating the partial.
+- Aggregate reservations cannot exceed the configured disk ceiling even while
+  transport and normalization writers overlap. Checked addition rejects quota
+  exhaustion and overflow without changing the counter; checked subtraction
+  rejects underflow and double release. Peak reservation is observable for
+  deterministic tests.
+- Reservation ownership follows the artifact lifecycle. An incomplete writer
+  releases after partial cleanup, commit transfers ownership to the artifact
+  registry, manifest commit attaches the sidecar reservation, replacement
+  releases the superseded sidecar exactly once, and artifact removal deletes
+  artifact/manifest/manifest-partial files before unregistering and releasing.
+- Successful partition-to-final transitions remove partition artifacts and
+  sidecars only after final artifact and manifest commits, leaving exactly the
+  live final artifact plus final manifest reserved. Failure paths return every
+  shared reservation to zero and retain no artifact registry entry.
+- Preserved the independent final-artifact projected-space rule: canonical
+  retained-part bytes must still fit alongside a conservatively projected
+  final artifact before merge begins. The continuous reservation then enforces
+  actual final and manifest writes.
+- Applied the same shared reservation lifecycle to single-response Splunk,
+  Splunk job results, Grafana/Loki, and CircleCI ingestion without changing any
+  public tool schema. CircleCI transport inputs are now removed after final
+  normalization, and final-manifest failure removes the committed final
+  artifact transactionally.
+- Added the internal/server `STREAMING_PARTITION_CONCURRENCY` configuration.
+  It defaults to four, accepts only 1-16, and is always capped by the planned
+  partition count. Invalid or out-of-range values fall back to four; public
+  partition controls and every existing partition-eligibility fallback remain
+  unchanged.
+- Added deterministic tests for reservation quota/overflow/underflow,
+  concurrent-writer peak bounds, write and commit rollback, double-release
+  prevention, manifest write/sync/rename rollback, successful final/manifest
+  live reservation accounting, sidecar cleanup, and zero reservations after
+  failure. The transport and normalization paths share this tested artifact
+  writer and registry lifecycle.
+
+### Verification
+
+- `cargo fmt --all`
+- Focused ingestion, Splunk normalization/controller, Grafana/Loki
+  normalization/controller, CircleCI controller, raw-artifact, tool-schema,
+  and streaming-transport tests, including non-empty multipart ordering in
+  both directions
+- `cargo check --all-features`
+- `cargo test --all-features -j 1` (full suite passed after the final release
+  lifecycle correction)
+- `git diff --check`
+
+`cargo clippy --all-features --all-targets -- -D warnings` reaches the project
+and reports exactly the documented five pre-existing warnings and no warning
+from this slice: `cast_possible_truncation` and `cast_possible_wrap` in
+`src/transport/response_cache.rs`, `too_many_lines` and `map_unwrap_or` in the
+generic transport, and `map_unwrap_or` in `src/vendor/ninjaone/mod.rs`.
+
 ## Historical handoff: bounded parallel partition acquisition and deterministic fault injection
 
 Keep every planner, normalization, transport, merge, quota, manifest, and

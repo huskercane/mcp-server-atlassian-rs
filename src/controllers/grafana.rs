@@ -77,6 +77,9 @@ pub async fn query_logs(
         ctx,
         args,
         None,
+        std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+            MAX_STREAMED_ARTIFACT_SIZE,
+        )),
         MAX_STREAMED_ARTIFACT_SIZE,
         tokio_util::sync::CancellationToken::new(),
     )
@@ -93,6 +96,7 @@ async fn query_logs_single(
     ctx: &GrafanaContext<'_>,
     args: &GrafanaQueryLogsArgs,
     aggregate: Option<std::sync::Arc<crate::transport::StreamingAggregateQuota>>,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     canonical_max_bytes: u64,
     cancellation: tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
@@ -129,6 +133,7 @@ async fn query_logs_single(
         MAX_STREAMED_ARTIFACT_SIZE,
     );
     policy.aggregate = aggregate;
+    policy.disk = Some(disk.clone());
     policy.cancellation = cancellation.clone();
     let artifact = crate::transport::fetch_streamed_artifact_with_policy(
         ctx.vendor,
@@ -154,6 +159,7 @@ async fn query_logs_single(
         &artifact,
         args.jq.as_deref(),
         canonical_max_bytes,
+        disk,
         ordering,
         &cancellation,
     )
@@ -184,7 +190,7 @@ async fn query_logs_partitioned(
     let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
         MAX_STREAMED_ARTIFACT_SIZE,
     ));
-    let concurrency = count.min(crate::constants::data_limits::MAX_PARALLEL_TIME_PARTITIONS);
+    let concurrency = count.min(ctx.config.streaming_partition_concurrency());
     let mut active = FuturesUnordered::new();
     let acquire = |index: usize| {
         let interval = intervals[index].clone();
@@ -195,11 +201,13 @@ async fn query_logs_partitioned(
         partition_args.limit = args.limit;
         let aggregate = aggregate.clone();
         let cancellation = cancellation.clone();
+        let disk = disk.clone();
         async move {
             let response = query_logs_single(
                 ctx,
                 &partition_args,
                 Some(aggregate),
+                disk,
                 MAX_STREAMED_ARTIFACT_SIZE,
                 cancellation,
             )
@@ -220,20 +228,10 @@ async fn query_logs_partitioned(
     while let Some(result) = active.next().await {
         match result {
             Ok((index, path)) => {
-                let size = std::fs::metadata(&path).map(|metadata| metadata.len());
                 slots[index] = Some(path);
-                if first_error.is_none() {
-                    let retained = size
-                        .map_err(|error| std::io::Error::other(format!("metadata: {error}")))
-                        .and_then(|size| disk.retain(size));
-                    if let Err(error) = retained {
-                        cancellation.cancel();
-                        first_error =
-                            Some(api_error(format!("Cannot account Loki partition: {error}")));
-                    } else if next < count {
-                        active.push(acquire(next));
-                        next += 1;
-                    }
+                if first_error.is_none() && next < count {
+                    active.push(acquire(next));
+                    next += 1;
                 }
             }
             Err(error) if first_error.is_none() => {
@@ -248,13 +246,6 @@ async fn query_logs_partitioned(
         cleanup_partition_paths(&parts).await;
         return Err(error);
     }
-    debug_assert_eq!(
-        disk.retained_bytes(),
-        parts
-            .iter()
-            .map(|path| std::fs::metadata(path).map_or(0, |m| m.len()))
-            .sum::<u64>()
-    );
     let result = final_partition_response(
         "grafana_loki",
         args,
@@ -263,6 +254,7 @@ async fn query_logs_partitioned(
         &parts,
         &intervals,
         aggregate,
+        disk,
         &cancellation,
     )
     .await;
@@ -288,6 +280,7 @@ async fn final_partition_response(
     paths: &[std::path::PathBuf],
     _intervals: &[crate::ingestion::QueryInterval],
     aggregate: std::sync::Arc<crate::transport::StreamingAggregateQuota>,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
     let mut validated = Vec::with_capacity(paths.len());
@@ -318,12 +311,13 @@ async fn final_partition_response(
     } else {
         crate::ingestion::RecordOrdering::Chronological
     };
-    let merge = crate::ingestion::merge_partitions_cancellable(
+    let merge = crate::ingestion::merge_partitions_cancellable_reserved(
         paths,
         ordering,
         args.limit.map(u64::from),
         final_budget,
         cancellation,
+        Some(disk.clone()),
     )
     .await
     .map_err(|e| api_error(format!("Cannot merge Loki partitions: {e}")))?;
@@ -371,7 +365,8 @@ async fn final_partition_response(
             .then(|| "a result limit may have truncated the complete ordered result".to_owned()),
     };
     if let Err(error) =
-        crate::ingestion::persist_manifest(&merge.artifact.artifact.path, &manifest).await
+        crate::ingestion::persist_manifest_reserved(&merge.artifact.artifact.path, &manifest, disk)
+            .await
     {
         let _ =
             crate::transport::raw_response::remove_artifact(&merge.artifact.artifact.path).await;
@@ -392,6 +387,7 @@ async fn normalize_loki_response(
     input: &crate::transport::raw_response::StreamedArtifact,
     jq: Option<&str>,
     canonical_max_bytes: u64,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
     ordering: crate::ingestion::RecordOrdering,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> Result<ControllerResponse, McpError> {
@@ -404,6 +400,7 @@ async fn normalize_loki_response(
     )
     .await
     .map_err(|error| api_error(format!("Cannot create Loki canonical artifact: {error}")))?;
+    writer.set_disk_quota(disk.clone());
     let mut records = 0_u64;
     while let Some(item) = items.recv().await {
         if cancellation.is_cancelled() {
@@ -471,7 +468,8 @@ async fn normalize_loki_response(
         completeness: crate::ingestion::Completeness::Complete,
         completeness_reason: None,
     };
-    if let Err(error) = crate::ingestion::persist_manifest(&artifact.artifact.path, &manifest).await
+    if let Err(error) =
+        crate::ingestion::persist_manifest_reserved(&artifact.artifact.path, &manifest, disk).await
     {
         let _ = crate::transport::raw_response::remove_artifact(&artifact.artifact.path).await;
         return Err(api_error(format!(

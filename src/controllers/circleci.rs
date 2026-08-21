@@ -131,16 +131,28 @@ pub async fn handle_logs(
     args: &CircleCiLogsArgs,
 ) -> Result<ControllerResponse, McpError> {
     let token = ctx.vendor.token(ctx.config).await?;
+    let disk = std::sync::Arc::new(crate::transport::StreamingDiskQuota::new(
+        crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
+    ));
     let project = LogProject::parse(&args.project_slug)?;
     let build = fetch_build_details(ctx, &token, &project, args.job_number).await?;
-    let steps = collect_log_steps(ctx, &build, args).await?;
+    let steps = collect_log_steps(ctx, &build, args, disk.clone()).await?;
 
     let response = CircleCiLogsResponse {
         project_slug: args.project_slug.clone(),
         job_number: args.job_number,
         steps,
     };
-    let artifact = write_complete_log_artifact(&response).await?;
+    let artifact_result = write_complete_log_artifact(&response, disk).await;
+    for path in response
+        .steps
+        .iter()
+        .flat_map(|step| &step.actions)
+        .filter_map(|action| action.output_path.as_deref())
+    {
+        let _ = raw_response::remove_artifact(path).await;
+    }
+    let artifact = artifact_result?;
     let preview_content = if artifact.artifact.size
         > u64::try_from(artifact.head.len() + artifact.tail.len()).unwrap_or(u64::MAX)
     {
@@ -290,6 +302,7 @@ async fn collect_log_steps(
     ctx: &CircleCiContext<'_>,
     build: &Value,
     args: &CircleCiLogsArgs,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
 ) -> Result<Vec<LogStep>, McpError> {
     let Some(steps) = build.get("steps").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -304,7 +317,7 @@ async fn collect_log_steps(
         {
             continue;
         }
-        let actions = collect_log_actions(ctx, step, args.failed_only).await?;
+        let actions = collect_log_actions(ctx, step, args.failed_only, disk.clone()).await?;
         if args.failed_only && actions.is_empty() {
             continue;
         }
@@ -321,6 +334,7 @@ async fn collect_log_actions(
     ctx: &CircleCiContext<'_>,
     step: &Value,
     failed_only: bool,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
 ) -> Result<Vec<LogAction>, McpError> {
     let Some(actions) = step.get("actions").and_then(Value::as_array) else {
         return Ok(Vec::new());
@@ -346,35 +360,41 @@ async fn collect_log_actions(
         .collect();
 
     let mut collected: Vec<(usize, LogAction)> = stream::iter(selected)
-        .map(|(action_index, action, status, exit_code)| async move {
-            let output_url = action.get("output_url").and_then(Value::as_str);
-            let (output_path, encoded_bytes, decoded_bytes, output_fetch_error) = match output_url {
-                Some(url) if !url.is_empty() => match fetch_action_output(ctx, url).await {
-                    Ok(artifact) => (
-                        Some(artifact.artifact.path),
-                        artifact.encoded_bytes,
-                        artifact.decoded_bytes,
-                        None,
-                    ),
-                    Err(err) => (None, 0, 0, Some(err.message)),
-                },
-                _ => (None, 0, 0, None),
-            };
+        .map(|(action_index, action, status, exit_code)| {
+            let disk = disk.clone();
+            async move {
+                let output_url = action.get("output_url").and_then(Value::as_str);
+                let (output_path, encoded_bytes, decoded_bytes, output_fetch_error) =
+                    match output_url {
+                        Some(url) if !url.is_empty() => {
+                            match fetch_action_output(ctx, url, disk).await {
+                                Ok(artifact) => (
+                                    Some(artifact.artifact.path),
+                                    artifact.encoded_bytes,
+                                    artifact.decoded_bytes,
+                                    None,
+                                ),
+                                Err(err) => (None, 0, 0, Some(err.message)),
+                            }
+                        }
+                        _ => (None, 0, 0, None),
+                    };
 
-            (
-                action_index,
-                LogAction {
-                    action_number: action_index + 1,
-                    name: optional_string(&action, "name"),
-                    status,
-                    exit_code,
-                    action_type: optional_string(&action, "type"),
-                    output_path,
-                    encoded_bytes,
-                    decoded_bytes,
-                    output_fetch_error,
-                },
-            )
+                (
+                    action_index,
+                    LogAction {
+                        action_number: action_index + 1,
+                        name: optional_string(&action, "name"),
+                        status,
+                        exit_code,
+                        action_type: optional_string(&action, "type"),
+                        output_path,
+                        encoded_bytes,
+                        decoded_bytes,
+                        output_fetch_error,
+                    },
+                )
+            }
         })
         .buffer_unordered(8)
         .collect()
@@ -522,6 +542,7 @@ fn condense_logs(text: &str, context: usize) -> String {
 async fn fetch_action_output(
     ctx: &CircleCiContext<'_>,
     output_url: &str,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
 ) -> Result<raw_response::StreamedArtifact, McpError> {
     let _ = ctx;
     let _permit = output_downloads().acquire().await.map_err(|err| {
@@ -531,15 +552,17 @@ async fn fetch_action_output(
             None,
         )
     })?;
+    let mut policy = crate::transport::StreamingPolicy::new(
+        crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
+        crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
+    );
+    policy.disk = Some(disk);
     crate::transport::fetch_streamed_url(
         output_url,
         "circleci-action",
         "json",
         "application/json",
-        crate::transport::StreamingPolicy::new(
-            crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
-            crate::constants::data_limits::MAX_STREAMED_ARTIFACT_SIZE,
-        ),
+        policy,
     )
     .await
 }
@@ -547,6 +570,7 @@ async fn fetch_action_output(
 #[allow(clippy::too_many_lines)]
 async fn write_complete_log_artifact(
     response: &CircleCiLogsResponse,
+    disk: std::sync::Arc<crate::transport::StreamingDiskQuota>,
 ) -> Result<raw_response::StreamedArtifact, McpError> {
     let mut writer = raw_response::begin_artifact(
         &format!("circleci-job-{}", response.job_number),
@@ -562,6 +586,7 @@ async fn write_complete_log_artifact(
             None,
         )
     })?;
+    writer.set_disk_quota(disk.clone());
     let mut sequence = 0_u64;
     for step in &response.steps {
         for action in &step.actions {
@@ -688,15 +713,16 @@ async fn write_complete_log_artifact(
         completeness_reason: (failed != 0)
             .then(|| "one or more action output downloads failed".to_owned()),
     };
-    crate::ingestion::persist_manifest(&artifact.artifact.path, &manifest)
-        .await
-        .map_err(|err| {
-            api_error(
-                format!("Cannot commit CircleCI artifact manifest: {err}"),
-                None,
-                None,
-            )
-        })?;
+    if let Err(err) =
+        crate::ingestion::persist_manifest_reserved(&artifact.artifact.path, &manifest, disk).await
+    {
+        let _ = raw_response::remove_artifact(&artifact.artifact.path).await;
+        return Err(api_error(
+            format!("Cannot commit CircleCI artifact manifest: {err}"),
+            None,
+            None,
+        ));
+    }
     Ok(artifact)
 }
 
