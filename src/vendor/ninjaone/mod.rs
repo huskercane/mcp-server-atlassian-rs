@@ -49,6 +49,89 @@ const SESSION_COOKIE_NAME: &str = "sessionKey";
 /// already-configured shape; new sessions use the cookie.
 const SESSION_KEY_HEADER: &str = "sessionKey";
 
+pub(crate) const HTTP_LOG_TARGET: &str = "ninjaone_http";
+
+/// Clone a JSON payload for debug logging while removing authentication
+/// material. Debug logs are diagnostics, not a secret-storage boundary.
+pub(crate) fn sanitized_http_json(value: &Value) -> Value {
+    fn redact(value: &mut Value) {
+        match value {
+            Value::Object(fields) => {
+                for (name, value) in fields {
+                    let normalized = name.to_ascii_lowercase();
+                    if matches!(
+                        normalized.as_str(),
+                        "password"
+                            | "code"
+                            | "mfacode"
+                            | "recaptchatoken"
+                            | "sessionkey"
+                            | "logintoken"
+                            | "token"
+                            | "cookie"
+                            | "authorization"
+                            | "authuser"
+                            | "secret"
+                    ) {
+                        *value = Value::String("<redacted>".to_owned());
+                    } else {
+                        redact(value);
+                    }
+                }
+            }
+            Value::Array(values) => values.iter_mut().for_each(redact),
+            _ => {}
+        }
+    }
+
+    let mut sanitized = value.clone();
+    redact(&mut sanitized);
+    sanitized
+}
+
+pub(crate) fn sanitized_http_text(text: &str) -> Value {
+    serde_json::from_str(text)
+        .map(|value| sanitized_http_json(&value))
+        .unwrap_or_else(|_| serde_json::json!({ "nonJsonBody": "<omitted>", "bytes": text.len() }))
+}
+
+#[cfg(test)]
+mod http_logging_tests {
+    use super::*;
+
+    #[test]
+    fn debug_payloads_redact_login_secrets_recursively() {
+        let payload = serde_json::json!({
+            "email": "operator@example.com",
+            "password": "hunter2",
+            "nested": {
+                "sessionKey": "session-secret",
+                "loginToken": "login-secret",
+                "code": "123456",
+                "authUser": "socket-session-secret",
+                "resultCode": "SUCCESS"
+            }
+        });
+
+        let rendered = sanitized_http_json(&payload).to_string();
+        assert!(rendered.contains("operator@example.com"));
+        assert!(rendered.contains("SUCCESS"));
+        assert!(!rendered.contains("hunter2"));
+        assert!(!rendered.contains("session-secret"));
+        assert!(!rendered.contains("login-secret"));
+        assert!(!rendered.contains("123456"));
+        assert!(!rendered.contains("socket-session-secret"));
+        assert_eq!(rendered.matches("<redacted>").count(), 5);
+    }
+
+    #[test]
+    fn non_json_response_content_is_not_logged() {
+        let rendered = sanitized_http_text("secret HTML response").to_string();
+        assert!(!rendered.contains("secret HTML response"));
+        assert!(rendered.contains("nonJsonBody"));
+    }
+}
+
 /// Where the credential a request is about to use came from. Only the
 /// controller needs this, and only to decide what a `401` means: a key minted
 /// by [`session`] can be evicted and re-minted, a static one cannot.

@@ -36,6 +36,28 @@ async fn call_mock(
     override_url::fetch(mock_server, &client, &creds, &config, path_suffix, options).await
 }
 
+async fn call_mock_cached(
+    mock_server: &MockServer,
+    path_suffix: &str,
+    credentials: Credentials,
+) -> Result<mcp_server_atlassian::transport::TransportResponse, mcp_server_atlassian::error::McpError>
+{
+    let client = build_client().unwrap();
+    let config = Config::from_map(HashMap::from([
+        ("HTTP_CACHE_ENABLED".to_owned(), "true".to_owned()),
+        ("HTTP_CACHE_DEFAULT_TTL_SECONDS".to_owned(), "60".to_owned()),
+    ]));
+    override_url::fetch(
+        mock_server,
+        &client,
+        &credentials,
+        &config,
+        path_suffix,
+        RequestOptions::default(),
+    )
+    .await
+}
+
 /// Thin shim that replaces the hard-coded `api.bitbucket.org` base URL with
 /// the wiremock server's URL for the duration of the test. Implemented as an
 /// inline module to keep scope out of the public API.
@@ -61,6 +83,84 @@ mod override_url {
 }
 
 // ---- Tests ----
+
+#[tokio::test]
+async fn enabled_cache_reuses_a_successful_get() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/cached"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("cache-control", "max-age=60")
+                .set_body_json(json!({"value": 7})),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let credentials = Credentials::AtlassianApiToken {
+        email: "cache-user@example.com".into(),
+        token: "cache-token".into(),
+    };
+
+    let first = call_mock_cached(&server, "/2.0/cached", credentials.clone())
+        .await
+        .unwrap();
+    let second = call_mock_cached(&server, "/2.0/cached", credentials)
+        .await
+        .unwrap();
+    assert_eq!(first.data.as_json().unwrap()["value"], 7);
+    assert_eq!(second.data.as_json().unwrap()["value"], 7);
+    assert!(second.raw_response_path.is_none());
+}
+
+#[tokio::test]
+async fn cache_is_isolated_by_resolved_credentials() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/identity-cache"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"ok": true})))
+        .expect(2)
+        .mount(&server)
+        .await;
+
+    for (email, token) in [("one@example.com", "one"), ("two@example.com", "two")] {
+        call_mock_cached(
+            &server,
+            "/2.0/identity-cache",
+            Credentials::AtlassianApiToken {
+                email: email.into(),
+                token: token.into(),
+            },
+        )
+        .await
+        .unwrap();
+    }
+}
+
+#[tokio::test]
+async fn no_store_response_is_never_reused() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/2.0/no-store"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("cache-control", "no-store")
+                .set_body_json(json!({"ok": true})),
+        )
+        .expect(2)
+        .mount(&server)
+        .await;
+    let credentials = Credentials::AtlassianApiToken {
+        email: "no-store@example.com".into(),
+        token: "no-store-token".into(),
+    };
+    call_mock_cached(&server, "/2.0/no-store", credentials.clone())
+        .await
+        .unwrap();
+    call_mock_cached(&server, "/2.0/no-store", credentials)
+        .await
+        .unwrap();
+}
 
 #[tokio::test]
 async fn get_json_response_is_classified_and_persisted() {

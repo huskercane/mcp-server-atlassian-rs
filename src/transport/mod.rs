@@ -22,6 +22,7 @@
 //! New code should call [`fetch`] directly with the vendor it needs.
 
 pub mod raw_response;
+mod response_cache;
 
 /// Re-export of the Bitbucket error parser at its old path. Kept so
 /// downstream tests (`tests/bitbucket_error_tests.rs`) and any external
@@ -150,6 +151,27 @@ pub async fn fetch(
     let (auth_name, auth_header) = validate_auth(credentials)?;
     let timeout = resolve_timeout(config, options.timeout);
 
+    let cache_config = response_cache::CacheConfig::from_config(config);
+    let cache_key = response_cache::CacheKey::new(
+        vendor.name(),
+        &url,
+        &auth_name,
+        &auth_header,
+        &options.headers,
+    );
+    if method != HttpMethod::Get {
+        response_cache::invalidate_namespace(vendor.name(), &base);
+    } else if cache_config.enabled
+        && response_cache::request_is_cacheable(&url, &auth_name, &options)
+        && let Some(body) = response_cache::get(&cache_key)
+    {
+        debug!(vendor = vendor.name(), %url, "HTTP response cache hit");
+        return Ok(TransportResponse {
+            data: body,
+            raw_response_path: None,
+        });
+    }
+
     let request_body_for_log = options.body.clone().or_else(|| {
         options
             .form
@@ -172,6 +194,19 @@ pub async fn fetch(
         vendor = vendor.name(),
         "dispatching API request"
     );
+    if vendor.name() == "ninjaone" {
+        let logged_body = request_body_for_log
+            .as_ref()
+            .map(crate::vendor::ninjaone::sanitized_http_json)
+            .unwrap_or(Value::Null);
+        debug!(
+            target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+            %url,
+            method = method.as_str(),
+            body = %logged_body,
+            "ninjaone HTTP request"
+        );
+    }
 
     let start = std::time::Instant::now();
     let response = req.send().await.map_err(|e| map_reqwest_error(&e, &url))?;
@@ -180,12 +215,38 @@ pub async fn fetch(
     enforce_content_length_cap(&response)?;
 
     let status = response.status();
+    let response_headers = response.headers().clone();
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
+        if vendor.name() == "ninjaone" {
+            debug!(
+                target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+                %url,
+                method = method.as_str(),
+                status = status.as_u16(),
+                body = %crate::vendor::ninjaone::sanitized_http_text(&body_text),
+                "ninjaone HTTP response"
+            );
+        }
         return Err(vendor.classify_error(status, &body_text));
     }
 
     let body = classify_body(response).await?;
+
+    if vendor.name() == "ninjaone" {
+        let logged_body = match &body {
+            ResponseBody::Json(value) => crate::vendor::ninjaone::sanitized_http_json(value),
+            _ => serde_json::json!({ "nonJsonBody": "<omitted>" }),
+        };
+        debug!(
+            target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+            %url,
+            method = method.as_str(),
+            status = status.as_u16(),
+            body = %logged_body,
+            "ninjaone HTTP response"
+        );
+    }
 
     // Some APIs (notably Slack's Web API) return `200 OK` with an
     // application-level error envelope in the body (`{"ok": false, ...}`). Give
@@ -196,6 +257,13 @@ pub async fn fetch(
         && let Some(err) = vendor.classify_success_json(value)
     {
         return Err(err);
+    }
+
+    if method == HttpMethod::Get
+        && cache_config.enabled
+        && response_cache::request_is_cacheable(&url, &auth_name, &options)
+    {
+        response_cache::store(cache_key, &body, &response_headers, &cache_config);
     }
 
     let raw_path = if let ResponseBody::Json(value) = &body {

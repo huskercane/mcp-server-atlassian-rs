@@ -40,6 +40,7 @@ use serde_json::{Value, json};
 use tokio::sync::RwLock;
 use tracing::debug;
 
+use super::{HTTP_LOG_TARGET, sanitized_http_json, sanitized_http_text};
 use crate::error::{McpError, OriginalError, api_error, auth_invalid, unexpected};
 
 const AUTH_STATE_PATH: &str = "/ws/account/authentication-state";
@@ -110,7 +111,16 @@ impl SessionCache {
 
     /// Return the cached key for this identity, if one was minted.
     pub async fn get(&self, base_url: &str, email: &str) -> Option<String> {
-        self.inner.read().await.get(&id(base_url, email)).cloned()
+        let session_key = self.inner.read().await.get(&id(base_url, email)).cloned();
+        debug!(
+            target: HTTP_LOG_TARGET,
+            pid = std::process::id(),
+            %base_url,
+            %email,
+            hit = session_key.is_some(),
+            "ninjaone session cache lookup"
+        );
+        session_key
     }
 
     /// Drop the cached key for this identity. Called after a `401` so the next
@@ -138,24 +148,37 @@ impl SessionCache {
         client: &Client,
         request: LoginRequest<'_>,
     ) -> Result<LoginOutcome, McpError> {
-        let state = fetch_auth_state(client, request).await?;
-        if let Some(auth_state) = state.auth_state.as_deref()
-            && !auth_state.eq_ignore_ascii_case("NATIVE")
-        {
-            return Err(auth_invalid(format!(
-                "NinjaOne reports authState `{auth_state}` for {}: automated login supports \
-                 native email/password accounts only. Use NINJAONE_SESSION_KEY with a key \
-                 copied from a browser session instead.",
-                request.email
-            )));
-        }
-        if state.recaptcha_required.unwrap_or(false) && request.recaptcha_token.is_none() {
-            return Err(auth_invalid(format!(
-                "NinjaOne requires a reCAPTCHA token for {}. Supply one via the login tool's \
-                 `recaptchaToken` argument (copy it from a browser login), or use \
-                 NINJAONE_SESSION_KEY.",
-                request.email
-            )));
+        match fetch_auth_state(client, request).await {
+            Ok(state) => {
+                if let Some(auth_state) = state.auth_state.as_deref()
+                    && !auth_state.eq_ignore_ascii_case("NATIVE")
+                {
+                    return Err(auth_invalid(format!(
+                        "NinjaOne reports authState `{auth_state}` for {}: automated login supports \
+                         native email/password accounts only. Use NINJAONE_SESSION_KEY with a key \
+                         copied from a browser session instead.",
+                        request.email
+                    )));
+                }
+                if state.recaptcha_required.unwrap_or(false) && request.recaptcha_token.is_none() {
+                    return Err(auth_invalid(format!(
+                        "NinjaOne requires a reCAPTCHA token for {}. Supply one via the login tool's \
+                         `recaptchaToken` argument (copy it from a browser login), or use \
+                         NINJAONE_SESSION_KEY.",
+                        request.email
+                    )));
+                }
+            }
+            Err(error) if error.status_code == Some(StatusCode::NOT_FOUND.as_u16()) => {
+                // Some appliance/older-host deployments do not expose this optional
+                // browser pre-flight endpoint. The login endpoint remains authoritative
+                // and returns a typed rejection for unsupported principals or credentials.
+                debug!(
+                    base_url = %request.base_url,
+                    "ninjaone: authentication-state endpoint unavailable; continuing with login"
+                );
+            }
+            Err(error) => return Err(error),
         }
 
         let login = post_step(
@@ -198,7 +221,14 @@ impl SessionCache {
             .write()
             .await
             .insert(id(request.base_url, request.email), session_key);
-        debug!(base_url = %request.base_url, mfa_used, "ninjaone: session key acquired");
+        debug!(
+            target: HTTP_LOG_TARGET,
+            pid = std::process::id(),
+            base_url = %request.base_url,
+            email = %request.email,
+            mfa_used,
+            "ninjaone session cached"
+        );
         Ok(outcome)
     }
 
@@ -259,7 +289,12 @@ fn id(base_url: &str, email: &str) -> SessionId {
 }
 
 fn url(base_url: &str, path: &str) -> String {
-    format!("{}{path}", base_url.trim_end_matches('/'))
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/ws") && path.starts_with("/ws/") {
+        format!("{base_url}{}", &path[3..])
+    } else {
+        format!("{base_url}{path}")
+    }
 }
 
 /// First 8 characters of the session key (it is a UUID, so this is the first
@@ -310,6 +345,14 @@ async fn post_step(
 /// to typed errors. The request body carries the password on the `login` step,
 /// so nothing here logs or echoes it.
 async fn send(client: &Client, url: &str, body: &Value, step: &str) -> Result<String, McpError> {
+    debug!(
+        target: HTTP_LOG_TARGET,
+        method = "POST",
+        %url,
+        step,
+        body = %sanitized_http_json(body),
+        "ninjaone HTTP request"
+    );
     let response = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -327,6 +370,15 @@ async fn send(client: &Client, url: &str, body: &Value, step: &str) -> Result<St
 
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
+    debug!(
+        target: HTTP_LOG_TARGET,
+        method = "POST",
+        %url,
+        step,
+        status = status.as_u16(),
+        body = %sanitized_http_text(&text),
+        "ninjaone HTTP response"
+    );
     if status.is_success() {
         Ok(text)
     } else {

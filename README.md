@@ -133,6 +133,30 @@ WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is
 | `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
 | `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
 | `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
+| `HTTP_CACHE_ENABLED` | Enable the process-local cache for successful upstream GET responses. Default `false`. | shared |
+| `HTTP_CACHE_DEFAULT_TTL_SECONDS` | TTL used when upstream sends no usable cache lifetime. Default `60`. | shared |
+| `HTTP_CACHE_MAX_TTL_SECONDS` | Upper bound for upstream/default TTLs. Default `3600`. | shared |
+| `HTTP_CACHE_MAX_ENTRIES` | Maximum cached response count. Default `512`. | shared |
+| `HTTP_CACHE_MAX_BYTES` | Maximum compressed in-memory body bytes. Default `67108864` (64 MiB). | shared |
+| `HTTP_CACHE_COMPRESSION_THRESHOLD_BYTES` | Responses at or above this size are compressed with zstd when it saves space. Default `16384`. | shared |
+
+### Upstream HTTP response cache
+
+The cache is disabled by default. Enable it for every HTTP-backed vendor with `HTTP_CACHE_ENABLED=true`; WRDS is PostgreSQL and does not use this transport. Only successful bodyless GET requests are eligible. Cache keys include vendor, complete normalized URL/query, a one-way fingerprint of the resolved credential, and representation-affecting request headers, so different accounts and servers cannot reuse each other's responses. Credentials themselves are never stored in a key or log.
+
+`Cache-Control: no-store` disables storage, while `max-age` and `Expires` constrain the TTL up to `HTTP_CACHE_MAX_TTL_SECONDS`. When upstream supplies no lifetime, `HTTP_CACHE_DEFAULT_TTL_SECONDS` applies. Writes conservatively invalidate cached reads for that vendor/base URL. Login, authentication-state, OAuth, and token routes are excluded. NinjaOne `/webapp/sessionproperties` is the deliberate exception: a successful login immediately fetches it to validate the session and warm its credential-scoped entry, because later console/database discovery needs its division and user context.
+
+Storage is bounded by both entry count and compressed bytes. Large responses are zstd-compressed when compression reduces their size; expired entries and then least-recently-used entries are evicted. The cache is memory-only and disappears on restart. A cache hit has no new raw-response file because no upstream response occurred.
+
+Example:
+
+```powershell
+$env:HTTP_CACHE_ENABLED = "true"
+$env:HTTP_CACHE_DEFAULT_TTL_SECONDS = "60"
+$env:HTTP_CACHE_MAX_TTL_SECONDS = "3600"
+$env:HTTP_CACHE_MAX_ENTRIES = "512"
+$env:HTTP_CACHE_MAX_BYTES = "67108864"
+```
 
 Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `splunk`, `mcp-server-splunk`, `ninjaone`, `ninja-one`, `ninjarmm`, `mcp-server-ninjaone`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
 
@@ -681,6 +705,8 @@ Both slots are keyed by `(kind, ninjaone, <email>)` — the top-level `NINJAONE_
 Because the code is derived from the wall clock, a host whose clock has drifted beyond the server's tolerance will generate codes NinjaOne rejects — the usual TOTP caveat, and a reason to keep NTP running.
 
 One login therefore covers every later `ninjaone_*` call on that server, and it outranks a `NINJAONE_SESSION_KEY` left in config. When NinjaOne expires the session, the next call returns a `401`, the cached key is dropped, and the error says to call `ninjaone_login` again with a current code. Restarting the MCP server also requires a fresh login. Federated (SSO) accounts are refused before the password is sent — use `NINJAONE_SESSION_KEY` for those.
+
+To trace NinjaOne HTTP requests and responses, set `RUST_LOG=ninjaone_http=debug` (or enable global debug logging with `DEBUG=true`) before starting the server. The trace includes methods, URLs, statuses, and JSON bodies, but recursively redacts passwords, MFA/reCAPTCHA codes, login/session tokens, cookies, authorization values, and secrets. Non-JSON response content is omitted.
 
 #### Configure NinjaOne servers
 

@@ -78,11 +78,13 @@ pub fn build_app_with_cancel(
     let manager = Arc::new(ReapingSessionManager::new(idle_ttl));
     manager.spawn_reaper(sweep_interval);
 
+    // Stateless MCP means each request carries its own protocol metadata; it
+    // does not mean application state should be reconstructed per request.
+    // Build one handler and clone it here: AtlassianServer's clone shares its
+    // Arc<ServerState>, including NinjaOne console sessions and other caches.
+    let shared_server = AtlassianServer::new().map_err(|e| format!("AtlassianServer::new: {e}"));
     let streamable = StreamableHttpService::new(
-        || {
-            AtlassianServer::new()
-                .map_err(|e| std::io::Error::other(format!("AtlassianServer::new: {e}")))
-        },
+        move || shared_server.clone().map_err(std::io::Error::other),
         Arc::clone(&manager),
         StreamableHttpServerConfig::default()
             // Keep initialized sessions for older clients while requiring the

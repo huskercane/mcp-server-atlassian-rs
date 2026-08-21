@@ -333,6 +333,61 @@ async fn a_federated_account_is_refused_before_the_password_is_sent() {
 }
 
 #[tokio::test]
+async fn login_warms_cached_session_properties_for_the_next_read() {
+    let server = MockServer::start().await;
+    mount_auth_state(&server).await;
+    login_mock(session_success()).mount(&server).await;
+    Mock::given(method("GET"))
+        .and(path("/ws/webapp/sessionproperties"))
+        .and(header("cookie", SESSION_COOKIE))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("cache-control", "max-age=60")
+                .set_body_json(json!({
+                    "divisionUid": "division-7",
+                    "userType": "TECHNICIAN"
+                })),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let config = config(&[("HTTP_CACHE_ENABLED", "true")]);
+    let vendor = NinjaOneVendor::with_base_url(server.uri());
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    login(&ctx, &login_args()).await.unwrap();
+    let response = handle_read(&ctx, HttpMethod::Get, &read_args())
+        .await
+        .unwrap();
+    assert!(response.content.contains("division-7"));
+}
+
+#[tokio::test]
+async fn missing_authentication_state_endpoint_falls_back_to_login() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/authentication-state"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "resultCode": "FAILURE",
+            "errorMessage": "HTTP 404 Not Found",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    login_mock(session_success()).mount(&server).await;
+
+    let client = build_client().unwrap();
+    let config = config(&[]);
+    let vendor = NinjaOneVendor::with_base_url(server.uri());
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let response = login(&ctx, &login_args()).await.unwrap();
+    assert!(response.content.contains("\"authenticated\": true"));
+}
+
+#[tokio::test]
 async fn a_recaptcha_tenant_is_told_what_is_missing_and_accepts_a_token() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
@@ -391,6 +446,37 @@ async fn login_honours_a_server_alias_path_prefix() {
 
     let client = build_client().unwrap();
     let servers = json!({ "qa": { "url": server.uri(), "prefix": "/console" } }).to_string();
+    let config = config(&[("NINJAONE_SERVERS", servers.as_str())]);
+    let vendor = NinjaOneVendor::default();
+    let ctx = NinjaOneContext::new(&client, &config, &vendor);
+
+    let mut args = login_args();
+    args.server = Some("qa".to_owned());
+    let response = login(&ctx, &args).await.unwrap();
+    assert!(response.content.contains("\"authenticated\": true"));
+}
+
+#[tokio::test]
+async fn login_does_not_duplicate_a_ws_server_alias_prefix() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/authentication-state"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "resultCode": "FAILURE",
+            "errorMessage": "HTTP 404 Not Found",
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/ws/account/login"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(session_success()))
+        .expect(1)
+        .mount(&server)
+        .await;
+
+    let client = build_client().unwrap();
+    let servers = json!({ "qa": { "url": server.uri(), "prefix": "/ws" } }).to_string();
     let config = config(&[("NINJAONE_SERVERS", servers.as_str())]);
     let vendor = NinjaOneVendor::default();
     let ctx = NinjaOneContext::new(&client, &config, &vendor);

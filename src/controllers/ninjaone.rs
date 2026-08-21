@@ -145,6 +145,26 @@ pub async fn login(
         )
         .await?;
 
+    // Warm the session-properties cache immediately. Besides verifying that
+    // NinjaOne accepts the newly minted cookie, this captures division/user
+    // context needed by later console and database-discovery workflows.
+    // The shared response cache isolates this entry by the session credential
+    // fingerprint and never writes it to disk.
+    if let Err(error) = request(
+        ctx,
+        args.server.as_deref(),
+        HttpMethod::Get,
+        "/webapp/sessionproperties",
+        None,
+        None,
+        None,
+        OutputFormat::Json,
+    )
+    .await
+    {
+        tracing::debug!(%error, "ninjaone: session-properties cache warm failed");
+    }
+
     // A configured NINJAONE_ACCESS_TOKEN still outranks a console session, so
     // say plainly which credential the next ninjaone_* call will carry rather
     // than letting a successful login imply it is the one in use.
@@ -168,7 +188,8 @@ pub async fn login(
         "appUserUid": outcome.app_user_uid,
         "userType": outcome.user_type,
         "note": "The session key is held in memory for this server process only. \
-                 Restarting the MCP server requires a new login.",
+                 Session properties were fetched and cached for later calls. Restarting the MCP \
+                 server requires a new login.",
     });
 
     let filtered = apply_jq_filter(&summary, args.jq.as_deref());
