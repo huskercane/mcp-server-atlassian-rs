@@ -359,3 +359,102 @@ Preserve and report the exact five-warning pre-existing Clippy baseline. Do not
 claim the overall streaming-ingestion phase complete unless this slice passes
 the full suite and the final artifact/manifest lifecycle is demonstrably
 transactional.
+
+## Bounded merge and final-artifact checkpoint (2026-08-21)
+
+The bounded merge and final multi-partition artifact slice is implemented and
+committed as `5a034ae`.
+
+### Completed
+
+- Splunk and Loki partitioned requests now return one atomic canonical NDJSON
+  artifact and one atomic final manifest. The interim
+  `canonical_ndjson_partition_set` status artifact is no longer produced.
+- Every retained partition is streamed through pre-merge validation. Validation
+  requires the part and sidecar to exist and verifies artifact version, vendor,
+  canonical format, single-partition commit state, manifest relationships,
+  exact record and byte counts, declared ordering, canonical NDJSON framing,
+  bounded record size, and SHA-256. Missing, malformed, changed, or inconsistent
+  parts fail the entire operation.
+- Final assembly uses the existing lazy K-way priority queue with at most one
+  bounded record per partition. Ordering is chronological or
+  reverse-chronological with deterministic partition/sequence tie handling.
+- Loki's caller limit is applied once during final ordered merge. Each retained
+  partition is still treated conservatively if its upstream response reaches
+  the vendor request limit; the final manifest is `partial` in that case.
+- Exact cross-partition boundary duplicates use timestamp, source identity, and
+  payload/labels SHA-256. The boundary marker remains bounded to one record.
+  Same-timestamp distinct records and duplicates within one partition remain.
+- Checked quota enforcement covers retained canonical bytes, conservative
+  projected-final bytes, in-progress final bytes, and retained-parts-plus-final
+  disk use. The shared artifact writer now rejects checked-counter overflow.
+- Merge cancellation is explicit and cannot commit a final artifact after the
+  cancellation token is observed.
+- Final manifests persist the exact query interval, ordering, output records,
+  encoded and decoded transfer accounting, final bytes and SHA-256, partition
+  bytes and SHA-256 values, partition counts, limit diagnostics, deduplication
+  policy/count, skipped/truncated counts, diagnostics, and conservative
+  completeness.
+- Cleanup is transactional. Failed validation, merge, quota, cancellation,
+  final write, or manifest commit removes incomplete outputs and retained
+  partitions. Manifest partials are removed on failure. A final-manifest commit
+  failure removes the already-committed final artifact. Successful partitions
+  are removed only after both final artifact and manifest commits succeed.
+- Single-request Splunk and Loki behavior remains on the existing route, and
+  CircleCI manifests were revalidated after shared artifact changes.
+
+### Verification
+
+- `cargo fmt --all`
+- Focused ingestion, Splunk controller, Grafana controller, CircleCI controller,
+  raw-artifact, tool-schema, and streaming-transport tests
+- `cargo check --all-features`
+- `cargo test --all-features -j 1` (full suite passed)
+- `git diff --check`
+
+`cargo clippy --all-features --all-targets -- -D warnings` still reports exactly
+the documented five pre-existing warnings and no warning from this slice: two
+conversion warnings in `src/transport/response_cache.rs`, `too_many_lines` and
+`map_unwrap_or` in the generic transport, and `map_unwrap_or` in the NinjaOne
+vendor.
+
+## Next implementation slice: bounded parallel partition acquisition and deterministic fault injection
+
+Keep every planner, normalization, transport, merge, quota, manifest, and
+single-request invariant above. Do not broaden partition eligibility or infer
+ambiguous time bounds.
+
+- Replace the deliberately sequential partition acquisition loop with bounded
+  parallel acquisition. Keep concurrency small and configurable within the
+  existing 2-16 partition ceiling.
+- Store completed parts by planned partition index so out-of-order request
+  completion cannot alter deterministic merge ordering or manifest ordering.
+- On the first transport, normalization, quota, deadline, or cancellation
+  failure, cancel outstanding partition work, schedule nothing new, await task
+  shutdown, and transactionally remove every transport input, canonical part,
+  sidecar, final partial, and manifest partial.
+- Preserve bounded pre-body retries and never retry a response after body
+  consumption. Preserve encoded/decoded aggregate accounting under concurrent
+  updates and checked overflow.
+- Introduce narrow test-only fault-injection seams for partition write/commit,
+  final write/commit, manifest write/sync/rename, cancellation during merge,
+  and checked-counter overflow. Production behavior must remain unchanged when
+  no fault is injected.
+- Add focused tests for genuinely out-of-order completion, middle-partition
+  failure with in-flight work, cancellation propagation, final-write failure,
+  manifest-sync/rename failure, per-partition and aggregate quotas,
+  projected-final overflow, checked transfer/disk-counter overflow, and absence
+  of orphaned files or registered artifacts after every failure.
+- Add non-empty controller tests for ascending and descending multi-partition
+  outputs, cross-boundary duplicates, same-timestamp distinct records, global
+  limits in both directions, final SHA-256/accounting, and complete versus
+  limited manifests.
+- Re-run CircleCI manifest tests if shared ingestion, transport, artifact, or
+  manifest code changes. Do not modify unrelated files to silence the known
+  five-warning Clippy baseline.
+
+Run `cargo fmt --all`, the focused ingestion/vendor/artifact/transport tests,
+`cargo check --all-features`, Clippy with `-D warnings`,
+`cargo test --all-features -j 1`, and `git diff --check`. Do not claim this next
+slice complete unless concurrency remains bounded, failure cancellation is
+transactional, and the full suite passes.
