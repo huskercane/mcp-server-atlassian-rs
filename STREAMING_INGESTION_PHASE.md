@@ -418,7 +418,59 @@ conversion warnings in `src/transport/response_cache.rs`, `too_many_lines` and
 `map_unwrap_or` in the generic transport, and `map_unwrap_or` in the NinjaOne
 vendor.
 
-## Next implementation slice: bounded parallel partition acquisition and deterministic fault injection
+## Bounded parallel partition acquisition and deterministic fault-injection checkpoint (2026-08-21)
+
+Implemented and committed as `17e0c59`.
+
+### Completed
+
+- Splunk and Loki partition acquisition is bounded to four concurrent requests,
+  while retaining the existing 2-16 planned-partition eligibility and all safe
+  single-request fallbacks.
+- Completed partitions are stored by planned index, so out-of-order transport
+  completion cannot change merge order or final-manifest partition order.
+- A shared cancellation token is propagated through transport and normalization.
+  The first transport, normalization, quota, deadline, or cancellation failure
+  stops new scheduling, cancels outstanding work, drains in-flight futures, and
+  returns the first failure.
+- Concurrent encoded/decoded transfer accounting remains checked and atomic.
+  Retained temporary/projected disk accounting is also checked atomically,
+  including overflow and quota rejection paths.
+- Cleanup is transactional across transport inputs, canonical parts, sidecars,
+  final artifacts, final partials, and manifest partials. Committed artifacts
+  are unregistered when removed, preventing stale registry entries.
+- Test-only fault seams cover partition/final write and commit failures,
+  manifest write/sync/rename failures, cancellation during merge, and checked
+  transfer/disk-counter overflow. Production behavior is unchanged without an
+  injected fault.
+- Added non-empty Splunk and Grafana/Loki controller coverage for delayed
+  out-of-order completion, deterministic ordering, ascending and descending
+  output, boundary deduplication, same-timestamp distinct records, global
+  limits, final checksums/accounting, complete versus limited manifests,
+  middle-partition failure, cancellation, and orphan cleanup.
+
+### Verification
+
+- `cargo fmt --all`
+- Focused ingestion, Splunk controller, Grafana controller, CircleCI controller,
+  raw-artifact, tool-schema, and streaming-transport tests
+- `cargo check --all-features`
+- `cargo test --all-features -j 1` (full suite passed)
+- `git diff --check`
+- `cargo clippy --all-features --all-targets -- -D warnings` reaches the project
+  and reports exactly the five documented pre-existing warnings: two conversion
+  warnings in `src/transport/response_cache.rs`, `too_many_lines` and
+  `map_unwrap_or` in the generic transport, and `map_unwrap_or` in the NinjaOne
+  vendor. This slice adds no Clippy warnings.
+
+The bounded parallel acquisition and deterministic fault-injection slice is
+complete. The broader streaming-ingestion phase is also complete through
+planner, normalization, transport, partitioning, bounded merge/deduplication,
+final manifests, lifecycle cleanup, and this parallel-acquisition checkpoint.
+Any future work is optional hardening or addressing the separately documented
+Clippy baseline; no required implementation item remains in the handoff below.
+
+## Historical handoff: bounded parallel partition acquisition and deterministic fault injection
 
 Keep every planner, normalization, transport, merge, quota, manifest, and
 single-request invariant above. Do not broaden partition eligibility or infer
