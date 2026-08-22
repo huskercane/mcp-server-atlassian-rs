@@ -6,7 +6,6 @@ pub mod truncation;
 
 use serde::Serialize;
 use serde_json::Value;
-use toon_format::EncodeOptions;
 
 /// How tool output should be rendered before being handed to the MCP client.
 ///
@@ -60,9 +59,9 @@ pub fn to_pretty_json(value: &Value) -> String {
 }
 
 fn encode_toon(value: &Value) -> Option<String> {
-    toon_format::encode(value, &EncodeOptions::default()).ok()
+    serde_toon::to_string(value).ok()
 }
 
 fn encode_toon_serializable<T: Serialize>(value: &T) -> Option<String> {
-    toon_format::encode(value, &EncodeOptions::default()).ok()
+    serde_toon::to_string(value).ok()
 }

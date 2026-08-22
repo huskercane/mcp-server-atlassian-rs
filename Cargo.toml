@@ -68,7 +68,16 @@ reqwest             = { version = "=0.13.4", default-features = false, features 
 async-compression   = { version = "=0.4.36", features = ["tokio", "gzip", "brotli", "deflate", "zstd"] }
 url                 = "=2.5.8"
 jmespath            = "=0.5.0"
-toon-format         = { version = "=0.5.0", default-features = false }
+# TOON output encoder. Swapped from `toon-format` 0.5.0, which treats `-` as a
+# structural character (`STRUCTURAL_CHARS` in its constants.rs) and therefore
+# quotes every string containing a hyphen — Jira keys, UUIDs, ISO dates, repo
+# slugs, branch names. Measured against the TS reference `@toon-format/toon`
+# (which agrees with this crate, not the old one, at v2/v3/v4) over a 489-case
+# corpus: `toon-format` matched 401, `serde_toon_format` 449, with **zero**
+# cases the old crate encoded correctly and this one gets wrong. It is also
+# ~3.5x faster and allocates ~5.6x less on a 2 MB payload. `default-features`
+# stays off to leave the optional `rayon` dependency out of the tree.
+serde_toon_format   = { version = "=0.1.2", default-features = false }
 rand                = "=0.10.2"
 schemars            = "=1.2.2"
 clap                = { version = "=4.6.6", features = ["derive", "env", "wrap_help"] }

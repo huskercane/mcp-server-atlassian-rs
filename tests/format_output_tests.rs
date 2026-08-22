@@ -29,8 +29,9 @@ fn json_output_is_pretty_printed() {
 #[test]
 fn toon_output_contains_data_values() {
     // TS test contract: output must contain the values regardless of the
-    // chosen format. We don't assert exact TOON bytes because the encoder is
-    // owned by the toon-format crate; a future upgrade could tweak syntax.
+    // chosen format. Exact TOON bytes are locked separately in
+    // `toon_golden_tests.rs`; this test only asserts the weaker contract the TS
+    // suite states, so it stays meaningful if the encoder's spelling changes.
     let data = json!({
         "users": [
             {"id": 1, "name": "Alice", "role": "admin"},
