@@ -1640,14 +1640,27 @@ mod tests {
             .unwrap();
         let replaced = artifact.artifact.size + fs::metadata(&manifest_path).await.unwrap().len();
         assert_eq!(quota.reserved_bytes(), replaced);
+        // Scope the leftover-backup scan to *this* artifact. The session
+        // artifact directory is shared by the whole suite, and a sibling test
+        // (`raw_response::artifact_writer_fault_tests::
+        // deletion_failure_retains_registry_files_and_reservations_for_retry`)
+        // deliberately plants a `…manifest.json.replaced-test` file there, so
+        // a directory-wide scan fails whenever the two happen to overlap. The
+        // property under test is about this replacement, not the directory.
+        let own_prefix = artifact
+            .artifact
+            .path
+            .file_stem()
+            .expect("artifact path has a file stem")
+            .to_string_lossy()
+            .into_owned();
         assert!(
             std::fs::read_dir(manifest_path.parent().unwrap())
                 .unwrap()
                 .flatten()
-                .all(|entry| !entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains("manifest.json.replaced-"))
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(&own_prefix))
+                .all(|name| !name.contains("manifest.json.replaced-"))
         );
         raw_response::remove_artifact(&artifact.artifact.path)
             .await
