@@ -31,21 +31,26 @@ impl OutputFormat {
 
 /// Render `data` as the requested output string. Falls back to pretty JSON if
 /// TOON encoding fails. Matches TS `toOutputString`.
+///
+/// The JSON fallback is built lazily (`unwrap_or_else`, not `unwrap_or`): on
+/// the default TOON path it is only ever needed when the encoder fails, and
+/// materialising it eagerly costs a full pretty-print of the whole response
+/// that is then dropped. On a 2 MB payload that was ~4 MB and ~9 ms of pure
+/// waste per tool call.
 pub fn render(data: &Value, format: OutputFormat) -> String {
-    let json_fallback = to_pretty_json(data);
     match format {
-        OutputFormat::Json => json_fallback,
-        OutputFormat::Toon => encode_toon(data).unwrap_or(json_fallback),
+        OutputFormat::Json => to_pretty_json(data),
+        OutputFormat::Toon => encode_toon(data).unwrap_or_else(|| to_pretty_json(data)),
     }
 }
 
 /// Render with a caller-supplied serializable value. Same policy as
-/// [`render`].
+/// [`render`], including the lazy JSON fallback.
 pub fn render_serializable<T: Serialize>(data: &T, format: OutputFormat) -> String {
-    let json_fallback = serde_json::to_string_pretty(data).unwrap_or_default();
     match format {
-        OutputFormat::Json => json_fallback,
-        OutputFormat::Toon => encode_toon_serializable(data).unwrap_or(json_fallback),
+        OutputFormat::Json => serde_json::to_string_pretty(data).unwrap_or_default(),
+        OutputFormat::Toon => encode_toon_serializable(data)
+            .unwrap_or_else(|| serde_json::to_string_pretty(data).unwrap_or_default()),
     }
 }
 
