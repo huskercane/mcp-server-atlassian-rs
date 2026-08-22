@@ -8,12 +8,12 @@
 //!    the deprecation shim emits a stderr notice.
 
 use clap::{CommandFactory, Parser};
-use mcp_server_atlassian::cli::Cli;
-use mcp_server_atlassian::cli::api::{parse_object, parse_query_params};
+use mcp_server_devtools::cli::Cli;
+use mcp_server_devtools::cli::api::{parse_object, parse_query_params};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 
-const BIN: &str = "mcp-atlassian";
+const BIN: &str = "mcp-devtools";
 
 // ---- parse_object ----
 

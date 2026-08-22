@@ -16,9 +16,9 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
-use mcp_server_atlassian::format::jmespath::apply_jq_filter;
-use mcp_server_atlassian::format::truncation::truncate_for_ai;
-use mcp_server_atlassian::format::{OutputFormat, render, to_pretty_json};
+use mcp_server_devtools::format::jmespath::apply_jq_filter;
+use mcp_server_devtools::format::truncation::truncate_for_ai;
+use mcp_server_devtools::format::{OutputFormat, render, to_pretty_json};
 use serde_json::{Value, json};
 
 static BYTES: AtomicU64 = AtomicU64::new(0);

@@ -2,19 +2,19 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::edx::{
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::edx::{
     EdxContext, comments, course, create_comment, create_thread, threads, topics,
 };
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::tools::args::{
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::tools::args::{
     EdxDiscussionCommentCreateArgs, EdxDiscussionCommentsArgs, EdxDiscussionCourseArgs,
     EdxDiscussionOrderDirection, EdxDiscussionOutputArgs, EdxDiscussionThreadCreateArgs,
     EdxDiscussionThreadOrderBy, EdxDiscussionThreadType, EdxDiscussionThreadsArgs,
     EdxDiscussionTopicsArgs, OutputFormatArg,
 };
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::edx::EdxVendor;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::edx::EdxVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -133,7 +133,7 @@ async fn threads_builds_filters_and_supports_jq() {
             course_id: "course-v1:edX+DemoX+Demo_Course".into(),
             topic_id: None,
             following: None,
-            view: Some(mcp_server_atlassian::tools::args::EdxDiscussionThreadView::Unanswered),
+            view: Some(mcp_server_devtools::tools::args::EdxDiscussionThreadView::Unanswered),
             text_search: Some("exam".into()),
             order_by: Some(EdxDiscussionThreadOrderBy::LastActivityAt),
             order_direction: Some(EdxDiscussionOrderDirection::Desc),

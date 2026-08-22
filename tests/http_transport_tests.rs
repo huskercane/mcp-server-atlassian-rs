@@ -2,13 +2,13 @@
 //!
 //! Each test binds its own `127.0.0.1:0` listener so they can run in parallel
 //! without port collisions. The server factory inside `build_app` uses the
-//! default `AtlassianServer::new()`, which is infallible in the absence of
+//! default `DevtoolsServer::new()`, which is infallible in the absence of
 //! credentials because the MCP initialize handshake does not hit any vendor.
 
 use std::time::Duration;
 
-use mcp_server_atlassian::server::http::build_app;
-use mcp_server_atlassian::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL};
+use mcp_server_devtools::server::http::build_app;
+use mcp_server_devtools::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL};
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE, HeaderMap, HeaderValue, ORIGIN};
 use serde_json::json;
@@ -145,13 +145,13 @@ async fn modern_tools_list_is_stateless_deterministic_and_cacheable() {
 
 #[tokio::test]
 async fn artifact_download_supports_byte_range_resume() {
-    let path = mcp_server_atlassian::transport::raw_response::save_artifact(
+    let path = mcp_server_devtools::transport::raw_response::save_artifact(
         "range-test",
         "0123456789abcdef",
     )
     .await
     .expect("save artifact");
-    let artifact = mcp_server_atlassian::transport::raw_response::artifact_for_path(&path)
+    let artifact = mcp_server_devtools::transport::raw_response::artifact_for_path(&path)
         .expect("registered artifact");
     let base = spawn_app(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL).await;
     let response = reqwest::Client::new()
@@ -220,7 +220,7 @@ async fn health_endpoint_returns_plaintext_version_banner() {
     );
     let body = resp.text().await.expect("body");
     assert!(
-        body.starts_with("Atlassian MCP Server v"),
+        body.starts_with("mcp-server-devtools v"),
         "unexpected banner: {body}"
     );
     assert!(body.ends_with(" is running"), "unexpected banner: {body}");

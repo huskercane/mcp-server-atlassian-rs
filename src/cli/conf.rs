@@ -15,7 +15,7 @@ use crate::error::McpError;
 use crate::transport::{HttpMethod, build_client};
 use crate::vendor::confluence::ConfluenceVendor;
 
-/// Verbs exposed under `mcp-atlassian conf …`.
+/// Verbs exposed under `mcp-devtools conf …`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// GET any Confluence endpoint. Returns the response body to stdout.

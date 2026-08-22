@@ -11,12 +11,12 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::circleci::{CircleCiContext, handle_logs, handle_request};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::format::OutputFormat;
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::circleci::{CircleCiContext, handle_logs, handle_request};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::format::OutputFormat;
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::circleci::CircleCiVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -55,7 +55,7 @@ async fn get_sends_bearer_token_and_filters_response() {
     let vendor = vendor(&server);
     let ctx = CircleCiContext::new(&client, &config, &vendor);
 
-    let mut qp = mcp_server_atlassian::tools::args::QueryParams::new();
+    let mut qp = mcp_server_devtools::tools::args::QueryParams::new();
     qp.insert("branch".into(), "main".into());
 
     let resp = handle_request(
@@ -192,14 +192,14 @@ async fn logs_fetches_build_details_and_flattens_action_output() {
 
     let resp = handle_logs(
         &ctx,
-        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+        &mcp_server_devtools::tools::args::CircleCiLogsArgs {
             project_slug: "gh/acme/web".into(),
             job_number: 123,
             step_number: None,
             failed_only: false,
             condensed: false,
             context_lines: None,
-            output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+            output_format: Some(mcp_server_devtools::tools::args::OutputFormatArg::Json),
         },
     )
     .await
@@ -231,7 +231,7 @@ async fn logs_rejects_non_vcs_project_slug() {
 
     let err = handle_logs(
         &ctx,
-        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+        &mcp_server_devtools::tools::args::CircleCiLogsArgs {
             project_slug: "circleci/org-id/project-id".into(),
             job_number: 123,
             step_number: None,
@@ -292,14 +292,14 @@ async fn logs_failed_only_skips_successful_outputs_and_condenses_errors() {
     let ctx = CircleCiContext::new(&client, &config, &vendor);
     let resp = handle_logs(
         &ctx,
-        &mcp_server_atlassian::tools::args::CircleCiLogsArgs {
+        &mcp_server_devtools::tools::args::CircleCiLogsArgs {
             project_slug: "gh/acme/web".into(),
             job_number: 124,
             step_number: Some(1),
             failed_only: true,
             condensed: true,
             context_lines: Some(1),
-            output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+            output_format: Some(mcp_server_devtools::tools::args::OutputFormatArg::Json),
         },
     )
     .await

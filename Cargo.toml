@@ -1,20 +1,20 @@
 [package]
-name         = "mcp-server-atlassian"
+name         = "mcp-server-devtools"
 version      = "0.15.0"
 edition      = "2024"
 rust-version = "1.96"
-description  = "Rust MCP server for Atlassian Bitbucket and Jira (Cloud). Ports of the TypeScript reference implementations."
+description  = "A unified Rust MCP server for developer tools and services."
 license      = "ISC"
-repository   = "https://github.com/huskercane/mcp-server-atlassian-rs"
-readme       = "../README.md"
+repository   = "https://github.com/huskercane/mcp-server-devtools"
+readme       = "README.md"
 publish      = false
 
 [lib]
-name = "mcp_server_atlassian"
+name = "mcp_server_devtools"
 path = "src/lib.rs"
 
 [[bin]]
-name = "mcp-atlassian"
+name = "mcp-devtools"
 path = "src/main.rs"
 
 [features]

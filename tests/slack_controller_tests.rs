@@ -11,12 +11,12 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::slack::{SlackContext, handle_request};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::format::OutputFormat;
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::slack::SlackVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::slack::{SlackContext, handle_request};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::format::OutputFormat;
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::slack::SlackVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -56,7 +56,7 @@ async fn get_sends_bearer_token_and_filters_response() {
     let vendor = vendor(&server);
     let ctx = SlackContext::new(&client, &config, &vendor);
 
-    let mut qp = mcp_server_atlassian::tools::args::QueryParams::new();
+    let mut qp = mcp_server_devtools::tools::args::QueryParams::new();
     qp.insert("types".into(), "public_channel".into());
 
     let resp = handle_request(

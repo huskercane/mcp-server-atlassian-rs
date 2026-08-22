@@ -1,4 +1,4 @@
-use mcp_server_atlassian::pagination::{
+use mcp_server_devtools::pagination::{
     PaginationType, extract_pagination_info, validate_page_size,
 };
 use pretty_assertions::assert_eq;

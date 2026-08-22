@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::splunk::SplunkVendor;
-use mcp_server_atlassian::vendor::splunk::error::classify;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::splunk::SplunkVendor;
+use mcp_server_devtools::vendor::splunk::error::classify;
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 
@@ -70,7 +70,7 @@ fn splunk_config_aliases_are_vendor_scoped() {
         }
     });
     let sections =
-        mcp_server_atlassian::config::extract_all_vendor_sections(&root, "mcp-server-atlassian");
+        mcp_server_devtools::config::extract_all_vendor_sections(&root, "mcp-server-devtools");
     let splunk = sections
         .get("splunk")
         .expect("Splunk alias should resolve to the canonical section");

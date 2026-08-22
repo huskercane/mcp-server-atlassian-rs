@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 
-use mcp_server_atlassian::config::{
+use mcp_server_devtools::config::{
     Config, Resolved, VENDOR_BITBUCKET, VENDOR_CONFLUENCE, VENDOR_JIRA, candidate_keys,
     extract_all_vendor_sections, extract_environments_for,
 };
@@ -12,7 +12,7 @@ use pretty_assertions::assert_eq;
 use serde_json::json;
 use tempfile::TempDir;
 
-const PKG: &str = "@huskercane/mcp-server-atlassian";
+const PKG: &str = "@huskercane/mcp-server-devtools";
 
 fn write_global(dir: &TempDir, body: &serde_json::Value) -> std::path::PathBuf {
     let path = dir.path().join("configs.json");
@@ -40,6 +40,8 @@ fn candidate_keys_match_ts_priority() {
             "bitbucket".to_string(),
             "atlassian-bitbucket".to_string(),
             PKG.to_string(),
+            "mcp-server-devtools".to_string(),
+            "@huskercane/mcp-server-atlassian".to_string(),
             "mcp-server-atlassian".to_string(),
         ]
     );
@@ -47,13 +49,15 @@ fn candidate_keys_match_ts_priority() {
 
 #[test]
 fn candidate_keys_for_unscoped_package() {
-    let keys = candidate_keys("mcp-server-atlassian");
+    let keys = candidate_keys("mcp-server-devtools");
     assert_eq!(
         keys,
         vec![
             "bitbucket".to_string(),
             "atlassian-bitbucket".to_string(),
-            "mcp-server-atlassian".to_string(),
+            "mcp-server-devtools".to_string(),
+            "mcp-server-devtools".to_string(),
+            "@huskercane/mcp-server-atlassian".to_string(),
             "mcp-server-atlassian".to_string(),
         ]
     );
@@ -106,7 +110,7 @@ fn extract_via_scoped_name() {
 #[test]
 fn extract_via_unscoped_name() {
     let doc = json!({
-        "mcp-server-atlassian": {
+        "mcp-server-devtools": {
             "environments": {
                 "ATLASSIAN_API_TOKEN": "unscoped-token"
             }
@@ -120,12 +124,25 @@ fn extract_via_unscoped_name() {
 }
 
 #[test]
+fn extract_via_pre_rename_package_name() {
+    let doc = json!({
+        "mcp-server-atlassian": {
+            "environments": {
+                "ATLASSIAN_API_TOKEN": "legacy-token"
+            }
+        }
+    });
+    let entries = extract_environments_for(&doc, PKG);
+    assert_eq!(entries.get("ATLASSIAN_API_TOKEN").unwrap(), "legacy-token");
+}
+
+#[test]
 fn priority_short_over_product_over_scoped_over_unscoped() {
     let doc = json!({
         "bitbucket": { "environments": { "K": "short" } },
         "atlassian-bitbucket": { "environments": { "K": "product" } },
         PKG: { "environments": { "K": "scoped" } },
-        "mcp-server-atlassian": { "environments": { "K": "unscoped" } }
+        "mcp-server-devtools": { "environments": { "K": "unscoped" } }
     });
     let entries = extract_environments_for(&doc, PKG);
     assert_eq!(entries.get("K").unwrap(), "short");

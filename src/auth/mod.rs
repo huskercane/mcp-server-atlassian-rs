@@ -455,7 +455,7 @@ pub fn resolve_configured_secret(
                 Err(auth_missing(format!(
                     "vendor `{vendor}` sets {secret_label}=\"keychain\" but no keychain \
                      entry exists for kind={kind}, vendor={vendor}, principal={principal}. \
-                     Run `mcp-atlassian creds set --kind {kind} --vendor {vendor} \
+                     Run `mcp-devtools creds set --kind {kind} --vendor {vendor} \
                      --principal {principal}` or remove the sentinel."
                 )))
             }

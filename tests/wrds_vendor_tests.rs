@@ -12,9 +12,9 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::wrds::{
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::wrds::{
     DEFAULT_ROW_LIMIT, MAX_ROW_LIMIT, WrdsVendor, clamp_row_limit,
 };
 
@@ -97,7 +97,7 @@ fn wrds_and_mcp_server_wrds_sections_are_recognised() {
         "grafana": { "environments": { "GRAFANA_TOKEN": "glsa_x" } }
     });
     let sections =
-        mcp_server_atlassian::config::extract_all_vendor_sections(&root, "mcp-server-atlassian");
+        mcp_server_devtools::config::extract_all_vendor_sections(&root, "mcp-server-devtools");
     let wrds = sections.get("wrds").expect("wrds section should resolve");
     assert_eq!(
         wrds.get("WRDS_USERNAME").map(String::as_str),

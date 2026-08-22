@@ -6,8 +6,9 @@
 //!   Each entry is further scoped by canonical vendor (`bitbucket` / `jira`
 //!   / `confluence`) so the same email principal can hold three independent
 //!   tokens — one per Atlassian product. Final service strings:
-//!   `mcp-server-atlassian.api-token.<vendor>` and
-//!   `mcp-server-atlassian.app-password.<vendor>`.
+//!   `mcp-server-devtools.api-token.<vendor>` and
+//!   `mcp-server-devtools.app-password.<vendor>`. Reads also fall back to the
+//!   former `mcp-server-atlassian.*` names so credentials survive the rename.
 //! - The "account" is the principal (email or username) — same string the
 //!   `Credentials` enum already uses via [`crate::auth::Credentials::principal`].
 //! - A single in-process [`OsKeychain`] instance owns a per-(kind, vendor,
@@ -58,13 +59,18 @@ impl SecretKind {
     /// the principal (email) is the same.
     pub fn service_for(self, vendor: &str) -> String {
         let prefix = match self {
-            Self::ApiToken => "mcp-server-atlassian.api-token",
-            Self::AppPassword => "mcp-server-atlassian.app-password",
-            Self::Password => "mcp-server-atlassian.password",
-            Self::TotpSecret => "mcp-server-atlassian.totp-secret",
-            Self::Token => "mcp-server-atlassian.token",
+            Self::ApiToken => "mcp-server-devtools.api-token",
+            Self::AppPassword => "mcp-server-devtools.app-password",
+            Self::Password => "mcp-server-devtools.password",
+            Self::TotpSecret => "mcp-server-devtools.totp-secret",
+            Self::Token => "mcp-server-devtools.token",
         };
         format!("{prefix}.{vendor}")
+    }
+
+    fn legacy_service_for(self, vendor: &str) -> String {
+        self.service_for(vendor)
+            .replacen("mcp-server-devtools", "mcp-server-atlassian", 1)
     }
 
     /// Human-readable name for CLI / error messages.
@@ -207,10 +213,25 @@ mod backend {
             .map_err(|e| KeychainError::Backend(e.to_string()))
     }
 
+    fn legacy_entry(
+        kind: SecretKind,
+        vendor: &str,
+        principal: &str,
+    ) -> KeychainResult<keyring::Entry> {
+        keyring::Entry::new(&kind.legacy_service_for(vendor), principal)
+            .map_err(|e| KeychainError::Backend(e.to_string()))
+    }
+
     pub fn get(kind: SecretKind, vendor: &str, principal: &str) -> KeychainResult<Option<String>> {
         match entry(kind, vendor, principal)?.get_password() {
             Ok(s) => Ok(Some(s)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring::Error::NoEntry) => {
+                match legacy_entry(kind, vendor, principal)?.get_password() {
+                    Ok(s) => Ok(Some(s)),
+                    Err(keyring::Error::NoEntry) => Ok(None),
+                    Err(e) => Err(KeychainError::Backend(e.to_string())),
+                }
+            }
             Err(e) => Err(KeychainError::Backend(e.to_string())),
         }
     }
@@ -227,10 +248,16 @@ mod backend {
     }
 
     pub fn delete(kind: SecretKind, vendor: &str, principal: &str) -> KeychainResult<()> {
-        match entry(kind, vendor, principal)?.delete_credential() {
-            Ok(()) => Ok(()),
-            Err(keyring::Error::NoEntry) => Err(KeychainError::NotFound),
-            Err(e) => Err(KeychainError::Backend(e.to_string())),
+        let current = entry(kind, vendor, principal)?.delete_credential();
+        let legacy = legacy_entry(kind, vendor, principal)?.delete_credential();
+        match (current, legacy) {
+            (Err(keyring::Error::NoEntry), Err(keyring::Error::NoEntry)) => {
+                Err(KeychainError::NotFound)
+            }
+            (Err(e), _) | (_, Err(e)) if !matches!(e, keyring::Error::NoEntry) => {
+                Err(KeychainError::Backend(e.to_string()))
+            }
+            _ => Ok(()),
         }
     }
 }
@@ -403,6 +430,10 @@ mod tests {
         );
         assert_eq!(
             SecretKind::ApiToken.service_for("jira"),
+            "mcp-server-devtools.api-token.jira"
+        );
+        assert_eq!(
+            SecretKind::ApiToken.legacy_service_for("jira"),
             "mcp-server-atlassian.api-token.jira"
         );
     }

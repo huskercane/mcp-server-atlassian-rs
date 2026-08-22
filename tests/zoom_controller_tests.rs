@@ -11,12 +11,12 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::zoom::{ZoomContext, handle_request};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::format::OutputFormat;
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::zoom::ZoomVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::zoom::{ZoomContext, handle_request};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::format::OutputFormat;
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::zoom::ZoomVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, body_string_contains, header, method, path, query_param};
@@ -77,7 +77,7 @@ async fn schedule_get_exchanges_token_then_calls_api_with_bearer() {
     let vendor = vendor(&server);
     let ctx = ZoomContext::new(&client, &config, &vendor);
 
-    let mut qp = mcp_server_atlassian::tools::args::QueryParams::new();
+    let mut qp = mcp_server_devtools::tools::args::QueryParams::new();
     qp.insert("type".into(), "scheduled".into());
 
     let resp = handle_request(

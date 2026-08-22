@@ -1,4 +1,4 @@
-//! Credential management CLI (`mcp-atlassian creds …`).
+//! Credential management CLI (`mcp-devtools creds …`).
 //!
 //! Stores Atlassian API tokens / Bitbucket app-passwords in the OS keychain
 //! so they don't have to live in plaintext in `~/.mcp/configs.json` or in
@@ -20,7 +20,7 @@
 //! `creds list` is intentionally absent — `keyring`'s `Entry` API has no
 //! portable enumeration. Inspect entries via the OS-native UI: Keychain
 //! Access on macOS, `credwiz.exe` on Windows, `seahorse` on Linux. Look
-//! for the `mcp-server-atlassian.*` service prefix.
+//! for the `mcp-server-devtools.*` service prefix.
 
 use clap::{Args, Subcommand};
 use std::io::{self, IsTerminal, Read, Write};
@@ -44,7 +44,7 @@ const MAX_SECRET_BYTES: usize = 2048;
 /// beside it. See [`plan_server_entry_secrets`].
 const NINJAONE_SERVERS_KEY: &str = "NINJAONE_SERVERS";
 
-/// Verbs exposed under `mcp-atlassian creds …`.
+/// Verbs exposed under `mcp-devtools creds …`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Store a secret in the OS keychain.
@@ -293,7 +293,7 @@ pub fn rm(backend: &dyn KeychainBackend, opts: SelectOpts) -> Result<(), McpErro
 
 /// Read a secret from stdin. Hides input when stdin is a tty (uses
 /// `rpassword`); reads a plain line when stdin is piped, so scripted
-/// setups (`echo $TOKEN | mcp-atlassian creds set ...`) still work.
+/// setups (`echo $TOKEN | mcp-devtools creds set ...`) still work.
 fn read_secret(force_plain: bool) -> Result<String, McpError> {
     let stdin_is_tty = io::stdin().is_terminal();
     if stdin_is_tty && !force_plain {
@@ -573,7 +573,7 @@ pub fn migrate_with(
                     format!(
                         "config has \"keychain\" sentinel for kind={}, vendor={}, \
                          principal={}, but {detail}. Run \
-                         `mcp-atlassian creds set --kind {} --vendor {} --principal {}` \
+                         `mcp-devtools creds set --kind {} --vendor {} --principal {}` \
                          or remove the sentinel from configs.json.",
                         plan.kind,
                         plan.vendor,
@@ -1308,11 +1308,11 @@ mod tests {
         );
         assert_eq!(
             SecretKind::Password.service_for("ninjaone"),
-            "mcp-server-atlassian.password.ninjaone"
+            "mcp-server-devtools.password.ninjaone"
         );
         assert_eq!(
             SecretKind::TotpSecret.service_for("ninjaone"),
-            "mcp-server-atlassian.totp-secret.ninjaone"
+            "mcp-server-devtools.totp-secret.ninjaone"
         );
     }
 }

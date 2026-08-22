@@ -9,10 +9,10 @@
 use std::path::Path;
 use std::sync::Mutex;
 
-use mcp_server_atlassian::auth::keychain::{KeychainBackend, KeychainError, KeychainResult};
-use mcp_server_atlassian::auth::{InMemoryKeychain, SecretKind};
-use mcp_server_atlassian::cli::creds::{self, MigrateSkip};
-use mcp_server_atlassian::config::{VENDOR_BITBUCKET, VENDOR_JIRA, VENDOR_NINJAONE};
+use mcp_server_devtools::auth::keychain::{KeychainBackend, KeychainError, KeychainResult};
+use mcp_server_devtools::auth::{InMemoryKeychain, SecretKind};
+use mcp_server_devtools::cli::creds::{self, MigrateSkip};
+use mcp_server_devtools::config::{VENDOR_BITBUCKET, VENDOR_JIRA, VENDOR_NINJAONE};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 

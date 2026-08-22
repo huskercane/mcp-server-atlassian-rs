@@ -14,11 +14,15 @@ use std::time::Duration;
 /// separately via `ProtocolVersion::LATEST`.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-pub const PACKAGE_NAME: &str = "@huskercane/mcp-server-atlassian";
+pub const PACKAGE_NAME: &str = "@huskercane/mcp-server-devtools";
 
-pub const UNSCOPED_PACKAGE_NAME: &str = "mcp-server-atlassian";
+pub const UNSCOPED_PACKAGE_NAME: &str = "mcp-server-devtools";
 
-pub const CLI_NAME: &str = "mcp-atlassian";
+/// Previous package identifiers accepted when reading existing MCP config.
+pub const LEGACY_PACKAGE_NAME: &str = "@huskercane/mcp-server-atlassian";
+pub const LEGACY_UNSCOPED_PACKAGE_NAME: &str = "mcp-server-atlassian";
+
+pub const CLI_NAME: &str = "mcp-devtools";
 
 pub mod network_timeouts {
     use super::Duration;

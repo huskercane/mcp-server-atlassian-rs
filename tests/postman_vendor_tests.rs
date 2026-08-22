@@ -5,11 +5,11 @@
 //! classifier. The `X-API-Key` dispatch path is covered end-to-end in
 //! `postman_controller_tests.rs`.
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::{ErrorKind, OriginalError};
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::postman::PostmanVendor;
-use mcp_server_atlassian::vendor::postman::error::{classify, parse_error_body};
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::{ErrorKind, OriginalError};
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::postman::PostmanVendor;
+use mcp_server_devtools::vendor::postman::error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use std::collections::HashMap;

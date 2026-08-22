@@ -1,4 +1,4 @@
-//! Command-line interface for the Atlassian MCP binary.
+//! Command-line interface for the `mcp-server-devtools` binary.
 //!
 //! Two modes (matching the TS reference):
 //! - **No arguments** → start the stdio MCP server (see `main.rs`).
@@ -8,9 +8,9 @@
 //! command's vendor is unambiguous:
 //!
 //! ```text
-//! mcp-atlassian bb   <get|post|put|patch|delete|clone> ...
-//! mcp-atlassian jira <get|post|put|patch|delete>       ...
-//! mcp-atlassian conf <get|post|put|patch|delete>       ...
+//! mcp-devtools bb   <get|post|put|patch|delete|clone> ...
+//! mcp-devtools jira <get|post|put|patch|delete>       ...
+//! mcp-devtools conf <get|post|put|patch|delete>       ...
 //! ```
 //!
 //! ## Deprecated top-level verbs
@@ -37,7 +37,7 @@ use crate::constants::{CLI_NAME, VERSION};
 #[command(
     name = CLI_NAME,
     version = VERSION,
-    about = "A Model Context Protocol (MCP) server for Atlassian Bitbucket, Jira, and Confluence",
+    about = "A unified Model Context Protocol (MCP) server for developer tools and services",
     disable_help_subcommand = true,
     propagate_version = true,
 )]

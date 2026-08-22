@@ -1,880 +1,237 @@
-# mcp-server-atlassian (Rust port)
+# mcp-server-devtools
 
-Rust implementation of the Atlassian MCP servers — connects AI assistants (Codex, Claude Desktop, Cursor, Continue, Cline, any MCP client) to **Bitbucket Cloud, Jira Cloud, and Confluence Cloud** through a single binary. Ports [`@aashari/mcp-server-atlassian-bitbucket`](https://github.com/aashari/mcp-server-atlassian-bitbucket), [`@aashari/mcp-server-atlassian-jira`](https://github.com/aashari/mcp-server-atlassian-jira), and [`@aashari/mcp-server-atlassian-confluence`](https://github.com/aashari/mcp-server-atlassian-confluence) with byte-for-byte parity on tool descriptions, schemas, output formats, and error envelopes.
+A unified Rust MCP server that connects AI assistants to the developer tools and services they use every day.
 
-The same binary also exposes ten more products as **native additions** (not TS ports), each with its own auth model:
+One binary exposes 64 tools across Atlassian, CI/CD, observability, collaboration, API development, device management, learning, and financial research platforms. It supports stdio and streamable HTTP, keeps credentials out of tool arguments, and provides bounded output with resumable artifacts for large responses.
 
-- **Zoom Cloud** (`zoom_*`) — [Server-to-Server OAuth](https://developers.zoom.us/docs/internal-apps/s2s-oauth/): exchanges static client credentials for a short-lived bearer and **auto-renews it** (no ongoing user reauthorization).
-- **CircleCI** (`circleci_*`) — a single [personal API token](https://circleci.com/docs/managing-api-tokens/) sent as a Bearer token, the scheme CircleCI's [v2 API](https://circleci.com/docs/api/v2/) recommends.
-- **Slack** (`slack_*`) — a bot/user [OAuth token](https://api.slack.com/authentication/token-types) (`xoxb-…`) as a Bearer token. Its Web API returns `200 OK` with `{"ok": false, "error": …}` for logical failures, which this server reclassifies as a proper error.
-- **Postman** (`postman_*`) — the one vendor that authenticates outside the `Authorization` header: its [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) rides in `X-API-Key`.
-- **edX / Open edX discussions** (`edx_discussion_*`) — a bearer token against `https://courses.edx.org` by default, or another LMS host via `EDX_API_BASE`.
-- **New Relic** (`newrelic_query`) — drives NerdGraph (a single GraphQL endpoint) with a User API key in the `API-Key` header.
-- **Grafana** (`grafana_*`) — reads logs by proxying [LogQL](https://grafana.com/docs/loki/latest/query/) to a [Loki](https://grafana.com/docs/loki/latest/) datasource through Grafana's [datasource proxy](https://grafana.com/docs/grafana/latest/developers/http_api/data_source/#data-source-proxy-calls), authenticated with a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) as a Bearer token. Works the same for self-hosted Grafana and Grafana Cloud (only `GRAFANA_URL` differs).
-- **SonarQube / SonarCloud** (`sonarqube_*`) — reads back code-quality results over the [Web API](https://next.sonarqube.com/sonarqube/web_api), authenticated with a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) as a Bearer token (SonarQube 9.9 LTS+ / SonarCloud). The headline use is answering *why a CI build failed Sonar*: `sonarqube_quality_gate` reports the failing gate conditions (and resolves a scanner `ceTaskId` — as printed in the CI log — to the analysis for you), `sonarqube_search_issues` lists the offending lines, and `sonarqube_get` covers the rest. Works the same for self-hosted SonarQube and SonarCloud (only `SONARQUBE_URL` differs).
-- **Splunk** (`splunk_*`) — runs bounded SPL searches, starts asynchronous search jobs, pages job results, and lists saved searches through Splunk's management REST API with token authentication.
-- **WRDS** (`wrds_*`) — the one vendor with **no REST API**: [Wharton Research Data Services](https://wrds-www.wharton.upenn.edu/) is a **PostgreSQL** database (CRSP, Compustat, IBES, TAQ, …), so it connects directly to `wrds-pgdata.wharton.upenn.edu:9737` over SSL (the access path the official [`wrds` Python package](https://pypi.org/project/wrds/) wraps) and exposes read-only SQL plus library/table/column discovery. Being PostgreSQL rather than HTTP, it is gated behind a Cargo feature (`wrds`, on by default) — build `--no-default-features` to drop the Postgres client entirely.
+## Integrations
 
-This directory does **not** ship to npm. It builds a single static-ish binary: `mcp-atlassian`.
+| Integration | MCP tools | Authentication |
+|---|---|---|
+| Bitbucket Cloud | `bb_get`, `bb_post`, `bb_put`, `bb_patch`, `bb_delete`, `bb_clone` | Atlassian API token or Bitbucket app password |
+| Jira Cloud | `jira_get`, `jira_post`, `jira_put`, `jira_patch`, `jira_delete` | Atlassian API token |
+| Confluence Cloud | `conf_get`, `conf_post`, `conf_put`, `conf_patch`, `conf_delete` | Atlassian API token |
+| Zoom | `zoom_get`, `zoom_post`, `zoom_put`, `zoom_patch`, `zoom_delete` | Server-to-Server OAuth |
+| CircleCI | `circleci_get`, `circleci_logs`, and write verbs | Personal API token |
+| Slack | `slack_get`, `slack_post`, and write verbs | Bot or user OAuth token |
+| Postman | `postman_get`, `postman_post`, and write verbs | API key |
+| edX / Open edX | Six `edx_discussion_*` tools | Bearer token |
+| New Relic | `newrelic_query` | User API key |
+| Grafana / Loki | `grafana_list_datasources`, `grafana_query_logs` | Service-account token |
+| SonarQube / SonarCloud | `sonarqube_quality_gate`, `sonarqube_search_issues`, `sonarqube_get` | User token |
+| Splunk | Four `splunk_*` search and job tools | Authentication token |
+| NinjaOne | `ninjaone_login`, `ninjaone_get`, and write verbs | Bearer, session, or console credentials |
+| WRDS | Four `wrds_*` discovery and query tools | WRDS username and password |
 
-## Why a Rust port
+`artifact_read` is shared across integrations and lets stdio clients retrieve large temporary artifacts in resumable base64 chunks. WRDS contributes four of the 64 tools and is enabled by the default `wrds` Cargo feature.
 
-- No Node.js runtime dependency.
-- ~13 MB release binary vs. ~120 MB `node_modules` tree per product.
-- Cold-start in milliseconds instead of hundreds.
-- One binary serves Bitbucket, Jira, Confluence, Zoom, CircleCI, Slack, Postman, edX discussions, New Relic, Grafana, SonarQube, Splunk, NinjaOne, and WRDS — instead of running separate Node processes side-by-side, you get one MCP server exposing all 64 tools (including the shared `artifact_read` resumable-download tool). The four `wrds_*` tools are feature-gated (`wrds`, on by default); a `--no-default-features` build omits them and the Postgres dependency.
-- Identical LLM-facing tool descriptions and output formats — drop-in replacement for the TS packages in an MCP client config.
+The Bitbucket, Jira, and Confluence behavior is ported from the corresponding [`@aashari` Atlassian MCP servers](https://github.com/aashari). The other integrations are native to this project.
 
-## Download prebuilt binaries
+## Install
 
-Grab the latest release for your platform from the [GitHub Releases page](https://github.com/huskercane/mcp-server-atlassian-rs/releases/latest):
+Download a prebuilt archive from [GitHub Releases](https://github.com/huskercane/mcp-server-devtools/releases/latest):
 
 | Platform | Archive |
 |---|---|
-| Linux (x86_64) | `mcp-atlassian-linux-x86_64.tar.gz` |
-| macOS (Intel) | `mcp-atlassian-macos-x86_64.tar.gz` |
-| macOS (Apple Silicon) | `mcp-atlassian-macos-aarch64.tar.gz` |
-| Windows (x86_64) | `mcp-atlassian-windows-x86_64.zip` |
+| Linux x86-64 | `mcp-devtools-linux-x86_64.tar.gz` |
+| macOS Intel | `mcp-devtools-macos-x86_64.tar.gz` |
+| macOS Apple Silicon | `mcp-devtools-macos-aarch64.tar.gz` |
+| Windows x86-64 | `mcp-devtools-windows-x86_64.zip` |
 
-Each archive ships the `mcp-atlassian` binary and a `.sha256` checksum sibling. On macOS you may need to clear the quarantine bit: `xattr -d com.apple.quarantine ./mcp-atlassian`.
-
-## Build from source
+Each archive has a `.sha256` checksum. On macOS, an unsigned download may need its quarantine attribute removed:
 
 ```bash
-git clone https://github.com/huskercane/mcp-server-atlassian-rs.git
-cd mcp-server-atlassian-rs
+xattr -d com.apple.quarantine ./mcp-devtools
+```
+
+To build from source (Rust 1.96 or later):
+
+```bash
+git clone https://github.com/huskercane/mcp-server-devtools.git
+cd mcp-server-devtools
 cargo build --release
 ```
 
-The binary lands at `target/release/mcp-atlassian`. Requires Rust 1.96 or later (pinned in `rust-toolchain.toml`).
-
-By default the build includes the WRDS PostgreSQL integration (`wrds` feature). To build without it — dropping the `tokio-postgres` dependency tree entirely (headless / non-WRDS deployments, or to shrink the binary by ~0.5–1 MB):
+The binary is written to `target/release/mcp-devtools`. For a headless build without the desktop keychain or WRDS dependencies:
 
 ```bash
-cargo build --release --no-default-features --features keychain   # WRDS off, keychain on
-cargo build --release --no-default-features                        # WRDS off, keychain off (headless)
+cargo build --release --no-default-features
 ```
 
-Optional checks:
-```bash
-cargo test                                   # full test suite
-cargo clippy --all-targets -- -D warnings   # lint gate (pedantic)
-cargo deny check                             # license + advisory check
+## Configure
+
+Only configure the integrations you use. Missing credentials are checked when a corresponding tool is called, so unrelated integrations do not prevent startup.
+
+Configuration is resolved in this order:
+
+1. Process environment
+2. `.env` in the working directory
+3. Vendor sections in `~/.mcp/configs.json`
+
+Common settings:
+
+| Integration | Required or commonly used settings |
+|---|---|
+| Atlassian | `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_API_TOKEN`, `ATLASSIAN_SITE_NAME` for Jira/Confluence, `BITBUCKET_DEFAULT_WORKSPACE` optionally |
+| Zoom | `ZOOM_ACCOUNT_ID`, `ZOOM_CLIENT_ID`, `ZOOM_CLIENT_SECRET` |
+| CircleCI | `CIRCLECI_TOKEN` |
+| Slack | `SLACK_TOKEN` |
+| Postman | `POSTMAN_API_KEY` |
+| edX | `EDX_ACCESS_TOKEN`, optional `EDX_API_BASE` |
+| New Relic | `NEW_RELIC_API_KEY`, optional `NEW_RELIC_REGION=eu` |
+| Grafana | `GRAFANA_URL`, `GRAFANA_TOKEN` |
+| SonarQube | `SONARQUBE_URL`, `SONARQUBE_TOKEN` |
+| Splunk | `SPLUNK_URL`, `SPLUNK_TOKEN`, optional `SPLUNK_AUTH_SCHEME=splunk` for legacy session keys |
+| NinjaOne | `NINJAONE_URL` or `NINJAONE_SERVERS`, plus one supported credential set |
+| WRDS | `WRDS_USERNAME`, `WRDS_PASSWORD`; host, port, and database have cloud defaults |
+
+Example `.env` for Atlassian:
+
+```dotenv
+ATLASSIAN_USER_EMAIL=you@example.com
+ATLASSIAN_API_TOKEN=ATATT...
+ATLASSIAN_SITE_NAME=mycompany
+BITBUCKET_DEFAULT_WORKSPACE=my-workspace
 ```
 
-## Credentials
-
-Create an Atlassian API token with the scopes you need (Bitbucket, Jira, and/or Confluence). The TS README has step-by-step screenshots: see [Get Your Bitbucket Credentials](https://github.com/aashari/mcp-server-atlassian-bitbucket#1-get-your-bitbucket-credentials).
-
-Zoom is separate: it does **not** use an Atlassian token. Create a [Server-to-Server OAuth app](https://developers.zoom.us/docs/internal-apps/s2s-oauth/) and use its account ID, client ID, and client secret (`ZOOM_*` below). Read from the `zoom` config section or environment; the client secret can also live in the OS keychain (`creds set --kind token --vendor zoom --principal <client-id>`).
-
-CircleCI is also separate: create a [personal API token](https://circleci.com/docs/managing-api-tokens/) (CircleCI → User Settings → Personal API Tokens) and set it as `CIRCLECI_TOKEN` (below). Like every other vendor secret, it can stay in the `circleci` config section as plaintext or be moved into the OS keychain (`creds set --kind token --vendor circleci --principal CIRCLECI_TOKEN`).
-
-Slack is separate too: create a Slack app, install it to your workspace, and copy its bot token (`xoxb-…`) or user token (`xoxp-…`) into `SLACK_TOKEN` (below). The token's [scopes](https://api.slack.com/scopes) gate what the `slack_*` tools can do. Read from the `slack` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-
-Postman is separate too: create an [API key](https://learning.postman.com/docs/developer/postman-api/authentication/) (Postman → Account Settings → API Keys) and set it as `POSTMAN_API_KEY` (below). Unlike every other vendor it is sent in the `X-API-Key` header, not `Authorization`. Read from the `postman` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-
-edX is separate too: set `EDX_ACCESS_TOKEN` to a bearer token that can access the target course discussions. The default LMS base is `https://courses.edx.org`; set `EDX_API_BASE` for another Open edX instance. Discussion endpoints still enforce course enrollment/forum-role access and course discussion availability.
-
-New Relic is separate too: create a [User API key](https://docs.newrelic.com/docs/apis/intro-apis/new-relic-api-keys/) (New Relic → user menu → API keys → User key) and set it as `NEW_RELIC_API_KEY`. Unlike every other vendor it is sent in the `API-Key` header, and its only API is **NerdGraph** (a single GraphQL endpoint), so the integration exposes one `newrelic_query` tool rather than five REST verbs. EU-region accounts must set `NEW_RELIC_REGION=eu`. Read from the `newrelic` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-
-Grafana is separate too: create a [service-account token](https://grafana.com/docs/grafana/latest/administration/service-accounts/) (Grafana → Administration → Service accounts) and set it as `GRAFANA_TOKEN`, plus `GRAFANA_URL` for your instance base (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). The token is sent as `Authorization: Bearer`. "Reading logs from Grafana" runs a LogQL query against a Loki datasource via Grafana's datasource proxy, so you first discover the Loki datasource `uid` with `grafana_list_datasources`, then pass it to `grafana_query_logs`. Read from the `grafana` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-
-SonarQube is separate too: create a [user token](https://docs.sonarsource.com/sonarqube/latest/user-guide/user-account/generating-and-using-tokens/) (My Account → Security → Generate Token) and set it as `SONARQUBE_TOKEN`, plus `SONARQUBE_URL` for your instance base (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). The token is sent as `Authorization: Bearer` (SonarQube 9.9 LTS+ / SonarCloud). The typical flow after a red build is `circleci_logs` (find the failed Sonar step and its `ceTaskId`) → `sonarqube_quality_gate` (which conditions failed, and by how much) → `sonarqube_search_issues` (the exact offending lines); `sonarqube_get` covers the rest of the Web API (measures, projects, hotspots). On SonarCloud, pass `organization` to the tools. Read from the `sonarqube` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-Splunk is separate too: set `SPLUNK_URL` to the management API base (usually `https://<host>:8089`) and `SPLUNK_TOKEN` to a [Splunk authentication token](https://help.splunk.com/en/splunk-enterprise/administer/manage-users-and-security/9.4/authenticate-into-the-splunk-platform-with-tokens/use-authentication-tokens). Modern JWT tokens are sent as `Authorization: Bearer`; set `SPLUNK_AUTH_SCHEME=splunk` only for a legacy session key. REST API access to Splunk Cloud may require enablement by Splunk Support, and free-trial Splunk Cloud accounts cannot use the REST API. Read from the `splunk` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)).
-
-NinjaOne supports generic requests against one or more configured tenant/server URLs. Set `NINJAONE_URL` for a single server, or `NINJAONE_SERVERS` to a JSON alias map and pass the alias as the tool's `server`. An alias can be a URL string, or an object with `url`, an optional environment-specific path `prefix`, and the account that environment is reached as (`email`, `password`, `totpCommand`, `totpSecret`): `{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}`. The prefix is inserted before every tool-supplied path, so a call with `/v2/devices` targets `https://test.example/test-api/v2/devices` on `test`. Authentication can be a public API bearer in `NINJAONE_ACCESS_TOKEN`, an API session key in `NINJAONE_SESSION_KEY`, or the exact cookie header value in `NINJAONE_SESSION_COOKIE` for private `/ws/...` console endpoints. Prefer the supported public `/v2/...` API; private console endpoints can change without notice.
-
-WRDS is separate too, and unlike every other vendor it is **not HTTP** — it is a PostgreSQL connection. Set `WRDS_USERNAME` and `WRDS_PASSWORD` to your [WRDS account](https://wrds-www.wharton.upenn.edu/) credentials; the host, port, and database default to the WRDS Cloud values (`wrds-pgdata.wharton.upenn.edu`, `9737`, `wrds`) and only need `WRDS_HOST` / `WRDS_PORT` / `WRDS_DBNAME` for a mirror or a local test database. The connection always uses SSL (`WRDS_SSLMODE` defaults to `require`). Access reflects your institution's WRDS subscriptions, and the account is read-only — this server additionally forces every session read-only and wraps each query so only a single `SELECT` runs. Read from the `wrds` config section or environment, or moved into the OS keychain with `creds migrate` (see [Storing credentials in the OS keychain](#storing-credentials-in-the-os-keychain-desktop-only)). Requires the binary to be built with the `wrds` feature (the default).
-
-### Environment variables
-
-| Variable | Purpose | Vendor scope |
-|---|---|---|
-| `ATLASSIAN_USER_EMAIL` | Atlassian account email (recommended auth) | all |
-| `ATLASSIAN_API_TOKEN` | Scoped API token starting with `ATATT` | all |
-| `ATLASSIAN_BITBUCKET_USERNAME` | Legacy fallback: Bitbucket username | bb only |
-| `ATLASSIAN_BITBUCKET_APP_PASSWORD` | Legacy fallback: App Password | bb only |
-| `BITBUCKET_DEFAULT_WORKSPACE` | Default workspace slug used when a tool/CLI call omits it | bb only |
-| `ATLASSIAN_SITE_NAME` | Atlassian site shortname (e.g. `mycompany` for `mycompany.atlassian.net`). **Required** before invoking any `jira_*` or `conf_*` tool; only checked at tool-call time, so a Bitbucket-only setup boots without it. Jira and Confluence point at the same Atlassian site, so populating it under either the `jira` or `confluence` section of `~/.mcp/configs.json` works for both — duplication is unnecessary. | jira + conf |
-| `ZOOM_ACCOUNT_ID` | Zoom Server-to-Server OAuth account ID. **Required** before invoking any `zoom_*` tool; only checked at tool-call time, so a non-Zoom setup boots without it. | zoom only |
-| `ZOOM_CLIENT_ID` | Zoom S2S OAuth app client ID. | zoom only |
-| `ZOOM_CLIENT_SECRET` | Zoom S2S OAuth app client secret. | zoom only |
-| `CIRCLECI_TOKEN` | CircleCI personal API token, sent as `Authorization: Bearer`. **Required** before invoking any `circleci_*` tool; only checked at tool-call time, so a non-CircleCI setup boots without it. | circleci only |
-| `SLACK_TOKEN` | Slack bot/user OAuth token (`xoxb-…` / `xoxp-…`), sent as `Authorization: Bearer`. **Required** before invoking any `slack_*` tool; only checked at tool-call time, so a non-Slack setup boots without it. | slack only |
-| `POSTMAN_API_KEY` | Postman API key, sent in the `X-API-Key` header (not `Authorization`). **Required** before invoking any `postman_*` tool; only checked at tool-call time, so a non-Postman setup boots without it. | postman only |
-| `EDX_ACCESS_TOKEN` | edX/Open edX bearer token for discussion API requests. **Required** before invoking any `edx_discussion_*` tool; only checked at tool-call time, so a non-edX setup boots without it. | edx only |
-| `EDX_API_BASE` | Optional LMS base URL for edX/Open edX discussion APIs. Defaults to `https://courses.edx.org`; set this for another Open edX host. | edx only |
-| `NEW_RELIC_API_KEY` | New Relic User API key, sent in the `API-Key` header (not `Authorization`). **Required** before invoking `newrelic_query`; only checked at tool-call time, so a non-New-Relic setup boots without it. | newrelic only |
-| `NEW_RELIC_REGION` | New Relic data-center region: `us` (default) or `eu`. EU accounts must set `eu`, which targets `https://api.eu.newrelic.com`. | newrelic only |
-| `NEW_RELIC_API_BASE` | Optional explicit NerdGraph base URL override (takes priority over `NEW_RELIC_REGION`). | newrelic only |
-| `GRAFANA_URL` | Grafana instance base URL (e.g. `https://myorg.grafana.net` or `http://localhost:3000`). **Required** before invoking any `grafana_*` tool; only checked at tool-call time, so a non-Grafana setup boots without it. | grafana only |
-| `GRAFANA_TOKEN` | Grafana service-account token (or API key), sent as `Authorization: Bearer`. **Required** before invoking any `grafana_*` tool; only checked at tool-call time. | grafana only |
-| `SONARQUBE_URL` | SonarQube/SonarCloud instance base URL (e.g. `https://sonar.mycorp.com` or `https://sonarcloud.io`). **Required** before invoking any `sonarqube_*` tool; only checked at tool-call time, so a non-Sonar setup boots without it. | sonarqube only |
-| `SONARQUBE_TOKEN` | SonarQube/SonarCloud user token, sent as `Authorization: Bearer`. **Required** before invoking any `sonarqube_*` tool; only checked at tool-call time. | sonarqube only |
-| `SPLUNK_URL` | Splunk management REST API base URL (usually `https://<host>:8089`). **Required** before invoking any `splunk_*` tool; only checked at tool-call time, so a non-Splunk setup boots without it. | splunk only |
-| `SPLUNK_TOKEN` | Splunk authentication token. **Required** before invoking any `splunk_*` tool; sent as `Authorization: Bearer` by default. | splunk only |
-| `SPLUNK_AUTH_SCHEME` | Optional auth scheme. Defaults to `bearer`; set `splunk` only when supplying a legacy Splunk session key. | splunk only |
-| `NINJAONE_URL` | Default NinjaOne tenant/server base URL. Used when a tool call omits `server`. | ninjaone only |
-| `NINJAONE_SERVERS` | Optional JSON object mapping safe aliases to URL strings or `{ "url": "...", "prefix": "/...", "email": "...", "password": "...", "totpCommand": "...", "totpSecret": "..." }` objects. The optional prefix is applied per server before the tool path; the login fields give that environment its own account. Tool calls accept an alias, never a raw URL. | ninjaone only |
-| `NINJAONE_ACCESS_TOKEN` | NinjaOne OAuth access token, sent as `Authorization: Bearer`. Takes precedence over session credentials. | ninjaone only |
-| `NINJAONE_SESSION_KEY` | NinjaOne API session key, sent in the `sessionKey` header. | ninjaone only |
-| `NINJAONE_SESSION_COOKIE` | Exact `Cookie` header value for private web-console `/ws/...` calls, e.g. `sessionKey=...`. | ninjaone only |
-| `NINJAONE_EMAIL` | Console account email used by `ninjaone_login` to mint a session key. Per-server override: `email`, which also scopes that server's password and MFA source to that account. | ninjaone only |
-| `NINJAONE_PASSWORD` | Password for `NINJAONE_EMAIL`. Never accepted as a tool argument. Supports the `"keychain"` sentinel. Per-server override: `password`. | ninjaone only |
-| `NINJAONE_TOTP_COMMAND` | Shell command that prints the current one-time code to stdout, e.g. `bw get totp ninja-qa5`. Removes the need to pass `mfaCode` per login. Per-server overrides go in the `NINJAONE_SERVERS` entry as `totpCommand`. | ninjaone only |
-| `NINJAONE_TOTP_SECRET` | `otpauth://totp/...` URI or bare base32 seed, used to derive the code in-process when no vault CLI is reachable. Tried after `NINJAONE_TOTP_COMMAND`. Supports the `"keychain"` sentinel. Per-server override: `totpSecret`. | ninjaone only |
-| `WRDS_USERNAME` | WRDS account username for the PostgreSQL connection. **Required** before invoking any `wrds_*` tool; only checked at tool-call time, so a non-WRDS setup boots without it. | wrds only |
-| `WRDS_PASSWORD` | WRDS account password. **Required** before invoking any `wrds_*` tool. | wrds only |
-| `WRDS_HOST` | WRDS Postgres host. Defaults to `wrds-pgdata.wharton.upenn.edu`; override for a mirror or local test DB. | wrds only |
-| `WRDS_PORT` | WRDS Postgres port. Defaults to `9737`. | wrds only |
-| `WRDS_DBNAME` | WRDS database name. Defaults to `wrds`. | wrds only |
-| `WRDS_SSLMODE` | TLS mode: `require` (default), `prefer`, or `disable` (local testing only). WRDS requires SSL. | wrds only |
-| `TRANSPORT_MODE` | `stdio` (default) or `http` | shared |
-| `PORT` | HTTP transport listening port (default `3000`, bound to `127.0.0.1`) | shared |
-| `DEBUG` | Glob filter for debug logs (e.g. `DEBUG=*`) | shared |
-| `HTTP_CACHE_ENABLED` | Enable the process-local cache for successful upstream GET responses. Default `false`. | shared |
-| `HTTP_CACHE_DEFAULT_TTL_SECONDS` | TTL used when upstream sends no usable cache lifetime. Default `60`. | shared |
-| `HTTP_CACHE_MAX_TTL_SECONDS` | Upper bound for upstream/default TTLs. Default `3600`. | shared |
-| `HTTP_CACHE_MAX_ENTRIES` | Maximum cached response count. Default `512`. | shared |
-| `HTTP_CACHE_MAX_BYTES` | Maximum compressed in-memory body bytes. Default `67108864` (64 MiB). | shared |
-| `HTTP_CACHE_COMPRESSION_THRESHOLD_BYTES` | Responses at or above this size are compressed with zstd when it saves space. Default `16384`. | shared |
-
-### Upstream HTTP response cache
-
-The cache is disabled by default. Enable it for every HTTP-backed vendor with `HTTP_CACHE_ENABLED=true`; WRDS is PostgreSQL and does not use this transport. Only successful bodyless GET requests are eligible. Cache keys include vendor, complete normalized URL/query, a one-way fingerprint of the resolved credential, and representation-affecting request headers, so different accounts and servers cannot reuse each other's responses. Credentials themselves are never stored in a key or log.
-
-`Cache-Control: no-store` disables storage, while `max-age` and `Expires` constrain the TTL up to `HTTP_CACHE_MAX_TTL_SECONDS`. When upstream supplies no lifetime, `HTTP_CACHE_DEFAULT_TTL_SECONDS` applies. Writes conservatively invalidate cached reads for that vendor/base URL. Login, authentication-state, OAuth, and token routes are excluded. NinjaOne `/webapp/sessionproperties` is the deliberate exception: a successful login immediately fetches it to validate the session and warm its credential-scoped entry, because later console/database discovery needs its division and user context.
-
-Storage is bounded by both entry count and compressed bytes. Large responses are zstd-compressed when compression reduces their size; expired entries and then least-recently-used entries are evicted. The cache is memory-only and disappears on restart. A cache hit has no new raw-response file because no upstream response occurred.
-
-Example:
-
-```powershell
-$env:HTTP_CACHE_ENABLED = "true"
-$env:HTTP_CACHE_DEFAULT_TTL_SECONDS = "60"
-$env:HTTP_CACHE_MAX_TTL_SECONDS = "3600"
-$env:HTTP_CACHE_MAX_ENTRIES = "512"
-$env:HTTP_CACHE_MAX_BYTES = "67108864"
-```
-
-Tokens can also be written to `~/.mcp/configs.json`. The Rust port supports per-vendor sections (`bitbucket`, `atlassian-bitbucket`, `jira`, `atlassian-jira`, `confluence`, `atlassian-confluence`, `zoom`, `mcp-server-zoom`, `circleci`, `circle-ci`, `mcp-server-circleci`, `slack`, `mcp-server-slack`, `postman`, `mcp-server-postman`, `edx`, `openedx`, `open-edx`, `mcp-server-edx`, `newrelic`, `new-relic`, `mcp-server-newrelic`, `grafana`, `mcp-server-grafana`, `splunk`, `mcp-server-splunk`, `ninjaone`, `ninja-one`, `ninjarmm`, `mcp-server-ninjaone`, `wrds`, `mcp-server-wrds`) so each product's keys stay isolated:
-
-When this file exists at server startup, the running server watches it and
-hot-reloads valid changes. Existing stdio and HTTP connections remain open;
-subsequent tool calls use the new values. A temporarily malformed file (for
-example, while an editor is midway through a save) leaves the last valid
-configuration active until a valid version is written.
+Example vendor-scoped global config:
 
 ```json
 {
-  "bitbucket": {
-    "environments": {
-      "ATLASSIAN_USER_EMAIL": "you@company.com",
-      "ATLASSIAN_API_TOKEN": "ATATT...",
-      "BITBUCKET_DEFAULT_WORKSPACE": "acme"
-    }
-  },
   "jira": {
     "environments": {
+      "ATLASSIAN_USER_EMAIL": "you@example.com",
+      "ATLASSIAN_API_TOKEN": "keychain",
       "ATLASSIAN_SITE_NAME": "mycompany"
-    }
-  },
-  "confluence": {
-    "environments": {
-      "ATLASSIAN_SITE_NAME": "mycompany"
-    }
-  },
-  "zoom": {
-    "environments": {
-      "ZOOM_ACCOUNT_ID": "abc123...",
-      "ZOOM_CLIENT_ID": "client-id...",
-      "ZOOM_CLIENT_SECRET": "client-secret..."
     }
   },
   "circleci": {
     "environments": {
-      "CIRCLECI_TOKEN": "CCIPRJ_..."
-    }
-  },
-  "slack": {
-    "environments": {
-      "SLACK_TOKEN": "xoxb-..."
-    }
-  },
-  "postman": {
-    "environments": {
-      "POSTMAN_API_KEY": "PMAK-..."
-    }
-  },
-  "edx": {
-    "environments": {
-      "EDX_ACCESS_TOKEN": "eyJ...",
-      "EDX_API_BASE": "https://courses.edx.org"
-    }
-  },
-  "newrelic": {
-    "environments": {
-      "NEW_RELIC_API_KEY": "NRAK-...",
-      "NEW_RELIC_REGION": "us"
-    }
-  },
-  "grafana": {
-    "environments": {
-      "GRAFANA_URL": "https://myorg.grafana.net",
-      "GRAFANA_TOKEN": "glsa_..."
-    }
-  },
-  "splunk": {
-    "environments": {
-      "SPLUNK_URL": "https://splunk.example.com:8089",
-      "SPLUNK_TOKEN": "eyJ..."
-    }
-  },
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_URL": "https://app.ninjarmm.com",
-      "NINJAONE_SERVERS": "{\"test\":{\"url\":\"https://test.example\",\"prefix\":\"/test-api\"},\"qa\":{\"url\":\"https://qa.example\",\"prefix\":\"/qa-api\"}}",
-      "NINJAONE_ACCESS_TOKEN": "eyJ..."
-    }
-  },
-  "wrds": {
-    "environments": {
-      "WRDS_USERNAME": "your-wrds-username",
-      "WRDS_PASSWORD": "your-wrds-password"
+      "CIRCLECI_TOKEN": "keychain"
     }
   }
 }
 ```
 
-Credential keys (`ATLASSIAN_API_TOKEN`, `ATLASSIAN_USER_EMAIL`, `ATLASSIAN_BITBUCKET_*`, `ZOOM_*`, `CIRCLECI_TOKEN`, `SLACK_TOKEN`, `POSTMAN_API_KEY`, `EDX_ACCESS_TOKEN`, `NEW_RELIC_API_KEY`, `GRAFANA_TOKEN`, `SPLUNK_TOKEN`, `NINJAONE_*`, `WRDS_USERNAME`/`WRDS_PASSWORD`) are resolved **per vendor** — each section keeps its own. The same email may hold three independent Atlassian Cloud API tokens (one per product), and runtime auth picks the right one based on which vendor is serving the request. Non-credential shared keys can live in any section; if values disagree you must scope the lookup explicitly via `get_for(vendor, key)`. Process env and `.env` always take priority over the global file.
+The server watches the global config and reloads changes without a restart.
 
-`ATLASSIAN_SITE_NAME` gets a narrower fallback specifically for the Jira ↔ Confluence case: defining it under either section satisfies both vendors. The fallback is a deliberate two-vendor allow-list; unrelated sections (e.g. `bitbucket`) never leak into the lookup.
+### Store secrets in the OS keychain
 
-### Storing credentials in the OS keychain (desktop only)
-
-If you'd rather not keep secrets in plaintext on disk, store them in the OS keychain and put the literal string `"keychain"` in their place. This covers **every** secret the config holds — not just Atlassian tokens — so `creds migrate` moves a Slack token, a Zoom client secret, and a NinjaOne TOTP seed in the same pass. Supported on **macOS** (Keychain Services), **Windows** (Credential Manager), and **Linux desktop** (GNOME Keyring or KWallet, auto-unlocked at login).
-
-> **Headless / CI / SSH-only Linux is out of scope.** Keychain backends require a logged-in desktop session with a keyring agent running. For server-style deployments either keep using env vars in your launcher, or build with `--no-default-features` to compile without the `keyring` dependency entirely.
-
-#### Resolution order
-
-When the binary needs a credential, it tries each source in priority order; the first hit wins:
-
-1. Process environment variable (e.g. `ATLASSIAN_API_TOKEN`)
-2. `.env` file in the current working directory
-3. `~/.mcp/configs.json`
-4. **OS keychain** — consulted in two cases:
-   - **Explicit**: a previous source returned the literal string `"keychain"` (the sentinel). The principal (email/username) is read from the same cascade. A missing keychain entry is a hard auth error — it tells you the configuration intent didn't match reality.
-   - **Implicit**: the secret is absent from every source above but the principal is set. Useful if you've migrated and deleted the field outright. A miss falls through silently.
-
-Keychain entries are scoped by `(kind, vendor, principal)` — the service name carries the vendor suffix (`mcp-server-atlassian.api-token.bitbucket`, `.jira`, `.confluence`, `mcp-server-atlassian.password.ninjaone`), so the same email can hold a different secret in each slot. `Config::get_for` itself is unaware of the keychain; the expansion happens inside `auth::Credentials::resolve_with_for(config, backend, vendor)` for the Atlassian keys, and inside `auth::resolve_secret_for(...)` for a vendor that owns its own login (NinjaOne). Non-secret keys (`ATLASSIAN_SITE_NAME`, `BITBUCKET_DEFAULT_WORKSPACE`, etc.) never trigger keychain reads.
-
-**Coverage.** Every secret-bearing config key is keychain-backed. One registry (`src/auth/secrets.rs`) declares them all and drives runtime resolution, `creds migrate`, and the `creds set` guard, so the three cannot drift apart. The last two rows are the exception the registry cannot describe — they are fields of one entry inside the `NINJAONE_SERVERS` document rather than config keys — and are handled explicitly by both runtime resolution and `creds migrate`:
-
-| Key | Vendor | `--kind` | Principal |
-|---|---|---|---|
-| `ATLASSIAN_API_TOKEN` | bitbucket / jira / confluence | `api-token` | `ATLASSIAN_USER_EMAIL` |
-| `ATLASSIAN_BITBUCKET_APP_PASSWORD` | bitbucket | `app-password` | `ATLASSIAN_BITBUCKET_USERNAME` |
-| `ZOOM_CLIENT_SECRET` | zoom | `token` | `ZOOM_CLIENT_ID` |
-| `SLACK_TOKEN` | slack | `token` | *key name* |
-| `CIRCLECI_TOKEN` | circleci | `token` | *key name* |
-| `POSTMAN_API_KEY` | postman | `token` | *key name* |
-| `NEW_RELIC_API_KEY` | newrelic | `token` | *key name* |
-| `GRAFANA_TOKEN` | grafana | `token` | *key name* |
-| `SONARQUBE_TOKEN` | sonarqube | `token` | *key name* |
-| `SPLUNK_TOKEN` | splunk | `token` | *key name* |
-| `EDX_ACCESS_TOKEN` | edx | `token` | *key name* |
-| `WRDS_PASSWORD` | wrds | `password` | `WRDS_USERNAME` |
-| `NINJAONE_PASSWORD` | ninjaone | `password` | `NINJAONE_EMAIL` |
-| `NINJAONE_TOTP_SECRET` | ninjaone | `totp-secret` | `NINJAONE_EMAIL` |
-| `NINJAONE_SERVERS[…].password` | ninjaone | `password` | that entry's `email` |
-| `NINJAONE_SERVERS[…].totpSecret` | ninjaone | `totp-secret` | that entry's `email` |
-| `NINJAONE_ACCESS_TOKEN` | ninjaone | `token` | *key name* |
-| `NINJAONE_SESSION_KEY` | ninjaone | `token` | *key name* |
-| `NINJAONE_SESSION_COOKIE` | ninjaone | `token` | *key name* |
-
-Most vendor tokens have no account attached — there is no "who" for `SLACK_TOKEN` — so those slots use **the config key name as the principal**. That keeps them self-describing in the OS keychain UI and distinct for a vendor holding several tokens, as NinjaOne does. Keys with a real account (an Atlassian email, a Zoom client id, a WRDS or NinjaOne login) are filed under it, so rotating the account moves the slot. `--kind` also accepts a config key name directly, so `--kind SLACK_TOKEN` works without looking up which generic kind it maps to.
-
-Identifiers are never migrated — `ZOOM_CLIENT_ID`, `WRDS_USERNAME`, `NINJAONE_EMAIL`, and `ATLASSIAN_SITE_NAME` stay in the file, since they name the slot rather than unlock it.
-
-#### CLI
+Desktop builds can store every registered vendor secret in macOS Keychain, Windows Credential Manager, or the Linux keyring. The safest starting point is to migrate plaintext secrets already present in `~/.mcp/configs.json`:
 
 ```bash
-# Store a token. `--vendor` is required: api-token slots are per-product,
-# so the same email can hold one Bitbucket-scoped token, one Jira-scoped
-# token, etc. (no echo when stdin is a tty; pipes work too).
-mcp-atlassian creds set --kind api-token --vendor bitbucket --principal you@company.com
-
-# NinjaOne console-login secrets live in their own vendor-scoped slots.
-mcp-atlassian creds set --kind password    --vendor ninjaone --principal you@company.com
-mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal you@company.com
-
-# A vendor token with no account is filed under its own key name.
-mcp-atlassian creds set --kind token --vendor slack --principal SLACK_TOKEN
-mcp-atlassian creds set --kind SLACK_TOKEN --vendor slack --principal SLACK_TOKEN  # same slot
-
-# `creds migrate` does all of the above in one pass: it reads
-# ~/.mcp/configs.json, moves every registered secret into the keychain, and
-# replaces each with the "keychain" sentinel (leaving a .bak alongside).
-mcp-atlassian creds migrate
-mcp-atlassian creds set --kind api-token --vendor jira       --principal you@company.com
-mcp-atlassian creds set --kind api-token --vendor confluence --principal you@company.com
-
-# App-passwords are Bitbucket-only.
-mcp-atlassian creds set --kind app-password --vendor bitbucket --principal your-bb-username
-
-# Confirm an entry exists (prints the last 4 chars only).
-mcp-atlassian creds get --kind api-token --vendor bitbucket --principal you@company.com
-
-# Remove an entry.
-mcp-atlassian creds rm --kind api-token --vendor bitbucket --principal you@company.com
-
-# One-shot migration: walk each vendor section in ~/.mcp/configs.json,
-# copy each token to its own scoped keychain entry, replace each section's
-# secret with the "keychain" sentinel, and write a .bak. Disagreement on
-# the secret value across vendors is fine — three sections with three
-# tokens produce three independent keychain entries.
-mcp-atlassian creds migrate
-
-# `creds migrate --force` overrides the stale-clobber guard: when the keychain
-# already holds a different value than configs.json, force overwrites it
-# (logged with both fingerprints). Without --force, that's a hard error so a
-# rotated keychain entry can't be silently regressed by a stale file value.
-mcp-atlassian creds migrate --force
+mcp-devtools creds migrate
 ```
 
-There is no `creds list` — `keyring`'s `Entry` API has no portable enumeration. Inspect entries through the OS-native UI: **Keychain Access** on macOS, **`credwiz.exe`** on Windows, **`seahorse`** on Linux. Look for service names of the form `mcp-server-atlassian.api-token.<vendor>` or `mcp-server-atlassian.app-password.bitbucket`.
+Migration creates a backup, writes each secret to its vendor-scoped keychain slot, and replaces the config value with `"keychain"`. You can also manage a slot directly:
 
-#### After migrating
-
-`~/.mcp/configs.json` will look like this:
-
-```json
-{
-  "bitbucket": {
-    "environments": {
-      "ATLASSIAN_USER_EMAIL": "you@company.com",
-      "ATLASSIAN_API_TOKEN": "keychain"
-    }
-  }
-}
+```bash
+mcp-devtools creds set --kind SLACK_TOKEN --vendor slack --principal SLACK_TOKEN
+mcp-devtools creds get --kind SLACK_TOKEN --vendor slack --principal SLACK_TOKEN
+mcp-devtools creds rm  --kind SLACK_TOKEN --vendor slack --principal SLACK_TOKEN
 ```
 
-Restart your MCP client. The first time the server resolves the credential it logs an info-level breadcrumb (`source=keychain, kind=api-token, vendor=…, principal=…`) so you can confirm the keychain path was taken and which scope hit. After validating, delete the `.bak` file `creds migrate` left behind.
+Run `mcp-devtools creds --help` for all supported kinds and vendors. New entries use the `mcp-server-devtools.*` service prefix; reads fall back to the former `mcp-server-atlassian.*` prefix so existing credentials remain usable after the rename.
 
-#### Platform notes
+### Upgrading from mcp-server-atlassian
 
-- **macOS unsigned dev builds**: `keyring` keys ACLs by code signature, so every `cargo build` produces a new signature and Keychain prompts to re-grant access. Click *Always Allow* per rebuild, or install a release-signed binary at `~/.cargo/bin/mcp-atlassian` and invoke that. Same pattern as 1Password CLI, AWS Vault, and `gh`.
-- **Windows**: silent under the user account that ran `creds set`. If your MCP client runs as a different user, the keychain entry won't be visible — re-run `creds set` from that account.
-- **Linux desktop**: `libsecret` and `dbus` need to be available at build time. On Debian/Ubuntu: `sudo apt install libsecret-1-dev libdbus-1-dev`. The keyring agent (GNOME Keyring or KWallet) must be running and unlocked at runtime; both auto-unlock at GUI login on standard desktop distros.
-- **Headless Linux**: build with `cargo build --release --no-default-features` to drop the keyring dep entirely. The CLI subcommands and sentinel resolution still compile but every keychain operation returns `KeychainError::Unavailable`. Keep using env vars / `~/.mcp/configs.json` plaintext in this mode.
+Replace `mcp-atlassian` with `mcp-devtools` in MCP client commands and executable paths. Existing global config sections under `@huskercane/mcp-server-atlassian` or `mcp-server-atlassian`, and existing keychain entries with the old service prefix, remain readable as compatibility fallbacks. New configuration and credentials use the `mcp-server-devtools` identifiers.
 
-## MCP client configuration
+## Connect an MCP client
+
+stdio is the default transport. Point your client at the absolute path to `mcp-devtools` and provide configuration either in the client or through the sources above.
 
 ### Codex
 
-Codex supports stdio MCP servers in both the CLI and IDE extension. Add this binary once and Codex can call the `bb_*`, `jira_*`, `conf_*`, and native vendor tools from your coding sessions.
-
-Using the Codex CLI:
-
 ```bash
-codex mcp add atlassian \
-    --env ATLASSIAN_USER_EMAIL=your.email@company.com \
-    --env ATLASSIAN_API_TOKEN=ATATT... \
-    -- /absolute/path/to/mcp-atlassian
+codex mcp add devtools \
+  --env ATLASSIAN_USER_EMAIL=you@example.com \
+  --env ATLASSIAN_API_TOKEN=ATATT... \
+  --env ATLASSIAN_SITE_NAME=mycompany \
+  -- /absolute/path/to/mcp-devtools
 ```
 
-Or edit `~/.codex/config.toml` directly:
+Or add it to `~/.codex/config.toml`:
 
 ```toml
-[mcp_servers.atlassian]
-command = "/absolute/path/to/mcp-atlassian"
+[mcp_servers.devtools]
+command = "/absolute/path/to/mcp-devtools"
 
-[mcp_servers.atlassian.env]
-ATLASSIAN_USER_EMAIL = "your.email@company.com"
+[mcp_servers.devtools.env]
+ATLASSIAN_USER_EMAIL = "you@example.com"
 ATLASSIAN_API_TOKEN = "ATATT..."
-# Required before calling jira_* or conf_* tools:
 ATLASSIAN_SITE_NAME = "mycompany"
 ```
 
-Codex also supports project-scoped MCP configuration in `.codex/config.toml` for trusted projects. Use `/mcp` inside the Codex TUI to confirm the server is loaded.
-
 ### Claude Desktop
 
-Edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows):
+Add the server to `claude_desktop_config.json`:
 
 ```json
 {
   "mcpServers": {
-    "bitbucket": {
-      "command": "/absolute/path/to/mcp-atlassian",
+    "devtools": {
+      "command": "/absolute/path/to/mcp-devtools",
       "env": {
-        "ATLASSIAN_USER_EMAIL": "your.email@company.com",
-        "ATLASSIAN_API_TOKEN": "ATATT..."
+        "ATLASSIAN_USER_EMAIL": "you@example.com",
+        "ATLASSIAN_API_TOKEN": "ATATT...",
+        "ATLASSIAN_SITE_NAME": "mycompany"
       }
     }
   }
 }
 ```
 
-Restart Claude Desktop. The server appears in the status bar. Stdio transport is the default — no `TRANSPORT_MODE` needed.
+Restart Claude Desktop after changing its configuration.
 
-### Any MCP-compatible client
-
-Point the client at the binary. Stdio is the default transport. If your client uses streamable HTTP, run the binary with `TRANSPORT_MODE=http` and point the client at `http://127.0.0.1:3000/mcp`.
-
-### Run in the background on Windows
-
-[`71-mcp.ps1`](71-mcp.ps1) starts one hidden, per-user HTTP server and leaves it running after the launching PowerShell window closes. It checks the executable's full path before starting, so opening more PowerShell sessions does not create duplicate server processes.
-
-By default, the script looks for the executable at `%LOCALAPPDATA%\Programs\mcp-atlassian\mcp-atlassian.exe` and listens on port `3001`. Install the downloaded executable there, or edit `ExecutablePath` and `Port` near the top of the script. Then start it from the repository directory:
-
-```powershell
-pwsh -NoProfile -File .\71-mcp.ps1
-
-# Confirm the background server is responding.
-Invoke-WebRequest http://127.0.0.1:3001/
-```
-
-Point an HTTP MCP client at `http://127.0.0.1:3001/mcp`. To start the server automatically the next time an interactive PowerShell session opens, add this line to the PowerShell profile shown by `$PROFILE`:
-
-```powershell
-. 'C:\path\to\mcp-server-atlassian-bitbucket-rs\71-mcp.ps1'
-```
-
-The script defines both `Start-McpServer` and the backwards-compatible `StartMcpServer` alias. To stop the exact executable that the default script launches:
-
-```powershell
-$binaryPath = Join-Path $env:LOCALAPPDATA 'Programs\mcp-atlassian\mcp-atlassian.exe'
-$binary = (Resolve-Path -LiteralPath $binaryPath).ProviderPath
-Get-Process -Name 'mcp-atlassian' -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq $binary } |
-    Stop-Process
-```
-
-The script sets `TRANSPORT_MODE=http`, `PORT`, `LOG_STDERR`, and `RUST_LOG` only for the child process. Vendor configuration is inherited from the launching environment, but `~/.mcp/configs.json` is recommended for a background process because it does not depend on which PowerShell session launched it. This is not a Windows Service: it does not run before login or automatically restart after a reboot. The profile entry starts it when PowerShell next opens; use Task Scheduler or a service wrapper if it must start at Windows boot.
-
-## Available tools
-
-Sixty-three tools across fourteen vendor families. The Atlassian tool names (`bb_*`, `jira_*`, `conf_*`) match the TS references one-to-one; the `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, `sonarqube_*`, `splunk_*`, `ninjaone_*`, and `wrds_*` tools are native additions with no TS port. The four `wrds_*` tools require the `wrds` feature (default on).
-
-### Bitbucket (`bb_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `bb_get` | read-only, idempotent | GET any Bitbucket API endpoint |
-| `bb_post` | mutating | POST to any endpoint |
-| `bb_put` | mutating, idempotent | PUT to any endpoint |
-| `bb_patch` | mutating | PATCH any endpoint |
-| `bb_delete` | destructive, idempotent | DELETE any endpoint |
-| `bb_clone` | mutating | Clone a repository over SSH (falling back to HTTPS) |
-
-The `/2.0` API prefix is prepended automatically.
-
-### Jira (`jira_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `jira_get` | read-only, idempotent | GET any Jira API endpoint |
-| `jira_post` | mutating | POST to any endpoint (e.g. create issue, comment) |
-| `jira_put` | mutating, idempotent | PUT to any endpoint |
-| `jira_patch` | mutating | PATCH any endpoint (partial issue update) |
-| `jira_delete` | destructive, idempotent | DELETE any endpoint |
-
-Jira paths pass through verbatim — supply the full `/rest/api/3/...` path. Requires `ATLASSIAN_SITE_NAME` to be set; missing site name surfaces as an authentication error at call time.
-
-### Confluence (`conf_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `conf_get` | read-only, idempotent | GET any Confluence API endpoint |
-| `conf_post` | mutating | POST to any endpoint (e.g. create page, comment) |
-| `conf_put` | mutating, idempotent | PUT to any endpoint (e.g. replace page content) |
-| `conf_patch` | mutating | PATCH any endpoint (partial updates) |
-| `conf_delete` | destructive, idempotent | DELETE any endpoint |
-
-Confluence paths pass through verbatim — supply the full `/wiki/api/v2/...` (preferred) or `/wiki/rest/api/...` (CQL search) path. Shares `ATLASSIAN_SITE_NAME` with Jira; missing site name surfaces as an authentication error at call time. Confluence treats 403 as `API_ERROR/Access denied` (not `auth_invalid` like Jira), preserving the upstream TS asymmetry.
-
-### Zoom (`zoom_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `zoom_get` | read-only, idempotent | GET any Zoom API v2 endpoint (schedule, meeting details, users, "search") |
-| `zoom_post` | mutating | POST to any endpoint (e.g. create a meeting) |
-| `zoom_put` | mutating, idempotent | PUT to any endpoint (e.g. end a meeting, update settings) |
-| `zoom_patch` | mutating | PATCH any endpoint (e.g. reschedule a meeting) |
-| `zoom_delete` | destructive, idempotent | DELETE any endpoint (e.g. cancel a meeting) |
-
-Zoom paths pass through verbatim relative to the `https://api.zoom.us/v2` base — supply e.g. `/users/me/meetings` (no version segment). There is **no separate search tool**: listing and searching are just `zoom_get` against the right path (`/users/me/meetings`, `/contacts?search_key=…`, `/users`, …). Authenticates with Server-to-Server OAuth; credentials (`ZOOM_ACCOUNT_ID` + `ZOOM_CLIENT_ID` + `ZOOM_CLIENT_SECRET`) are read from the `zoom` config section / environment (plaintext — the OS-keychain sentinel is Atlassian-only). Missing credentials surface as an authentication error at call time, so a non-Zoom deployment boots without them. The bearer is cached per server instance and renewed 60s before expiry.
-
-> **Starting a meeting** is not a REST action: `zoom_post /users/me/meetings` returns a `start_url` the host opens to launch the Zoom client. **Reminders** are likewise not an API call — drive them from your scheduler (e.g. a cron/loop agent that polls `zoom_get /users/me/meetings`), not from this server.
-
-### CircleCI (`circleci_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `circleci_get` | read-only, idempotent | GET any CircleCI API v2 endpoint (pipelines, workflows, jobs, insights, `/me`) |
-| `circleci_logs` | read-only, idempotent | Fetch raw step logs for a job using its `job_number` |
-| `circleci_post` | mutating | POST to any endpoint (e.g. trigger a pipeline, cancel/rerun a workflow) |
-| `circleci_put` | mutating, idempotent | PUT to any endpoint (rarely used in v2) |
-| `circleci_patch` | mutating | PATCH any endpoint (e.g. update a scheduled pipeline) |
-| `circleci_delete` | destructive, idempotent | DELETE any endpoint (e.g. remove an env var, schedule, or context) |
-
-CircleCI paths pass through verbatim relative to the `https://circleci.com/api/v2` base — supply e.g. `/project/{project-slug}/pipeline` (no version segment), where `project-slug` is `<vcs>/<org>/<repo>` (e.g. `gh/acme/web`) or `circleci/<org-id>/<project-id>`. There is **no separate search tool**: listing is just `circleci_get` against the right path. Authenticates with a personal API token (`CIRCLECI_TOKEN`, read from the `circleci` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-CircleCI deployment boots without it. Pagination is token-based: pass a response's `next_page_token` back as the `page-token` query param. Raw logs are exposed through `circleci_logs`, which takes `projectSlug` plus a job `jobNumber`; it supports `gh/...` and `bb/...` slugs because CircleCI's older log-discovery endpoint is VCS-path based.
-
-Build logs can be much larger than an MCP response. `circleci_logs` therefore streams selected action bodies into atomic process-owned part artifacts, then assembles the ordered final JSON artifact with a fixed 64 KiB copy buffer. It returns the path, opaque artifact ID, size, step/action counts, and a bounded inline preview. Use `stepNumber` to retrieve one one-based step, `failedOnly: true` to avoid downloading successful action output, and `condensed: true` with optional `contextLines` (default 3, maximum 20) to return error-like lines plus surrounding context. Selected action outputs use bounded concurrency (eight at a time), retain CircleCI order, enforce the byte limit while consuming every chunk, and retry transient connection/timeouts plus HTTP 429/502/503/504 responses up to three attempts with backoff and `Retry-After` support. Graceful server shutdown deletes that process's temporary artifacts; startup removes artifacts abandoned by crashed or forcibly terminated processes without touching directories owned by other running server processes.
-
-For example, the usual failure-focused request is `circleci_logs` with `{"projectSlug":"gh/acme/web","jobNumber":123,"failedOnly":true,"condensed":true,"contextLines":5}`. Omit the filters when you need a complete job capture; the MCP response remains bounded while the returned file contains every selected step and action.
-
-On streamable-HTTP deployments, download the returned `/artifacts/{artifactId}` path. It streams from disk and supports `Accept-Ranges: bytes`, `Range`, `If-Range`, `ETag`, `206 Partial Content`, and `Content-Range`, so interrupted downloads can resume without retransmitting earlier bytes. For stdio or MCP clients that cannot open an HTTP download, call `artifact_read` with the opaque ID and continue using each response's `nextOffset`; chunks are base64 encoded and capped at 1 MiB. Complete upstream CircleCI responses negotiate gzip/Brotli when supported; resumable artifact downloads remain an uncompressed stable byte representation so offsets never change.
-
-### Slack (`slack_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `slack_get` | read-only, idempotent | GET any Slack Web API method (`/conversations.list`, `/users.info`, `/auth.test`, …) |
-| `slack_post` | mutating | POST to any method (e.g. `/chat.postMessage`, `/conversations.create`, `/reactions.add`) |
-| `slack_put` | mutating, idempotent | PUT to any method (rarely used — Slack is GET/POST) |
-| `slack_patch` | mutating | PATCH any method (rarely used) |
-| `slack_delete` | destructive, idempotent | DELETE verb (rarely used — Slack deletes via POST methods like `/chat.delete`) |
-
-Slack endpoints are *methods* (`/conversations.list`), passed verbatim relative to the `https://slack.com/api` base. Almost everything is GET (query params) or POST (JSON body); the PUT/PATCH/DELETE verbs exist for completeness but Slack rarely uses them. Authenticates with a bot/user OAuth token (`SLACK_TOKEN`, read from the `slack` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`. Missing the token surfaces as an authentication error at call time, so a non-Slack deployment boots without it. **Slack's defining quirk:** the Web API returns `200 OK` even on logical failures, signalling the real outcome with `{"ok": false, "error": "<code>"}` in the body — this server inspects that envelope and reclassifies `ok: false` as a typed error (auth codes → authentication error, `ratelimited` → 429, `*_not_found` → 404), so a successful tool result always means `ok: true`. Pagination is cursor-based: read `response_metadata.next_cursor` and pass it back as the `cursor` query param.
-
-### Postman (`postman_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `postman_get` | read-only, idempotent | GET any Postman API endpoint (`/me`, `/workspaces`, `/collections`, `/environments`, …) |
-| `postman_post` | mutating | POST to any endpoint (e.g. create a collection, environment, or workspace) |
-| `postman_put` | mutating, idempotent | PUT to any endpoint (replace a collection / environment) |
-| `postman_patch` | mutating | PATCH any endpoint (e.g. rename a workspace) |
-| `postman_delete` | destructive, idempotent | DELETE any endpoint (remove a collection, environment, workspace, …) |
-
-Postman paths pass through verbatim relative to the `https://api.getpostman.com` base — supply e.g. `/collections` or `/collections/{uid}` (item endpoints take a `uid` of the form `{ownerId}-{guid}`). Authenticates with an API key (`POSTMAN_API_KEY`, read from the `postman` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`X-API-Key`** header rather than `Authorization` — Postman is the only vendor here that authenticates outside the standard auth header. Missing the key surfaces as an authentication error at call time, so a non-Postman deployment boots without it. Most write payloads are wrapped in a top-level resource key (`{"collection": {…}}`, `{"environment": {…}}`).
-
-### New Relic (`newrelic_query`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `newrelic_query` | mutating, open-world | Run any NerdGraph (GraphQL) query against New Relic — NRQL queries, entity search, dashboards, alerts, account data |
-
-New Relic's only API is **NerdGraph**, a single GraphQL endpoint, so unlike the REST vendors there are no five verbs — just one tool that POSTs a GraphQL document (and optional `variables`) to `/graphql`. NRQL queries are run by wrapping them in NerdGraph, e.g. `{ actor { account(id: 123) { nrql(query: "SELECT count(*) FROM Transaction SINCE 1 hour ago") { results } } } }`. Find your account id with `{ actor { accounts { id name } } }`. Authenticates with a User API key (`NEW_RELIC_API_KEY`, read from the `newrelic` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent in the **`API-Key`** header. Missing the key surfaces as an authentication error at call time, so a non-New-Relic deployment boots without it. **NerdGraph's defining quirk:** query, validation, and most permission failures come back as `200 OK` with a top-level `errors` array — this server reclassifies a non-empty `errors` array as a typed error, so a successful tool result has no `errors`. EU-region accounts must set `NEW_RELIC_REGION=eu`. The `newrelic_query` tool is marked mutating because NerdGraph mutations (creating dashboards, alert policies, …) share the same endpoint as reads.
-
-### Grafana (`grafana_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `grafana_query_logs` | read-only, idempotent | Read logs by running a LogQL query against a Loki datasource via Grafana's datasource proxy |
-| `grafana_list_datasources` | read-only, idempotent | List configured datasources to discover a Loki datasource's `uid` |
-
-Grafana is a query/visualization layer, not a log store — "reading logs from Grafana" means running a **LogQL** query against a **Loki** datasource through Grafana's **datasource proxy** (`GET /api/datasources/proxy/uid/{uid}/loki/api/v1/query_range`). First call `grafana_list_datasources` and copy the `uid` of an entry whose `type` is `loki` (filter with `jq`: `[?type=='loki'].{name: name, uid: uid}`), then pass it to `grafana_query_logs` as `datasourceUid` along with a `query` (LogQL) and optional `start`/`end`/`limit`/`direction`/`step`. Authenticates with a service-account token (`GRAFANA_TOKEN`, read from the `grafana` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only) sent as `Authorization: Bearer`; the instance base comes from `GRAFANA_URL`. Both are checked at call time, so a non-Grafana deployment boots without them. The same two tools work unchanged against self-hosted Grafana and Grafana Cloud. A bad LogQL query comes back from Loki as an HTTP error and is surfaced as a typed error.
-
-### SonarQube / SonarCloud (`sonarqube_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `sonarqube_quality_gate` | read-only, idempotent | Explain failed quality-gate conditions by project, analysis, or CI `ceTaskId` |
-| `sonarqube_search_issues` | read-only, idempotent | List the bugs, vulnerabilities, and code smells behind a failed gate |
-| `sonarqube_get` | read-only, idempotent | Read any other SonarQube Web API endpoint |
-
-The usual CI investigation is `circleci_logs` → `sonarqube_quality_gate` → `sonarqube_search_issues`. Authentication uses `SONARQUBE_TOKEN` as a bearer token and `SONARQUBE_URL` as the instance base; SonarCloud callers can pass their organization key. Missing configuration surfaces at tool-call time, so non-Sonar deployments still boot normally.
-
-### Splunk (`splunk_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `splunk_search` | read-only, idempotent | Run a bounded SPL search through `/services/search/v2/jobs/export` |
-| `splunk_create_job` | mutating | Start an asynchronous SPL search and return its `sid` |
-| `splunk_job_results` | read-only, idempotent | Page final results for a search job |
-| `splunk_list_saved_searches` | read-only, idempotent | List reports, alerts, and other saved searches visible to the token |
-
-The normal flow is `splunk_search` for small, bounded queries and `splunk_create_job` → `splunk_job_results` for longer or paged searches. Search POSTs use Splunk's required URL-encoded form body and request `json_rows`; job results use the versioned v2 endpoint. REST searches default to all time when no time modifiers are present, so provide `earliestTime` and `latestTime` or put equivalent bounds in the SPL. Keep responses small with `head`, `fields`, `table`, or aggregation commands. Authentication uses `SPLUNK_TOKEN` and `SPLUNK_URL`; modern tokens use `Bearer`, while `SPLUNK_AUTH_SCHEME=splunk` supports legacy session keys.
-
-Splunk search and job-result artifacts are normalized incrementally to canonical NDJSON. The adapter interprets only `_time` as a timestamp, accepting RFC3339 or Unix epoch seconds with at most nanosecond precision; a present invalid `_time` fails normalization. It does not guess the semantics of other time-like fields. Source identity is a deterministic combination of the documented `source`, `sourcetype`, `host`, and `index` string fields that are present. `_raw` is the payload when present; for transforming/statistical searches without `_raw`, the complete scalar field map is encoded as the payload. Remaining scalar fields are retained as metadata. Splunk does not guarantee that every SPL pipeline returns `_raw` or the source fields, so their absence is preserved rather than assigned an inferred meaning. Missing, duplicate, or out-of-order field declarations, width mismatches, nested cell values, malformed JSON, invalid timestamps, and oversized rows or canonical records are hard failures; records are never skipped or truncated.
-
-### NinjaOne (`ninjaone_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `ninjaone_login` | mutating, non-destructive | Mint a console session key for the configured account |
-| `ninjaone_get` | read-only, idempotent | GET any public `/v2/...` or private `/ws/...` endpoint |
-| `ninjaone_post` | mutating, potentially destructive | POST JSON, including action endpoints |
-| `ninjaone_put` | mutating, idempotent | PUT JSON to replace a resource |
-| `ninjaone_patch` | mutating | PATCH a resource |
-| `ninjaone_delete` | destructive, idempotent | DELETE a resource |
-
-Each call supplies only a relative `path` and an optional configured `server` alias. The base URL is resolved from `NINJAONE_URL` or `NINJAONE_SERVERS`, preventing an MCP caller from sending the server-held credential to an arbitrary URL. Because NinjaOne action endpoints can use POST for destructive work, `ninjaone_post` carries the destructive annotation.
-
-#### Session-key login
-
-The private `/ws/...` console endpoints need a `sessionKey`. Rather than copying one out of a browser, set `NINJAONE_EMAIL` + `NINJAONE_PASSWORD` (or the per-server `email` + `password` below) and call `ninjaone_login`, which performs the console exchange the browser performs — `POST /ws/account/authentication-state`, `POST /ws/account/login`, then `POST /ws/account/mfa-login` when the account uses MFA:
-
-```json
-{ "server": "qa", "mfaCode": "381164" }
-```
-
-Only `mfaCode` (and, for a tenant that reports `recaptchaRequired`, `recaptchaToken`) is passed per call; the email and password stay server-side. The minted key is held **in memory for the life of the server process**, keyed by server URL and account, and is never written to disk or returned in full — the response reports an 8-character prefix, the account it belongs to, the division/user UIDs, and whether MFA was used.
-
-Subsequent calls replay it the way the browser does, as the cookie the console sets on `mfa-login` (`Cookie: sessionKey=...`), not as a bare header. Setting `NINJAONE_SESSION_COOKIE` by hand remains equivalent; `NINJAONE_SESSION_KEY` sends the same value as a `sessionKey` header instead.
-
-#### One account per environment
-
-A NinjaOne account is the access boundary: the division, the role, and what the session can see all follow from which account logged in. One person therefore holds a different account per environment, not one account for all of them. Put each environment's login on its own `NINJAONE_SERVERS` entry:
-
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_SERVERS": "{\"qa4-1\":{\"url\":\"https://qa4.engineering-env.ninja\",\"prefix\":\"/swb/s1\",\"email\":\"qa4-operator@example.com\",\"password\":\"keychain\",\"totpSecret\":\"keychain\"},\"qa5\":{\"url\":\"https://qa5.example\",\"email\":\"qa5-operator@example.com\",\"password\":\"keychain\",\"totpSecret\":\"keychain\"}}"
-    }
-  }
-}
-```
-
-An entry that names its own `email` is a **self-contained principal**: its password and MFA source come from that entry (or from the keychain under that email), and the top-level `NINJAONE_PASSWORD` / `NINJAONE_TOTP_COMMAND` / `NINJAONE_TOTP_SECRET` are not consulted for it. That is deliberate — those unlock a *different* account, and quietly sending one account's password to another's login is how a real person's account gets locked out. An entry with no `email` inherits the top-level keys exactly as before, so a single-account setup needs no change.
-
-Sessions are cached per (server URL, account), so `ninjaone_login` on `qa4-1` does not authorise calls on `qa5`; each environment is logged into once per server process. The login response names the account and division it got, which is the answer to "which environment am I actually in".
-
-Per-server `password` and `totpSecret` take the same `"keychain"` sentinel as the top-level keys, resolved against that entry's `email`:
+### Streamable HTTP
 
 ```bash
-mcp-atlassian creds set --kind password    --vendor ninjaone --principal qa4-operator@example.com
-mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal qa4-operator@example.com
+TRANSPORT_MODE=http PORT=3000 ./mcp-devtools
 ```
 
-`creds migrate` also walks these: it files each entry's plaintext `password` and `totpSecret` under that entry's `email` and rewrites the field to `"keychain"`, so an existing multi-environment config moves in one command. Two caveats specific to the nested form. Migrate refuses an entry whose secret has no account to file it under — no `email` on the entry and no top-level `NINJAONE_EMAIL` — since a secret in a slot nothing reads is worse than the plaintext it replaced. And because the map is JSON encoded as a single config string, rewriting it re-encodes that string: its internal whitespace and escaping are normalised, though the content is not. `totpCommand` is never migrated; it is a command line, not a secret, and its whole point is that the seed stays in the vault.
+Use `http://127.0.0.1:3000/mcp` as the MCP endpoint. `GET /` returns a health response. The server binds to loopback, enforces a local-origin allowlist and a 1 MiB request-body limit, and supports resumable downloads at `/artifacts/{artifactId}`.
 
-#### Supplying the MFA code automatically
+## Tool behavior
 
-Rather than integrating with any particular password manager, `NINJAONE_TOTP_COMMAND` names a command that prints the current code to stdout. Every vault CLI already emits a finished code, so no TOTP seed reaches this server or its config file, and the server takes no dependency on the vault you happen to use:
+The REST-style tools accept a relative `path`, optional `queryParams`, optional `jq` JMESPath projection, and `outputFormat` (`toon` by default or `json`). Bitbucket automatically prefixes `/2.0`; Jira, Confluence, and the other REST integrations use their documented API-relative paths.
 
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_TOTP_COMMAND": "bw get totp ninja-qa5"
-    }
-  }
-}
-```
+Specialized tools use typed inputs:
 
-`op item get ninja-qa5 --otp`, `oathtool --totp -b "$(pass ninja/qa5)"`, `ykman oath accounts code -s ninja-qa5`, or any script works the same way. The command runs through the platform shell (`sh -c`, or `cmd /C` on Windows) with this process's environment, so vault session handles such as `BW_SESSION` are inherited — the vault must already be unlocked, since the command is given 15 seconds and nothing is attached to its stdin to answer a prompt.
+- `circleci_logs` can select failed steps, condense output, and spill large logs to a resumable artifact.
+- `edx_discussion_*` provides typed course, topic, thread, comment, and create operations.
+- `newrelic_query` accepts a NerdGraph query and variables.
+- `grafana_query_logs` runs LogQL through a configured Loki datasource.
+- `sonarqube_quality_gate` can resolve the `ceTaskId` printed by CI scanners.
+- `splunk_*` supports bounded export searches and asynchronous jobs.
+- `ninjaone_*` only sends credentials to configured server aliases, never a caller-supplied host.
+- `wrds_query` accepts one read-only `SELECT` or `VALUES` query and applies a row limit.
 
-For several accounts across environments — different roles, different orgs — put the command on the server alias instead, where it overrides the top-level default (and, when that alias also names an `email`, replaces it entirely):
+Tool schemas include read-only, idempotent, and destructive annotations so compatible MCP clients can apply appropriate confirmation policies.
 
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_SERVERS": "{\"qa5\":{\"url\":\"https://qa5.example\",\"totpCommand\":\"bw get totp ninja-qa5\"},\"dev2\":{\"url\":\"https://dev2.example\",\"totpCommand\":\"bw get totp ninja-dev2\"}}"
-    }
-  }
-}
-```
+## Command-line API
 
-With this configured, `ninjaone_login {"server": "qa5"}` needs no arguments at all. An explicit `mfaCode` still overrides the command, and with neither configured the login reports which one to supply. Note that `NINJAONE_TOTP_COMMAND` is executable configuration: it is read only from config, never from a tool argument.
-
-Where no vault CLI is reachable from the machine running the server, `NINJAONE_TOTP_SECRET` takes the `otpauth://totp/...` URI (or a bare base32 seed) and derives the code in-process — RFC 6238, verified against the RFC's published test vectors:
-
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_TOTP_SECRET": "otpauth://totp/NinjaOne:you%40example.com?secret=GEZDGNBVGY3TQOJQ&issuer=NinjaOne"
-    }
-  }
-}
-```
-
-The `algorithm`, `digits`, and `period` parameters are honoured, defaulting to SHA1 / 6 / 30 as NinjaOne issues them; the per-server override is `totpSecret`. Understand the trade before choosing it: this places a **long-lived seed on the machine**, which is precisely what `NINJAONE_TOTP_COMMAND` avoids by keeping the seed inside the vault and taking only a 30-second code. It buys having no external moving parts. The command is tried first when both are configured.
-
-Keep both the password and the seed out of the config file by putting them in the OS keychain and leaving the `"keychain"` sentinel behind:
+The command line directly exposes Atlassian REST operations and credential management:
 
 ```bash
-mcp-atlassian creds set --kind password    --vendor ninjaone --principal you@example.com
-mcp-atlassian creds set --kind totp-secret --vendor ninjaone --principal you@example.com
+mcp-devtools bb get --path /workspaces
+mcp-devtools jira get --path /rest/api/3/myself
+mcp-devtools conf get --path /wiki/api/v2/spaces
+mcp-devtools creds --help
 ```
 
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_EMAIL": "you@example.com",
-      "NINJAONE_PASSWORD": "keychain",
-      "NINJAONE_TOTP_SECRET": "keychain"
-    }
-  }
-}
-```
+Use `--query-params`, `--body`, `--jq`, and `--output-format toon|json` as appropriate. Run `mcp-devtools --help` or a subcommand's `--help` for the authoritative option list. Other integrations are exposed through MCP rather than dedicated CLI groups.
 
-Both slots are keyed by `(kind, ninjaone, <email>)` — the top-level `NINJAONE_EMAIL`, or the server entry's own `email` — so several accounts across environments each get their own entry. The semantics match the Atlassian keys exactly: an explicit `"keychain"` whose entry is missing is a hard error naming the command to fix it, and omitting the key entirely still falls back to the keychain.
-
-Because the code is derived from the wall clock, a host whose clock has drifted beyond the server's tolerance will generate codes NinjaOne rejects — the usual TOTP caveat, and a reason to keep NTP running.
-
-One login therefore covers every later `ninjaone_*` call on that server, and it outranks a `NINJAONE_SESSION_KEY` left in config. When NinjaOne expires the session, the next call returns a `401`, the cached key is dropped, and the error says to call `ninjaone_login` again with a current code. Restarting the MCP server also requires a fresh login. Federated (SSO) accounts are refused before the password is sent — use `NINJAONE_SESSION_KEY` for those.
-
-To trace NinjaOne HTTP requests and responses, set `RUST_LOG=ninjaone_http=debug` (or enable global debug logging with `DEBUG=true`) before starting the server. The trace includes methods, URLs, statuses, and JSON bodies, but recursively redacts passwords, MFA/reCAPTCHA codes, login/session tokens, cookies, authorization values, and secrets. Non-JSON response content is omitted.
-
-#### Configure NinjaOne servers
-
-For one server, set a default URL and one authentication method in `~/.mcp/configs.json` (`$HOME\.mcp\configs.json` in PowerShell):
-
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_URL": "https://app.ninjarmm.com",
-      "NINJAONE_ACCESS_TOKEN": "your-oauth-access-token"
-    }
-  }
-}
-```
-
-For multiple environments, configure safe aliases with `NINJAONE_SERVERS`. A value can be a plain URL, or an object containing `url`, an environment-specific `prefix`, and that environment's own account (`email`, `password`, `totpCommand`, `totpSecret` — see [One account per environment](#one-account-per-environment)):
-
-```json
-{
-  "ninjaone": {
-    "environments": {
-      "NINJAONE_SERVERS": "{\"test\":{\"url\":\"https://test.example\",\"prefix\":\"/test-api\"},\"qa\":{\"url\":\"https://qa.example\",\"prefix\":\"/qa-api\"},\"prod\":\"https://app.ninjarmm.com\"}",
-      "NINJAONE_SESSION_COOKIE": "sessionKey=replace-me"
-    }
-  }
-}
-```
-
-`NINJAONE_SERVERS` is itself a JSON string because it lives inside the outer `configs.json`, so its quotes must be escaped as shown. With that configuration:
-
-- `{"server":"test","path":"/v2/devices"}` requests `https://test.example/test-api/v2/devices`.
-- `{"server":"qa","path":"/v2/devices"}` requests `https://qa.example/qa-api/v2/devices`.
-- Omitting `server` uses `NINJAONE_URL`; it is an error if no default URL is configured.
-
-The equivalent temporary PowerShell environment configuration is:
-
-```powershell
-$env:NINJAONE_SERVERS = '{"test":{"url":"https://test.example","prefix":"/test-api"},"qa":{"url":"https://qa.example","prefix":"/qa-api"}}'
-$env:NINJAONE_ACCESS_TOKEN = 'your-oauth-access-token'
-```
-
-Choose only the authentication carrier appropriate for the endpoint. Resolution order is `NINJAONE_ACCESS_TOKEN` (OAuth bearer), then `NINJAONE_SESSION_KEY` (`sessionKey` header), then `NINJAONE_SESSION_COOKIE` (exact `Cookie` header value). Authentication is currently shared by all configured aliases. Prefer the supported public `/v2/...` API; private `/ws/...` console endpoints and browser-session cookies can change or expire without notice.
-
-### WRDS (`wrds_*`)
-
-| Tool | Annotations | Use |
-|---|---|---|
-| `wrds_query` | read-only, idempotent | Run a read-only SQL `SELECT` against WRDS (e.g. `SELECT permno, date, ret FROM crsp.dsf WHERE …`) |
-| `wrds_list_libraries` | read-only, idempotent | List the WRDS libraries (PostgreSQL schemas) your account can access |
-| `wrds_list_tables` | read-only, idempotent | List the tables/views inside one library |
-| `wrds_describe_table` | read-only, idempotent | Describe a table's columns (name, type, nullability) |
-
-WRDS ([Wharton Research Data Services](https://wrds-www.wharton.upenn.edu/)) is a **PostgreSQL** data platform for finance/accounting/economics research, not an HTTP API — so these tools connect directly to `wrds-pgdata.wharton.upenn.edu:9737` over SSL (the access path the official `wrds` Python package wraps). A WRDS "library" is a Postgres **schema** and a dataset is a `library.table` (e.g. `crsp.dsf`, `comp.funda`, `ff.factors_daily`). The typical flow is **discover then query**: `wrds_list_libraries` → `wrds_list_tables` → `wrds_describe_table` to learn exact column names, then `wrds_query` with a tight `WHERE` and small `rowLimit` (WRDS tables are huge). Authenticates with a WRDS username + password (`WRDS_USERNAME` / `WRDS_PASSWORD`, read from the `wrds` config section / environment as plaintext — the OS-keychain sentinel is Atlassian-only); missing credentials surface as an authentication error at call time, so a non-WRDS deployment boots without them. **Safety:** every session is forced read-only (`default_transaction_read_only = on`) with a statement timeout, and `wrds_query` wraps the caller's SQL in a subquery so only a single `SELECT`/`VALUES` can run — writes, DDL, and multi-statement bodies are rejected. PostgreSQL renders each result set to JSON server-side (`to_jsonb`), so `jq`/`outputFormat` behave exactly as they do for the HTTP vendors. These tools require the `wrds` Cargo feature (on by default); a `--no-default-features` build omits them.
-
-### Shared inputs
-
-All API tools accept `path` (required), `queryParams` (optional JSON map), `jq` (optional JMESPath filter to reduce token cost), and `outputFormat` (`toon` default, `json` alternative). The exceptions are `newrelic_query`, which takes `query` (GraphQL string) and optional `variables` instead of `path`/`queryParams`; the `grafana_*` tools, which take typed inputs (`datasourceUid`/`query`/range knobs for `grafana_query_logs`; no path for either); the `splunk_*` tools, which take typed SPL, time-range, job, and pagination inputs; and the `wrds_*` tools, which take typed inputs (`sql` + optional `rowLimit` for `wrds_query`; `library`/`table` for the discovery tools; no path) and still honour `jq`/`outputFormat`.
-
-## Cross-vendor workflows
-
-This server ships **primitives, not orchestration**: it exposes raw HTTP verbs per vendor, and the *agent* chains them. There is no `do_everything(PROJ-123)` tool. The recipes below spell out the path patterns an agent needs, because the links *between* systems (Jira→PR, PR→build) are not stored anywhere — they're matched by issue-dev-panel data and by branch/commit.
-
-### From a Jira key to its PR, review state, and build
-
-Given `PROJ-123`:
-
-1. **Read the issue + get its numeric id.** `jira_get /rest/api/3/issue/PROJ-123` with `jq: "{id: id, key: key, summary: fields.summary, status: fields.status.name}"`. The dev-panel API in the next step needs the **numeric** `id`, not the key.
-2. **Find linked branches/PRs** (requires the Bitbucket–Jira integration to be enabled). `jira_get /rest/dev-status/latest/issue/detail` with `queryParams: {"issueId": "<numeric id>", "applicationType": "bitbucket", "dataType": "pullrequest"}` → returns `detail[].pullRequests[]` with each PR's `id`, `url`, `status`, and `source.branch`. Use `dataType: "branch"` for branches or `"repository"` for commits.
-3. **Read the PR and its review state.** `bb_get /repositories/{workspace}/{repo}/pullrequests/{pr-id}` for the PR; `bb_get .../pullrequests/{pr-id}/activity` for approvals and review activity.
-4. **Write a comment back.** `bb_post /repositories/{workspace}/{repo}/pullrequests/{pr-id}/comments` with `body: {"content": {"raw": "Build is green ✅"}}`.
-5. **Check build status for the PR's branch.** CircleCI is keyed by branch, not by PR: `circleci_get /project/{slug}/pipeline` with `queryParams: {"branch": "<source.branch from step 2>"}` → take the latest pipeline `id` → `circleci_get /pipeline/{id}/workflow` → `circleci_get /workflow/{workflow-id}/job`. Each job carries `status` and `job_number`. (`{slug}` is `<vcs>/<org>/<repo>`, e.g. `gh/acme/web`.)
-
-### Why did the build fail?
-
-From the failed job's `job_number` (step 5 above):
-
-- **Which step / how it failed:** `circleci_get /project/{slug}/job/{job-number}` → job status, duration, executor.
-- **Failed test details:** `circleci_get /project/{slug}/{job-number}/tests` → `items[]` with `name`, `result`, `message`, `file` — the cleanest "reason" **when the job stores test results** (`store_test_results`).
-- **Raw step logs:** `circleci_logs` with `projectSlug` and `jobNumber` → a bounded head/tail preview plus a temporary-file path containing the complete flattened output. For a faster diagnosis, add `failedOnly: true` and `condensed: true`; use `stepNumber` when the failed step is already known. This uses CircleCI's older build-details API plus per-step `output_url`s because raw logs are not exposed by the v2 job endpoint.
-
-> These chains are only as reliable as the underlying setup: step 2 needs the Jira↔Bitbucket app installed, and steps 5–6 assume the repo actually builds on CircleCI for that branch. The agent infers the PR→pipeline link from the branch name; it is not a stored relationship.
-
-## CLI usage
-
-Three subcommand groups — one per Atlassian vendor — keep the verbs unambiguous. (Zoom, CircleCI, Slack, Postman, edX, New Relic, Grafana, SonarQube, Splunk, and WRDS are MCP-only: there is no CLI group for them, so `zoom_*`, `circleci_*`, `slack_*`, `postman_*`, `edx_discussion_*`, `newrelic_query`, `grafana_*`, `sonarqube_*`, `splunk_*`, and `wrds_*` are reachable through an MCP client, not the command line.)
+## Development
 
 ```bash
-# Bitbucket
-./mcp-atlassian bb get --path "/workspaces"
-
-./mcp-atlassian bb get \
-    --path "/repositories/acme" \
-    --query-params '{"pagelen":"10"}' \
-    --jq 'values[].{slug:slug,language:language}'
-
-./mcp-atlassian bb post \
-    --path "/repositories/acme/website/pullrequests" \
-    --body '{"title":"Fix login","source":{"branch":{"name":"fix-login"}},"destination":{"branch":{"name":"main"}}}'
-
-./mcp-atlassian bb clone --repo-slug website --target-path ~/work
-
-# Jira
-./mcp-atlassian jira get --path "/rest/api/3/myself"
-
-./mcp-atlassian jira get \
-    --path "/rest/api/3/search/jql" \
-    --query-params '{"jql":"project=PROJ AND status=\"In Progress\"","maxResults":"10"}' \
-    --jq 'issues[*].{key:key,summary:fields.summary}'
-
-./mcp-atlassian jira post \
-    --path "/rest/api/3/issue" \
-    --body '{"fields":{"project":{"key":"PROJ"},"summary":"New task","issuetype":{"name":"Task"}}}'
-
-# Confluence
-./mcp-atlassian conf get --path "/wiki/api/v2/spaces"
-
-./mcp-atlassian conf get \
-    --path "/wiki/rest/api/search" \
-    --query-params '{"cql":"type=page AND space=DEV","limit":"10"}' \
-    --jq 'results[*].{id:id,title:title}'
-
-./mcp-atlassian conf post \
-    --path "/wiki/api/v2/pages" \
-    --body '{"spaceId":"123456","status":"current","title":"New Page","body":{"representation":"storage","value":"<p>Hello</p>"}}'
+cargo test
+cargo clippy --all-targets -- -D warnings
+cargo fmt --check
 ```
 
-Every verb accepts `--output-format toon|json` (default `toon`, parity with the TS Jira CLI). `--help` on any subcommand lists flags and expected input shapes.
-
-### Deprecated top-level Bitbucket verbs
-
-The original CLI exposed Bitbucket verbs without the `bb` prefix (`./mcp-atlassian get …`). Those are kept as hidden aliases for one release and emit a stderr deprecation notice when invoked. Migrate scripts to the explicit `bb` form before the next major release.
-
-## Transports
-
-- **stdio (default)**: MCP client spawns the binary, reads JSON-RPC framed by newlines on stdout, writes on stdin. Both the legacy `initialize` lifecycle and stateless MCP `2026-07-28` requests are supported. Ctrl-D / stdin-EOF triggers a clean exit.
-- **streamable HTTP**: `TRANSPORT_MODE=http ./mcp-atlassian`. Binds `127.0.0.1:${PORT:-3000}` and supports both protocol generations. Endpoints:
-  - `GET /` — plaintext health banner.
-  - `POST /mcp` — all MCP requests. MCP `2026-07-28` calls are stateless and require `MCP-Protocol-Version`, `Mcp-Method` (plus `Mcp-Name` for named operations), and matching protocol/client capabilities in request `_meta`; no `Mcp-Session-Id` is returned. `server/discover` advertises supported revisions before any tool call.
-  - Legacy clients may still call `initialize`; its response returns `Mcp-Session-Id`, which subsequent legacy requests echo.
-  - `GET /mcp` and `DELETE /mcp` remain available only for legacy session streams and teardown. MCP `2026-07-28` subscriptions use the stateless `subscriptions/listen` POST flow instead.
-  
-  Origin allowlist: only `http(s)://{localhost|127.0.0.1|[::1]}[:port]`. Request body cap: 1 MB. Idle sessions are reaped after 30 minutes of inactivity.
-
-Both transports respond cleanly to `SIGINT` / `SIGTERM`: in-flight HTTP sessions drain, stdio flushes its transport, then the process exits 0.
-
-## Compatibility with the TS references
-
-Byte-for-byte parity is preserved across **all three** TS servers on everything an MCP client or a CLI consumer can observe:
-- Tool names, descriptions, input schemas, and annotations.
-- Output formats (TOON default; JSON fallback) and error envelope shape (Bitbucket's four shapes, Jira's `errorMessages`/`errors` envelope plus OAuth-style and flat `message`, and Confluence's v2 `title`/`detail`, GraphQL-style `errors[]`, legacy `errorMessages`, and `statusCode`+`message` shapes).
-- Truncation rules (40,000-char threshold, trailing-newline cut, raw-response save path).
-- Config cascade (`os env > .env > ~/.mcp/configs.json`) and all alias keys for every vendor.
-- HTTP transport behavior (Origin check, CORS mirror, 1 MB body cap, reaper cadence).
-- Path normalisation: Bitbucket auto-prepends `/2.0`; Jira and Confluence pass through verbatim.
-
-The `--output-format` flag, which the TS Bitbucket CLI lacked, is now available on every verb across all three vendor groups (parity with the TS Jira CLI).
-
-Internally, configuration loading is read-only rather than mutating `std::env` (which is `unsafe` in Rust 2024 editions under threading). The observable behavior — which value wins for a given key — is identical, with the addition that vendor-scoped global-config sections no longer leak across products.
+CI builds and tests the default and headless feature sets across Linux, macOS, and Windows. Releases publish checksummed archives for all supported targets.
 
 ## License
 
-ISC, matching the TS reference.
+[ISC](Cargo.toml)

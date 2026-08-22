@@ -23,7 +23,7 @@
 // format. Both are test data, so the lints are noise here.
 #![allow(clippy::approx_constant, clippy::unreadable_literal)]
 
-use mcp_server_atlassian::format::{OutputFormat, render};
+use mcp_server_devtools::format::{OutputFormat, render};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 

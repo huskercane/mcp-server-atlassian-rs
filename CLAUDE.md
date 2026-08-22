@@ -1,7 +1,7 @@
-# mcp-server-atlassian (Rust)
+# mcp-server-devtools
 
-Single-binary MCP server (`mcp-atlassian`) exposing Atlassian (Bitbucket / Jira /
-Confluence) plus Zoom, CircleCI, Slack, Postman, edX, and New Relic as MCP tools.
+Single-binary MCP server (`mcp-devtools`) exposing Atlassian, Zoom, CircleCI,
+Slack, Postman, edX, New Relic, Grafana, SonarQube, Splunk, NinjaOne, and WRDS.
 Ports of the TS reference servers with byte-for-byte parity on tool descriptions,
 schemas, output formats, and error envelopes — preserve that parity when touching
 anything LLM-facing.

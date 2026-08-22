@@ -37,7 +37,7 @@ use tracing::{info, warn};
 use crate::constants::VERSION;
 use crate::server::session::{DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL, ReapingSessionManager};
 use crate::server::shutdown;
-use crate::tools::AtlassianServer;
+use crate::tools::DevtoolsServer;
 
 const BODY_LIMIT_BYTES: usize = 1_000_000;
 const DEFAULT_PORT: u16 = 3000;
@@ -66,7 +66,7 @@ pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let cancel = CancellationToken::new();
     let app = build_app_with_cancel(DEFAULT_IDLE_TTL, DEFAULT_SWEEP_INTERVAL, cancel.clone());
 
-    info!(%bound, "Atlassian MCP server listening on streamable-HTTP transport");
+    info!(%bound, "mcp-server-devtools listening on streamable-HTTP transport");
     let shutdown_cancel = cancel;
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -92,9 +92,9 @@ pub fn build_app_with_cancel(
 
     // Stateless MCP means each request carries its own protocol metadata; it
     // does not mean application state should be reconstructed per request.
-    // Build one handler and clone it here: AtlassianServer's clone shares its
+    // Build one handler and clone it here: DevtoolsServer's clone shares its
     // Arc<ServerState>, including NinjaOne console sessions and other caches.
-    let shared_server = AtlassianServer::new().map_err(|e| format!("AtlassianServer::new: {e}"));
+    let shared_server = DevtoolsServer::new().map_err(|e| format!("DevtoolsServer::new: {e}"));
     let streamable = StreamableHttpService::new(
         move || shared_server.clone().map_err(std::io::Error::other),
         Arc::clone(&manager),
@@ -243,7 +243,7 @@ async fn health() -> impl IntoResponse {
             header::CONTENT_TYPE,
             HeaderValue::from_static("text/plain; charset=utf-8"),
         )],
-        format!("Atlassian MCP Server v{VERSION} is running"),
+        format!("mcp-server-devtools v{VERSION} is running"),
     )
 }
 

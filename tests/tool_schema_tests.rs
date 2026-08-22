@@ -1,9 +1,9 @@
-//! Tool-schema sanity: round-trip the `AtlassianServer`'s advertised info,
+//! Tool-schema sanity: round-trip the `DevtoolsServer`'s advertised info,
 //! and verify the `args` types serialise with camelCase keys (TS parity).
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::tools::AtlassianServer;
-use mcp_server_atlassian::tools::args::{
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::tools::DevtoolsServer;
+use mcp_server_devtools::tools::args::{
     ArtifactReadArgs, CircleCiLogsArgs, OutputFormatArg, QueryParams, ReadArgs,
     SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs, WriteArgs,
 };
@@ -20,27 +20,27 @@ fn artifact_read_args_support_resume_offsets() {
     assert_eq!(args.offset, 65_536);
     assert_eq!(args.max_bytes, Some(32_768));
 }
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
-use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
-use mcp_server_atlassian::vendor::confluence::ConfluenceVendor;
-use mcp_server_atlassian::vendor::edx::EdxVendor;
-use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
-use mcp_server_atlassian::vendor::jira::JiraVendor;
-use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
-use mcp_server_atlassian::vendor::ninjaone::NinjaOneVendor;
-use mcp_server_atlassian::vendor::postman::PostmanVendor;
-use mcp_server_atlassian::vendor::slack::SlackVendor;
-use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
-use mcp_server_atlassian::vendor::splunk::SplunkVendor;
-use mcp_server_atlassian::vendor::zoom::ZoomVendor;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::bitbucket::BitbucketVendor;
+use mcp_server_devtools::vendor::circleci::CircleCiVendor;
+use mcp_server_devtools::vendor::confluence::ConfluenceVendor;
+use mcp_server_devtools::vendor::edx::EdxVendor;
+use mcp_server_devtools::vendor::grafana::GrafanaVendor;
+use mcp_server_devtools::vendor::jira::JiraVendor;
+use mcp_server_devtools::vendor::newrelic::NewRelicVendor;
+use mcp_server_devtools::vendor::ninjaone::NinjaOneVendor;
+use mcp_server_devtools::vendor::postman::PostmanVendor;
+use mcp_server_devtools::vendor::slack::SlackVendor;
+use mcp_server_devtools::vendor::sonarqube::SonarqubeVendor;
+use mcp_server_devtools::vendor::splunk::SplunkVendor;
+use mcp_server_devtools::vendor::zoom::ZoomVendor;
 use rmcp::ServerHandler;
 use serde_json::json;
 use std::collections::HashMap;
 
 #[test]
 fn server_info_reports_expected_identity() {
-    let server = AtlassianServer::with_components(
+    let server = DevtoolsServer::with_components(
         Config::from_map(HashMap::new()),
         build_client().unwrap(),
         BitbucketVendor::new(),
@@ -60,11 +60,11 @@ fn server_info_reports_expected_identity() {
     let info = server.get_info();
     assert_eq!(
         info.server_info.name,
-        mcp_server_atlassian::constants::PACKAGE_NAME
+        mcp_server_devtools::constants::PACKAGE_NAME
     );
     assert_eq!(
         info.server_info.version,
-        mcp_server_atlassian::constants::VERSION
+        mcp_server_devtools::constants::VERSION
     );
     assert!(info.capabilities.tools.is_some());
 }

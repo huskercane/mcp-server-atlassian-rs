@@ -3,12 +3,12 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::api::{HandleContext, handle_request, normalize_path};
-use mcp_server_atlassian::format::OutputFormat;
-use mcp_server_atlassian::tools::args::QueryParams;
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::api::{HandleContext, handle_request, normalize_path};
+use mcp_server_devtools::format::OutputFormat;
+use mcp_server_devtools::tools::args::QueryParams;
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::bitbucket::BitbucketVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
@@ -206,10 +206,7 @@ async fn missing_credentials_produces_auth_missing_error() {
     .await
     .unwrap_err();
 
-    assert_eq!(
-        err.kind,
-        mcp_server_atlassian::error::ErrorKind::AuthMissing
-    );
+    assert_eq!(err.kind, mcp_server_devtools::error::ErrorKind::AuthMissing);
 }
 
 #[tokio::test]

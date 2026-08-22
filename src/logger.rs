@@ -17,7 +17,7 @@
 //! - Filter precedence:
 //!     1. `RUST_LOG` if set — passed straight to `EnvFilter`.
 //!     2. `DEBUG=true` or `DEBUG=1` — bumps the whole subscriber to `debug`.
-//!     3. Default `info,mcp_server_atlassian=debug`.
+//!     3. Default `info,mcp_server_devtools=debug`.
 //!
 //!   The filter is attached to the registry, so it gates *both* writers.
 //!   `RUST_LOG=off` therefore silences the log file as well as the console —
@@ -177,7 +177,7 @@ fn build_filter(rust_log: Option<&str>, debug: Option<&str>) -> EnvFilter {
     if matches!(debug, Some("true" | "1")) {
         return EnvFilter::new("debug");
     }
-    EnvFilter::new("info,mcp_server_atlassian=debug")
+    EnvFilter::new("info,mcp_server_devtools=debug")
 }
 
 // --- Redaction --------------------------------------------------------------
@@ -370,7 +370,7 @@ mod tests {
     use super::*;
     use std::fs;
 
-    const DEFAULT_DISPLAY: &str = "mcp_server_atlassian=debug,info";
+    const DEFAULT_DISPLAY: &str = "mcp_server_devtools=debug,info";
 
     // ---- build_filter ----
 
@@ -412,8 +412,8 @@ mod tests {
 
     #[test]
     fn rust_log_per_target_directive_is_honoured() {
-        let f = build_filter(Some("mcp_server_atlassian::controllers=trace"), None);
-        assert_eq!(format!("{f}"), "mcp_server_atlassian::controllers=trace");
+        let f = build_filter(Some("mcp_server_devtools::controllers=trace"), None);
+        assert_eq!(format!("{f}"), "mcp_server_devtools::controllers=trace");
     }
 
     // ---- stderr_enabled ----

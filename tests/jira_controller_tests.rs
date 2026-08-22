@@ -7,13 +7,13 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::api::{HandleContext, handle_request};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::format::OutputFormat;
-use mcp_server_atlassian::tools::args::QueryParams;
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::jira::JiraVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::api::{HandleContext, handle_request};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::format::OutputFormat;
+use mcp_server_devtools::tools::args::QueryParams;
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::jira::JiraVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};

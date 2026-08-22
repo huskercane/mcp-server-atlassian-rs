@@ -1,4 +1,4 @@
-//! `mcp-atlassian` binary entry point.
+//! `mcp-devtools` binary entry point.
 //!
 //! Runtime mode is chosen by argv + `TRANSPORT_MODE`, matching the TS
 //! behaviour at `src/index.ts:380-400`:
@@ -8,7 +8,7 @@
 
 use std::process::ExitCode;
 
-use mcp_server_atlassian::{cli, logger, server, transport::raw_response};
+use mcp_server_devtools::{cli, logger, server, transport::raw_response};
 
 #[tokio::main]
 async fn main() -> ExitCode {

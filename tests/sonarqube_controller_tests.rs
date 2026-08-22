@@ -14,14 +14,14 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::sonarqube::{SonarqubeContext, quality_gate, search_issues};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::tools::args::{
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::sonarqube::{SonarqubeContext, quality_gate, search_issues};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::tools::args::{
     OutputFormatArg, SonarqubeQualityGateArgs, SonarqubeSearchIssuesArgs,
 };
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::sonarqube::SonarqubeVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{header, method, path, query_param};

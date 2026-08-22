@@ -11,7 +11,7 @@
 //! ## Cache scoping
 //!
 //! The cache is owned by [`WorkspaceCache`], which lives on each
-//! [`AtlassianServer`](crate::tools::AtlassianServer)'s `ServerState`. It
+//! [`DevtoolsServer`](crate::tools::DevtoolsServer)'s `ServerState`. It
 //! is **per-instance**, not process-global, so a library embedder hosting
 //! two servers with different credentials will not get one account's
 //! workspace leaking into the other's lookups.
@@ -28,7 +28,7 @@ use crate::transport::{RequestOptions, ResponseBody, TransportResponse, fetch};
 
 /// Memoises the resolved default workspace slug for one server instance.
 ///
-/// Construct one per [`AtlassianServer`](crate::tools::AtlassianServer)
+/// Construct one per [`DevtoolsServer`](crate::tools::DevtoolsServer)
 /// and pass it into [`BitbucketContext`] alongside the vendor. Tests get
 /// isolation by constructing a fresh cache per test.
 #[derive(Debug, Default)]

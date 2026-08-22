@@ -1,6 +1,6 @@
 use std::borrow::Cow;
 
-use mcp_server_atlassian::format::jmespath::apply_jq_filter;
+use mcp_server_devtools::format::jmespath::apply_jq_filter;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 

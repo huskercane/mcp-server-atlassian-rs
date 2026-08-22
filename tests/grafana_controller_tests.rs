@@ -12,12 +12,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::grafana::{GrafanaContext, list_datasources, query_logs};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::tools::args::{GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs};
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::grafana::{GrafanaContext, list_datasources, query_logs};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::tools::args::{GrafanaListDatasourcesArgs, GrafanaQueryLogsArgs};
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::grafana::GrafanaVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use sha2::{Digest, Sha256};
@@ -45,7 +45,7 @@ fn logs_args(uid: &str, query: &str) -> GrafanaQueryLogsArgs {
         direction: None,
         step: None,
         jq: None,
-        output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+        output_format: Some(mcp_server_devtools::tools::args::OutputFormatArg::Json),
     }
 }
 
@@ -354,7 +354,7 @@ async fn list_datasources_sends_bearer_and_filters_loki() {
 
     let args = GrafanaListDatasourcesArgs {
         jq: Some("[?type=='loki'].{name: name, uid: uid}".into()),
-        output_format: Some(mcp_server_atlassian::tools::args::OutputFormatArg::Json),
+        output_format: Some(mcp_server_devtools::tools::args::OutputFormatArg::Json),
     };
 
     let resp = list_datasources(&ctx, &args).await.unwrap();

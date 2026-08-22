@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use mcp_server_atlassian::auth::Credentials;
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::ninjaone::NinjaOneVendor;
+use mcp_server_devtools::auth::Credentials;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::ninjaone::NinjaOneVendor;
 
 fn config_with(pairs: &[(&str, &str)]) -> Config {
     Config::from_map(
@@ -123,7 +123,7 @@ fn missing_auth_is_actionable() {
 /// "Unauthorized" into a diagnosable "Missing or empty sessionKey."
 #[test]
 fn console_error_envelope_surfaces_error_message() {
-    let error = mcp_server_atlassian::vendor::ninjaone::error::classify(
+    let error = mcp_server_devtools::vendor::ninjaone::error::classify(
         reqwest::StatusCode::UNAUTHORIZED,
         r#"{"resultCode":"FAILURE","errorMessage":"Missing or empty sessionKey."}"#,
     );

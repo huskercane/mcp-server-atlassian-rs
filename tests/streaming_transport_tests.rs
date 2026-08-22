@@ -1,6 +1,6 @@
 use std::io::Cursor;
 
-use mcp_server_atlassian::transport::{StreamingPolicy, fetch_streamed_url};
+use mcp_server_devtools::transport::{StreamingPolicy, fetch_streamed_url};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -75,7 +75,7 @@ async fn encoded_quota_is_enforced_and_partial_artifact_is_cleaned() {
         .respond_with(ResponseTemplate::new(200).set_body_bytes(encoded))
         .mount(&server)
         .await;
-    let directory = mcp_server_atlassian::transport::raw_response::init();
+    let directory = mcp_server_devtools::transport::raw_response::init();
     let before = std::fs::read_dir(&directory)
         .unwrap()
         .filter_map(Result::ok)

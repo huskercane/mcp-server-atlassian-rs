@@ -9,12 +9,12 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::auth::secrets::{self, VENDOR_SECRETS};
-use mcp_server_atlassian::auth::{
+use mcp_server_devtools::auth::secrets::{self, VENDOR_SECRETS};
+use mcp_server_devtools::auth::{
     InMemoryKeychain, KeychainBackend, SecretKind, vendor_secret_with,
 };
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
 
 fn cfg(entries: &[(&str, &str)]) -> Config {
     Config::from_map(

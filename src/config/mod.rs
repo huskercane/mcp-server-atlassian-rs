@@ -484,7 +484,16 @@ pub fn candidate_keys(package_name: &str) -> Vec<String> {
     let unscoped = package_name
         .split_once('/')
         .map_or_else(|| package_name.to_string(), |(_, rest)| rest.to_string());
-    vec![short, product, full, unscoped]
+    let mut keys = vec![short, product, full, unscoped];
+    for legacy in [
+        crate::constants::LEGACY_PACKAGE_NAME,
+        crate::constants::LEGACY_UNSCOPED_PACKAGE_NAME,
+    ] {
+        if !keys.iter().any(|key| key == legacy) {
+            keys.push(legacy.to_string());
+        }
+    }
+    keys
 }
 
 /// Per-vendor alias lists in priority order (highest priority first).
@@ -510,6 +519,9 @@ pub fn vendor_aliases(package_name: &str) -> Vec<(&'static str, Vec<String>)> {
         if !v.iter().any(|a| a == &unscoped) {
             v.push(unscoped);
         }
+        // This project's pre-rename package names.
+        v.push(crate::constants::LEGACY_PACKAGE_NAME.to_string());
+        v.push(crate::constants::LEGACY_UNSCOPED_PACKAGE_NAME.to_string());
         // TS Bitbucket package names — kept so users migrating from the
         // upstream Node servers don't need to rekey their global config.
         v.push("@aashari/mcp-server-atlassian-bitbucket".to_string());

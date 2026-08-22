@@ -15,13 +15,13 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::api::BitbucketContext;
-use mcp_server_atlassian::controllers::handle_clone;
-use mcp_server_atlassian::tools::args::CloneArgs;
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
-use mcp_server_atlassian::workspace::WorkspaceCache;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::api::BitbucketContext;
+use mcp_server_devtools::controllers::handle_clone;
+use mcp_server_devtools::tools::args::CloneArgs;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::bitbucket::BitbucketVendor;
+use mcp_server_devtools::workspace::WorkspaceCache;
 use serde_json::json;
 use serial_test::serial;
 use tempfile::TempDir;

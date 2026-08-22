@@ -1,10 +1,10 @@
 #![allow(clippy::doc_markdown)]
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::edx::EdxVendor;
-use mcp_server_atlassian::vendor::edx::error::{classify, parse_error_body};
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::edx::EdxVendor;
+use mcp_server_devtools::vendor::edx::error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use std::collections::HashMap;

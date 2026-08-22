@@ -1,4 +1,4 @@
-//! End-to-end tests that drive the `mcp-atlassian` binary through
+//! End-to-end tests that drive the `mcp-devtools` binary through
 //! its real `main` function. These tests deliberately stay narrow — per-
 //! transport behavior is covered by the library-level tests in
 //! `tests/http_transport_tests.rs` and the various tool/controller tests.
@@ -18,7 +18,7 @@ use std::time::Duration;
 use assert_cmd::cargo::cargo_bin;
 use tokio::process::Command as TokioCommand;
 
-const BIN: &str = "mcp-atlassian";
+const BIN: &str = "mcp-devtools";
 
 /// The line `run_http` writes once its listener is bound, carrying the address
 /// the OS actually gave it.
@@ -264,7 +264,7 @@ async fn http_transport_binds_and_serves_health() {
         .await
         .expect("body");
     assert!(
-        body.contains("Atlassian MCP Server"),
+        body.contains("mcp-server-devtools"),
         "unexpected banner: {body}"
     );
 
@@ -378,7 +378,7 @@ async fn log_stderr_unrecognised_value_keeps_console_logging() {
 #[test]
 fn version_reported_to_users_is_the_crate_version() {
     assert_eq!(
-        mcp_server_atlassian::constants::VERSION,
+        mcp_server_devtools::constants::VERSION,
         env!("CARGO_PKG_VERSION")
     );
 }

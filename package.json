@@ -1,4 +1,6 @@
 {
+  "name": "mcp-server-devtools",
+  "private": true,
   "dependencies": {
     "@openai/codex": "^0.143.0"
   }

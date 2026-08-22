@@ -8,11 +8,11 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::api::BitbucketContext;
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::bitbucket::BitbucketVendor;
-use mcp_server_atlassian::workspace::{WorkspaceCache, resolve_default_workspace};
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::api::BitbucketContext;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::bitbucket::BitbucketVendor;
+use mcp_server_devtools::workspace::{WorkspaceCache, resolve_default_workspace};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{method, path};

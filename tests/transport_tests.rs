@@ -5,10 +5,10 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mcp_server_atlassian::auth::Credentials;
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::transport::{HttpMethod, RequestOptions, ResponseBody, build_client};
+use mcp_server_devtools::auth::Credentials;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::transport::{HttpMethod, RequestOptions, ResponseBody, build_client};
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
@@ -21,7 +21,7 @@ async fn call_mock(
     mock_server: &MockServer,
     path_suffix: &str,
     options: RequestOptions,
-) -> Result<mcp_server_atlassian::transport::TransportResponse, mcp_server_atlassian::error::McpError>
+) -> Result<mcp_server_devtools::transport::TransportResponse, mcp_server_devtools::error::McpError>
 {
     let client = build_client().unwrap();
     let creds = Credentials::AtlassianApiToken {
@@ -40,7 +40,7 @@ async fn call_mock_cached(
     mock_server: &MockServer,
     path_suffix: &str,
     credentials: Credentials,
-) -> Result<mcp_server_atlassian::transport::TransportResponse, mcp_server_atlassian::error::McpError>
+) -> Result<mcp_server_devtools::transport::TransportResponse, mcp_server_devtools::error::McpError>
 {
     let client = build_client().unwrap();
     let config = Config::from_map(HashMap::from([
@@ -62,10 +62,10 @@ async fn call_mock_cached(
 /// the wiremock server's URL for the duration of the test. Implemented as an
 /// inline module to keep scope out of the public API.
 mod override_url {
-    use mcp_server_atlassian::auth::Credentials;
-    use mcp_server_atlassian::config::Config;
-    use mcp_server_atlassian::error::McpError;
-    use mcp_server_atlassian::transport::{
+    use mcp_server_devtools::auth::Credentials;
+    use mcp_server_devtools::config::Config;
+    use mcp_server_devtools::error::McpError;
+    use mcp_server_devtools::transport::{
         RequestOptions, TransportResponse, fetch_bitbucket_with_base,
     };
     use wiremock::MockServer;
@@ -188,13 +188,7 @@ async fn get_json_response_is_classified_and_persisted() {
         other => panic!("expected JSON, got {other:?}"),
     }
     let path = resp.raw_response_path.expect("raw path for JSON response");
-    assert!(
-        path.starts_with(
-            std::env::temp_dir()
-                .join("mcp")
-                .join("mcp-server-atlassian")
-        )
-    );
+    assert!(path.starts_with(std::env::temp_dir().join("mcp").join("mcp-server-devtools")));
     let _ = std::fs::remove_file(&path);
 }
 

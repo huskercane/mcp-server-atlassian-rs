@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::ninjaone::{NinjaOneContext, handle_read, handle_write};
-use mcp_server_atlassian::tools::args::{NinjaOneReadArgs, NinjaOneWriteArgs, OutputFormatArg};
-use mcp_server_atlassian::transport::{HttpMethod, build_client};
-use mcp_server_atlassian::vendor::ninjaone::NinjaOneVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::ninjaone::{NinjaOneContext, handle_read, handle_write};
+use mcp_server_devtools::tools::args::{NinjaOneReadArgs, NinjaOneWriteArgs, OutputFormatArg};
+use mcp_server_devtools::transport::{HttpMethod, build_client};
+use mcp_server_devtools::vendor::ninjaone::NinjaOneVendor;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

@@ -6,11 +6,11 @@
 //! Bearer-header dispatch path is covered end-to-end in
 //! `grafana_controller_tests.rs`.
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::grafana::GrafanaVendor;
-use mcp_server_atlassian::vendor::grafana::error::classify;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::grafana::GrafanaVendor;
+use mcp_server_devtools::vendor::grafana::error::classify;
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use std::collections::HashMap;

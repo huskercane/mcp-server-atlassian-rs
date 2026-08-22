@@ -12,12 +12,12 @@
 
 use std::collections::HashMap;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::newrelic::{NewRelicContext, query};
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::tools::args::NewRelicQueryArgs;
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::newrelic::NewRelicVendor;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::newrelic::{NewRelicContext, query};
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::tools::args::NewRelicQueryArgs;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::newrelic::NewRelicVendor;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};

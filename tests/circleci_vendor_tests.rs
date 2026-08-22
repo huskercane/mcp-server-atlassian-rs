@@ -5,11 +5,11 @@
 //! error-envelope classifier. The Bearer-auth dispatch path is covered
 //! end-to-end in `circleci_controller_tests.rs`.
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::{ErrorKind, OriginalError};
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::circleci::CircleCiVendor;
-use mcp_server_atlassian::vendor::circleci::error::{classify, parse_error_body};
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::{ErrorKind, OriginalError};
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::circleci::CircleCiVendor;
+use mcp_server_devtools::vendor::circleci::error::{classify, parse_error_body};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use std::collections::HashMap;

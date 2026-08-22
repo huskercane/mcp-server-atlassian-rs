@@ -7,11 +7,11 @@
 //! path and the `ceTaskId` resolution are covered end-to-end in
 //! `sonarqube_controller_tests.rs`.
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::sonarqube::SonarqubeVendor;
-use mcp_server_atlassian::vendor::sonarqube::error::classify;
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::sonarqube::SonarqubeVendor;
+use mcp_server_devtools::vendor::sonarqube::error::classify;
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use std::collections::HashMap;

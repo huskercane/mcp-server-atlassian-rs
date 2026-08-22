@@ -19,7 +19,7 @@ use crate::transport::{HttpMethod, build_client};
 use crate::vendor::bitbucket::BitbucketVendor;
 use crate::workspace::WorkspaceCache;
 
-/// Verbs exposed under `mcp-atlassian bb …`.
+/// Verbs exposed under `mcp-devtools bb …`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// GET any Bitbucket endpoint. Returns the response body to stdout.

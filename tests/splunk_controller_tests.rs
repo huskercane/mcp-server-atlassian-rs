@@ -1,17 +1,17 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::controllers::splunk::{
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::controllers::splunk::{
     SplunkContext, create_job, job_results, list_saved_searches, search,
 };
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::tools::args::{
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::tools::args::{
     OutputFormatArg, SplunkCreateJobArgs, SplunkJobResultsArgs, SplunkListSavedSearchesArgs,
     SplunkSearchArgs,
 };
-use mcp_server_atlassian::transport::build_client;
-use mcp_server_atlassian::vendor::splunk::SplunkVendor;
+use mcp_server_devtools::transport::build_client;
+use mcp_server_devtools::vendor::splunk::SplunkVendor;
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use wiremock::matchers::{body_string_contains, header, method, path, query_param};
@@ -402,7 +402,7 @@ async fn partition_failure_cancels_drains_and_schedules_nothing_later() {
     .unwrap_err();
     assert_eq!(error.status_code, Some(500));
 
-    let dir = mcp_server_atlassian::transport::raw_response::init();
+    let dir = mcp_server_devtools::transport::raw_response::init();
     let names = std::fs::read_dir(dir)
         .unwrap()
         .flatten()

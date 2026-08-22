@@ -4,9 +4,9 @@ use std::collections::HashMap;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
-use mcp_server_atlassian::auth::{Credentials, InMemoryKeychain, KeychainBackend, SecretKind};
-use mcp_server_atlassian::config::{Config, VENDOR_BITBUCKET, VENDOR_JIRA};
-use mcp_server_atlassian::error::ErrorKind;
+use mcp_server_devtools::auth::{Credentials, InMemoryKeychain, KeychainBackend, SecretKind};
+use mcp_server_devtools::config::{Config, VENDOR_BITBUCKET, VENDOR_JIRA};
+use mcp_server_devtools::error::ErrorKind;
 use pretty_assertions::assert_eq;
 
 /// Default vendor for tests that don't care about vendor scope. We pick
@@ -440,7 +440,7 @@ fn require_propagates_keychain_specific_errors() {
 fn implicit_failure_breadcrumb_dedupes_per_triple() {
     // Backend that fails get() but tracks how many times note_implicit_failure
     // returned true (i.e. how many `warn!`s would fire).
-    use mcp_server_atlassian::auth::keychain::{KeychainError, KeychainResult};
+    use mcp_server_devtools::auth::keychain::{KeychainError, KeychainResult};
     use std::sync::Mutex;
 
     struct CountingFailingBackend {
@@ -520,13 +520,13 @@ async fn require_for_async_runs_off_the_runtime() {
 // is a hard error, an absent key falls back silently, and plaintext wins.
 // ---------------------------------------------------------------------------
 
-const NINJA: &str = mcp_server_atlassian::config::VENDOR_NINJAONE;
+const NINJA: &str = mcp_server_devtools::config::VENDOR_NINJAONE;
 
 fn ninja_password(
     config: &Config,
     kc: &InMemoryKeychain,
-) -> Result<Option<(String, String)>, mcp_server_atlassian::error::McpError> {
-    mcp_server_atlassian::auth::resolve_secret_for(
+) -> Result<Option<(String, String)>, mcp_server_devtools::error::McpError> {
+    mcp_server_devtools::auth::resolve_secret_for(
         config,
         kc,
         NINJA,
@@ -639,7 +639,7 @@ fn the_totp_seed_uses_its_own_keychain_slot() {
     ]);
 
     let (_, password) = ninja_password(&config, &kc).unwrap().unwrap();
-    let (_, seed) = mcp_server_atlassian::auth::resolve_secret_for(
+    let (_, seed) = mcp_server_devtools::auth::resolve_secret_for(
         &config,
         &kc,
         NINJA,

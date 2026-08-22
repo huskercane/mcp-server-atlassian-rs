@@ -3,11 +3,11 @@
 // lint is a poor fit here — it would rewrite the prompts we need to keep stable.
 #![allow(clippy::doc_markdown)]
 
-//! MCP tool registration for the Atlassian product surface.
+//! MCP tool registration for the unified developer-tools surface.
 //!
-//! [`AtlassianServer`] hosts three `#[tool_router]` impl blocks on the same
+//! [`DevtoolsServer`] hosts the vendor `#[tool_router]` impl blocks on the same
 //! handler type, then combines them in an inherent
-//! [`AtlassianServer::tool_router`] so [`#[tool_handler]`](rmcp::tool_handler)
+//! [`DevtoolsServer::tool_router`] so [`#[tool_handler]`](rmcp::tool_handler)
 //! sees a single `ToolRouter` containing every tool:
 //!
 //! - **`bb_*`** (six tools — five generic verbs + `bb_clone`) — Bitbucket
@@ -89,13 +89,13 @@ use args::{
 use args::{WrdsDescribeTableArgs, WrdsListLibrariesArgs, WrdsListTablesArgs, WrdsQueryArgs};
 
 #[derive(Clone)]
-pub struct AtlassianServer {
+pub struct DevtoolsServer {
     state: Arc<ServerState>,
     // The `#[tool_handler]` macro references this field by name at expansion
     // time; the rustc reference tracker doesn't see that, so we silence the
     // dead-code lint explicitly.
     #[allow(dead_code)]
-    tool_router: ToolRouter<AtlassianServer>,
+    tool_router: ToolRouter<DevtoolsServer>,
 }
 
 struct ServerState {
@@ -127,10 +127,10 @@ struct ServerState {
     workspace_cache: WorkspaceCache,
 }
 
-impl AtlassianServer {
+impl DevtoolsServer {
     /// Standard constructor. Loads config from the environment cascade and
-    /// builds a fresh HTTP client. Both vendors are constructed eagerly,
-    /// but neither one resolves its base URL at this point — the
+    /// builds a fresh HTTP client. Vendors are constructed eagerly, but they
+    /// do not resolve their base URLs at this point — the
     /// `JiraVendor` defers `ATLASSIAN_SITE_NAME` lookup to per-request
     /// time, so a Bitbucket-only deployment boots without Jira config.
     pub fn new() -> Result<Self, crate::error::McpError> {
@@ -348,7 +348,7 @@ impl AtlassianServer {
 }
 
 #[tool_router(router = artifact_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[tool(
         description = "Read a resumable byte chunk from a temporary artifact returned by another tool. Data is base64 encoded; continue with nextOffset until eof is true.",
         annotations(
@@ -457,7 +457,7 @@ fn spawn_config_watcher(
 // ============================================================================
 
 #[tool_router(router = bitbucket_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/bb_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -548,7 +548,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = edx_discussion_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/edx_discussion_course.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -639,7 +639,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = jira_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/jira_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -716,7 +716,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = confluence_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/conf_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -793,7 +793,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = zoom_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/zoom_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -870,7 +870,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = circleci_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/circleci_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -961,7 +961,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = slack_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/slack_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1038,7 +1038,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = postman_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/postman_get.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1115,7 +1115,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = newrelic_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/newrelic_query.md")]
     #[tool(annotations(
         read_only_hint = false,
@@ -1136,7 +1136,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = grafana_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/grafana_query_logs.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1171,7 +1171,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = sonarqube_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/sonarqube_quality_gate.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1220,7 +1220,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = splunk_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/splunk_search.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1283,7 +1283,7 @@ impl AtlassianServer {
 // ============================================================================
 
 #[tool_router(router = ninjaone_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/ninjaone_login.md")]
     #[tool(annotations(
         read_only_hint = false,
@@ -1375,7 +1375,7 @@ impl AtlassianServer {
 
 #[cfg(feature = "wrds")]
 #[tool_router(router = wrds_router)]
-impl AtlassianServer {
+impl DevtoolsServer {
     #[doc = include_str!("descriptions/wrds_query.md")]
     #[tool(annotations(
         read_only_hint = true,
@@ -1434,7 +1434,7 @@ impl AtlassianServer {
 }
 
 #[tool_handler]
-impl ServerHandler for AtlassianServer {
+impl ServerHandler for DevtoolsServer {
     async fn list_tools(
         &self,
         _request: Option<rmcp::model::PaginatedRequestParams>,
@@ -1466,7 +1466,7 @@ impl ServerHandler for AtlassianServer {
 // ---- helpers ----
 
 async fn run_read_bb(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1481,7 +1481,7 @@ async fn run_read_bb(
 }
 
 async fn run_write_bb(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1496,7 +1496,7 @@ async fn run_write_bb(
 }
 
 async fn run_read_jira(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1511,7 +1511,7 @@ async fn run_read_jira(
 }
 
 async fn run_write_jira(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1526,7 +1526,7 @@ async fn run_write_jira(
 }
 
 async fn run_read_confluence(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1541,7 +1541,7 @@ async fn run_read_confluence(
 }
 
 async fn run_write_confluence(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1556,7 +1556,7 @@ async fn run_write_confluence(
 }
 
 async fn run_read_zoom(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1571,7 +1571,7 @@ async fn run_read_zoom(
 }
 
 async fn run_write_zoom(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1586,7 +1586,7 @@ async fn run_write_zoom(
 }
 
 async fn run_read_circleci(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1603,7 +1603,7 @@ async fn run_read_circleci(
 }
 
 async fn run_write_circleci(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1619,7 +1619,7 @@ async fn run_write_circleci(
     }
 }
 
-async fn run_circleci_logs(server: &AtlassianServer, args: &CircleCiLogsArgs) -> CallToolResult {
+async fn run_circleci_logs(server: &DevtoolsServer, args: &CircleCiLogsArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::circleci::handle_logs(&server.circleci_ctx(&config), args).await {
         Ok(resp) => {
@@ -1631,7 +1631,7 @@ async fn run_circleci_logs(server: &AtlassianServer, args: &CircleCiLogsArgs) ->
 }
 
 async fn run_read_slack(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1646,7 +1646,7 @@ async fn run_read_slack(
 }
 
 async fn run_write_slack(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1661,7 +1661,7 @@ async fn run_write_slack(
 }
 
 async fn run_read_postman(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &ReadArgs,
 ) -> CallToolResult {
@@ -1677,7 +1677,7 @@ async fn run_read_postman(
 }
 
 async fn run_write_postman(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &WriteArgs,
 ) -> CallToolResult {
@@ -1693,7 +1693,7 @@ async fn run_write_postman(
     }
 }
 
-async fn run_ninjaone_login(server: &AtlassianServer, args: &NinjaOneLoginArgs) -> CallToolResult {
+async fn run_ninjaone_login(server: &DevtoolsServer, args: &NinjaOneLoginArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::ninjaone::login(&server.ninjaone_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1702,7 +1702,7 @@ async fn run_ninjaone_login(server: &AtlassianServer, args: &NinjaOneLoginArgs) 
 }
 
 async fn run_read_ninjaone(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &NinjaOneReadArgs,
 ) -> CallToolResult {
@@ -1716,7 +1716,7 @@ async fn run_read_ninjaone(
 }
 
 async fn run_write_ninjaone(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     method: HttpMethod,
     args: &NinjaOneWriteArgs,
 ) -> CallToolResult {
@@ -1729,7 +1729,7 @@ async fn run_write_ninjaone(
     }
 }
 
-async fn run_newrelic_query(server: &AtlassianServer, args: &NewRelicQueryArgs) -> CallToolResult {
+async fn run_newrelic_query(server: &DevtoolsServer, args: &NewRelicQueryArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::newrelic::query(&server.newrelic_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1738,7 +1738,7 @@ async fn run_newrelic_query(server: &AtlassianServer, args: &NewRelicQueryArgs) 
 }
 
 async fn run_grafana_query_logs(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &GrafanaQueryLogsArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1749,7 +1749,7 @@ async fn run_grafana_query_logs(
 }
 
 async fn run_grafana_list_datasources(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &GrafanaListDatasourcesArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1760,7 +1760,7 @@ async fn run_grafana_list_datasources(
 }
 
 async fn run_sonarqube_quality_gate(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &SonarqubeQualityGateArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1771,7 +1771,7 @@ async fn run_sonarqube_quality_gate(
 }
 
 async fn run_sonarqube_search_issues(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &SonarqubeSearchIssuesArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1781,7 +1781,7 @@ async fn run_sonarqube_search_issues(
     }
 }
 
-async fn run_sonarqube_get(server: &AtlassianServer, args: &ReadArgs) -> CallToolResult {
+async fn run_sonarqube_get(server: &DevtoolsServer, args: &ReadArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::sonarqube::get(&server.sonarqube_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1789,7 +1789,7 @@ async fn run_sonarqube_get(server: &AtlassianServer, args: &ReadArgs) -> CallToo
     }
 }
 
-async fn run_splunk_search(server: &AtlassianServer, args: &SplunkSearchArgs) -> CallToolResult {
+async fn run_splunk_search(server: &DevtoolsServer, args: &SplunkSearchArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::splunk::search(&server.splunk_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1798,7 +1798,7 @@ async fn run_splunk_search(server: &AtlassianServer, args: &SplunkSearchArgs) ->
 }
 
 async fn run_splunk_create_job(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &SplunkCreateJobArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1809,7 +1809,7 @@ async fn run_splunk_create_job(
 }
 
 async fn run_splunk_job_results(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &SplunkJobResultsArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1820,7 +1820,7 @@ async fn run_splunk_job_results(
 }
 
 async fn run_splunk_list_saved_searches(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &SplunkListSavedSearchesArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1831,7 +1831,7 @@ async fn run_splunk_list_saved_searches(
 }
 
 #[cfg(feature = "wrds")]
-async fn run_wrds_query(server: &AtlassianServer, args: &WrdsQueryArgs) -> CallToolResult {
+async fn run_wrds_query(server: &DevtoolsServer, args: &WrdsQueryArgs) -> CallToolResult {
     let config = server.config();
     match crate::controllers::wrds::query(&server.wrds_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1841,7 +1841,7 @@ async fn run_wrds_query(server: &AtlassianServer, args: &WrdsQueryArgs) -> CallT
 
 #[cfg(feature = "wrds")]
 async fn run_wrds_list_libraries(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &WrdsListLibrariesArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1853,7 +1853,7 @@ async fn run_wrds_list_libraries(
 
 #[cfg(feature = "wrds")]
 async fn run_wrds_list_tables(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &WrdsListTablesArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1865,7 +1865,7 @@ async fn run_wrds_list_tables(
 
 #[cfg(feature = "wrds")]
 async fn run_wrds_describe_table(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &WrdsDescribeTableArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1876,7 +1876,7 @@ async fn run_wrds_describe_table(
 }
 
 async fn run_edx_discussion_course(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionCourseArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1887,7 +1887,7 @@ async fn run_edx_discussion_course(
 }
 
 async fn run_edx_discussion_topics(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionTopicsArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1898,7 +1898,7 @@ async fn run_edx_discussion_topics(
 }
 
 async fn run_edx_discussion_threads(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionThreadsArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1909,7 +1909,7 @@ async fn run_edx_discussion_threads(
 }
 
 async fn run_edx_discussion_thread_create(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionThreadCreateArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1920,7 +1920,7 @@ async fn run_edx_discussion_thread_create(
 }
 
 async fn run_edx_discussion_comments(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionCommentsArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1931,7 +1931,7 @@ async fn run_edx_discussion_comments(
 }
 
 async fn run_edx_discussion_comment_create(
-    server: &AtlassianServer,
+    server: &DevtoolsServer,
     args: &EdxDiscussionCommentCreateArgs,
 ) -> CallToolResult {
     let config = server.config();
@@ -1941,7 +1941,7 @@ async fn run_edx_discussion_comment_create(
     }
 }
 
-async fn run_clone(server: &AtlassianServer, args: &CloneArgs) -> CallToolResult {
+async fn run_clone(server: &DevtoolsServer, args: &CloneArgs) -> CallToolResult {
     let config = server.config();
     match handle_clone(&server.bitbucket_typed_ctx(&config), args).await {
         Ok(resp) => success_response(&resp),
@@ -1971,8 +1971,8 @@ mod live_config_tests {
     use super::*;
     use crate::config::VENDOR_BITBUCKET;
 
-    fn server_with_config(config: Config) -> AtlassianServer {
-        AtlassianServer::with_components(
+    fn server_with_config(config: Config) -> DevtoolsServer {
+        DevtoolsServer::with_components(
             config,
             build_client().unwrap(),
             BitbucketVendor::new(),

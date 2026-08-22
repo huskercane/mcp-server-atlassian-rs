@@ -65,7 +65,7 @@ const STATEMENT_TIMEOUT_MS: u32 = 60_000;
 /// Connection establishment timeout.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 /// `application_name` reported to Postgres (shows up in `pg_stat_activity`).
-const APPLICATION_NAME: &str = "mcp-atlassian";
+const APPLICATION_NAME: &str = "mcp-devtools";
 
 /// Clamp a caller-supplied row limit into `[1, MAX_ROW_LIMIT]`, defaulting when
 /// absent.

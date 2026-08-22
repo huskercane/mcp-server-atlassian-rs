@@ -5,11 +5,11 @@
 //! to Slack — the `{"ok": false}` success-body classifier. The Bearer-auth
 //! dispatch path is covered end-to-end in `slack_controller_tests.rs`.
 
-use mcp_server_atlassian::config::Config;
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::Vendor;
-use mcp_server_atlassian::vendor::slack::SlackVendor;
-use mcp_server_atlassian::vendor::slack::error::{classify, classify_ok_envelope};
+use mcp_server_devtools::config::Config;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::Vendor;
+use mcp_server_devtools::vendor::slack::SlackVendor;
+use mcp_server_devtools::vendor::slack::error::{classify, classify_ok_envelope};
 use pretty_assertions::assert_eq;
 use reqwest::StatusCode;
 use serde_json::json;

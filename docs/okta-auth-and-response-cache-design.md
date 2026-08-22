@@ -15,7 +15,7 @@ Status: response-cache phase 1 implemented; Okta authorization and conditional v
 
 Inbound MCP authentication answers **who may call this MCP server**. In shared mode, an Okta access token supplies that identity and its groups/scopes.
 
-Upstream vendor authentication answers **which identity mcp-atlassian uses to call NinjaOne, Jira, or another vendor**. Those credentials remain server-held configuration or OS-keychain entries. An Okta login to the MCP server must never be treated as a NinjaOne session.
+Upstream vendor authentication answers **which identity mcp-devtools uses to call NinjaOne, Jira, or another vendor**. Those credentials remain server-held configuration or OS-keychain entries. An Okta login to the MCP server must never be treated as a NinjaOne session.
 
 ## Mode 1: unchanged local default
 
@@ -40,7 +40,7 @@ An administrator explicitly enables shared mode:
 ```text
 MCP_AUTH_MODE=okta
 MCP_OKTA_ISSUER=https://example.okta.com/oauth2/default
-MCP_OKTA_AUDIENCE=api://mcp-atlassian
+MCP_OKTA_AUDIENCE=api://mcp-devtools
 MCP_OKTA_REQUIRED_SCOPE=mcp:ninjaone
 MCP_OKTA_REQUIRED_GROUP=MCP-NinjaOne-Users
 ```

@@ -8,8 +8,8 @@
 //! produces plausible six-digit numbers, and would only be caught by a real
 //! NinjaOne login refusing them.
 
-use mcp_server_atlassian::error::ErrorKind;
-use mcp_server_atlassian::vendor::ninjaone::totp::TotpSpec;
+use mcp_server_devtools::error::ErrorKind;
+use mcp_server_devtools::vendor::ninjaone::totp::TotpSpec;
 
 /// RFC 6238's SHA1 seed is the ASCII string "12345678901234567890"; this is
 /// its base32 encoding.

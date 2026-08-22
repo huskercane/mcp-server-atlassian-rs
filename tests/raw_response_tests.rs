@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use mcp_server_atlassian::transport::raw_response::{
+use mcp_server_devtools::transport::raw_response::{
     artifact, artifact_for_path, begin_artifact, read_artifact_chunk, remove_artifact, save,
     save_artifact,
 };
@@ -98,13 +98,7 @@ async fn writes_file_under_tmp_mcp() {
     .await
     .expect("raw response should be written");
 
-    assert!(
-        path.starts_with(
-            std::env::temp_dir()
-                .join("mcp")
-                .join("mcp-server-atlassian")
-        )
-    );
+    assert!(path.starts_with(std::env::temp_dir().join("mcp").join("mcp-server-devtools")));
     let file_name = path
         .file_name()
         .and_then(|s| s.to_str())

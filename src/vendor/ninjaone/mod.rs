@@ -610,7 +610,7 @@ fn missing_login_password(label: &str, email: &str) -> McpError {
     auth_missing(format!(
         "No NinjaOne password is configured for {email}. Set {label} under the `ninjaone` \
          section of ~/.mcp/configs.json or in the environment, or store the password in the OS \
-         keychain (`mcp-atlassian creds set --kind password --vendor ninjaone --principal \
+         keychain (`mcp-devtools creds set --kind password --vendor ninjaone --principal \
          {email}`) and set {label} to \"keychain\"."
     ))
 }

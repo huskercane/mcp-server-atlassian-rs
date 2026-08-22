@@ -6,7 +6,7 @@ use tracing::info;
 
 use crate::error::McpError;
 use crate::server::shutdown;
-use crate::tools::AtlassianServer;
+use crate::tools::DevtoolsServer;
 
 /// Boot the server on the stdio transport, consuming the calling task until
 /// the peer disconnects or a shutdown signal is received. Matches TS
@@ -17,7 +17,7 @@ pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     // Registered before the transport is serving, for the same reason as the
     // HTTP transport: see `shutdown::install`.
     let shutdown_signal = shutdown::install();
-    let handler = AtlassianServer::new().map_err(boxed_err)?;
+    let handler = DevtoolsServer::new().map_err(boxed_err)?;
     let transport = stdio();
     let service = handler.serve(transport).await?;
 
