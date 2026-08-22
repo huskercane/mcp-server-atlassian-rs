@@ -1214,6 +1214,16 @@ fn iso_full() -> String {
 
 #[cfg(test)]
 mod artifact_writer_fault_tests {
+    //! Tests marked `#[serial_test::serial(artifact_registry)]` share the
+    //! process-wide artifact registry. `reconcile_missing_artifacts` sweeps it
+    //! wholesale, evicting every entry whose file is gone, and several of these
+    //! tests delete an artifact file and then assert on the registry. Run
+    //! concurrently, one test's sweep drops another's entry before it can
+    //! observe it, and `read_artifact_chunk` returns `Ok(None)` instead of the
+    //! expected `Err`. Anything added here that deletes an artifact file, or
+    //! reaches `reconcile_missing_artifacts` (`cleanup_current_session` does),
+    //! needs the same marker. See issue #8.
+
     use super::*;
 
     async fn reserved_success(
@@ -1338,7 +1348,9 @@ mod artifact_writer_fault_tests {
         assert_eq!(quota.reserved_bytes(), 0);
     }
 
+    // Serialised on the artifact registry; see the note at the top of the module.
     #[tokio::test]
+    #[serial_test::serial(artifact_registry)]
     async fn missing_file_reconciliation_removes_sidecars_registry_and_reservations() {
         let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(32));
         let mut writer = begin_artifact("reserved-reconcile", "txt", "text/plain", 16)
@@ -1413,7 +1425,9 @@ mod artifact_writer_fault_tests {
         assert_eq!(quota.reserved_bytes(), 0);
     }
 
+    // Serialised on the artifact registry; see the note at the top of the module.
     #[tokio::test]
+    #[serial_test::serial(artifact_registry)]
     async fn failed_file_open_releases_its_exact_read_pin() {
         let path = save_artifact("retention-open-failure", "data")
             .await
@@ -1435,7 +1449,9 @@ mod artifact_writer_fault_tests {
         assert!(!artifacts().read().unwrap().contains_key(&registered.id));
     }
 
+    // Serialised on the artifact registry; see the note at the top of the module.
     #[tokio::test]
+    #[serial_test::serial(artifact_registry)]
     async fn expired_pin_blocks_new_reads_and_defers_deletion_until_release() {
         let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
         let committed = reserved_success("circleci-retention-pinned", &quota).await;
