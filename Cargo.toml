@@ -115,6 +115,30 @@ serial_test         = "=4.0.1"
 wiremock            = "=0.6.5"
 assert_cmd          = "=2.2.2"
 
+# Benchmarks run under release-grade codegen, but keep the symbols a sampling
+# profiler (samply, Instruments, /usr/bin/sample) needs — `release` strips them,
+# which would leave every frame unresolved. LTO is off so the profiling loop
+# stays fast to rebuild. Never shipped: `release` is still the artifact profile.
+# Profiling harnesses, not pass/fail benchmarks — hence `harness = false` (each
+# has its own `fn main`). They are deliberately NOT part of the CI gates; run
+# them by hand when touching the response pipeline:
+#   cargo bench --bench response_pipeline    # allocation + timing per stage
+#   cargo bench --bench toon_encode_loop     # tight loop to attach a profiler to
+[[bench]]
+name    = "response_pipeline"
+harness = false
+
+[[bench]]
+name    = "toon_encode_loop"
+harness = false
+
+[profile.bench]
+inherits      = "release"
+lto           = false
+codegen-units = 16
+debug         = true
+strip         = false
+
 [profile.release]
 lto              = "thin"
 codegen-units    = 1

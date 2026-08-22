@@ -28,6 +28,45 @@ cargo fmt --all                               # rustfmt is the formatter of reco
 cargo deny check                              # license + advisory gate (deny.toml)
 ```
 
+## Profiling (not a CI gate)
+
+`benches/` holds two hand-run profiling harnesses, not pass/fail benchmarks
+(`harness = false`, each has its own `main`). The test suite is a poor profiling
+target — it builds at `opt-level = 0`, spins a runtime per `#[tokio::test]`, and
+`wiremock` puts a real loopback HTTP server in every stack — so these run the
+pipeline directly against synthetic payloads instead.
+
+```bash
+cargo bench --bench response_pipeline   # bytes + allocation count + ms per stage
+cargo bench --bench toon_encode_loop    # tight encode loop to attach a profiler to
+```
+
+`response_pipeline` measures each stage against the shape it had before the
+pipeline was de-allocated, so an allocation regression is visible and not just a
+timing wobble. `[profile.bench]` keeps debug symbols (`release` strips them), so
+a sampling profiler resolves frames:
+
+```bash
+./target/release/deps/toon_encode_loop-<hash> 14 &
+/usr/bin/sample $! 10 1 -f /tmp/toon.txt   # built into macOS; no sudo, no SIP fight
+samply record ./target/release/deps/toon_encode_loop-<hash> 10   # interactive flamegraph
+```
+
+The TOON encoder is the pipeline's dominant cost, so it has its own target.
+`serde_toon_format` replaced `toon-format` 0.5.0 here: the old crate treated `-`
+as a structural character and quoted every string containing a hyphen (Jira
+keys, UUIDs, ISO dates, repo slugs, branch names). Measured against the TS
+reference `@toon-format/toon` over a 489-case corpus, the old crate matched 401
+and the current one 449, with **zero** cases the old one encoded correctly and
+the current one gets wrong. `tests/toon_golden_tests.rs` locks the exact output
+bytes and records the three classes that still differ from the reference — all
+of them extra quoting or an alternate empty-array spelling, none of them
+information-losing.
+
+Note `serde_json/preserve_order` arrives via the encoder crate. Key order is
+insertion order, not sorted; `object_key_order_is_preserved_not_sorted` fails if
+a dependency change drops it.
+
 CI (`.github/workflows/rust.yml`) runs build + clippy + test on a
 ubuntu/macos/windows matrix; Linux also builds `--no-default-features`. "No
 compile-time warning or error" is enforced by `-D warnings` — clippy `all` +
