@@ -43,6 +43,23 @@ pub mod data_limits {
     pub const MAX_TIME_PARTITIONS: usize = 16;
     /// Default number of time-partition requests acquired concurrently.
     pub const DEFAULT_PARALLEL_TIME_PARTITIONS: usize = 4;
+    /// Successful downloadable artifacts remain readable for one hour unless
+    /// an internal server setting selects another bounded value.
+    pub const DEFAULT_STREAMING_ARTIFACT_RETENTION: std::time::Duration =
+        std::time::Duration::from_hours(1);
+    pub const MIN_STREAMING_ARTIFACT_RETENTION: std::time::Duration =
+        std::time::Duration::from_mins(5);
+    pub const MAX_STREAMING_ARTIFACT_RETENTION: std::time::Duration =
+        std::time::Duration::from_hours(24 * 7);
+    pub const DEFAULT_STREAMING_ARTIFACT_SWEEP_INTERVAL: std::time::Duration =
+        std::time::Duration::from_mins(1);
+    pub const MIN_STREAMING_ARTIFACT_SWEEP_INTERVAL: std::time::Duration =
+        std::time::Duration::from_secs(5);
+    pub const MAX_STREAMING_ARTIFACT_SWEEP_INTERVAL: std::time::Duration =
+        std::time::Duration::from_hours(1);
+    pub const STREAMING_ARTIFACT_SHUTDOWN_TIMEOUT: std::time::Duration =
+        std::time::Duration::from_secs(5);
+    pub const MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP: usize = 64;
     pub const MAX_PAGE_SIZE: u32 = 100;
     pub const DEFAULT_PAGE_SIZE: u32 = 50;
 }

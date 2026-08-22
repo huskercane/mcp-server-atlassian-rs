@@ -575,6 +575,9 @@ transactional, and the full suite passes.
 
 ## Server-wide streaming disk coordination checkpoint (2026-08-21)
 
+Implemented and committed as `6def9e0`. Treat this checkpoint and that commit
+as authoritative for subsequent optional hardening.
+
 ### Completed
 
 - Replaced transaction-local aggregate disk ceilings with one process-wide
@@ -630,6 +633,182 @@ transactional, and the full suite passes.
   normalization/controller, CircleCI controller, raw-artifact, tool-schema,
   and streaming-transport tests, including non-empty multipart ordering in
   both directions
+- `cargo check --all-features`
+- `cargo test --all-features -j 1` (full suite passed)
+- `git diff --check`
+
+`cargo clippy --all-features --all-targets -- -D warnings` reaches the project
+and reports exactly the documented five pre-existing warnings and no warning
+from this slice: `cast_possible_truncation` and `cast_possible_wrap` in
+`src/transport/response_cache.rs`, `too_many_lines` and `map_unwrap_or` in the
+generic transport, and `map_unwrap_or` in `src/vendor/ninjaone/mod.rs`.
+
+## Historical handoff: download-safe artifact retention and reclamation
+
+Treat the server-wide streaming disk coordination checkpoint above and commit
+`6def9e0` as authoritative. Preserve every completed planner,
+partition-eligibility, normalization, transport, merge, quota, manifest,
+cancellation, cleanup, ordering, reservation, fairness, ownership, and
+single-request invariant. Do not broaden Splunk or Loki partition eligibility,
+infer ambiguous time bounds, change public tool schemas, or modify unrelated
+files to address the documented Clippy baseline.
+
+The next optional slice should prevent successful downloadable streaming
+artifacts from holding the process-wide disk ceiling indefinitely while making
+artifact reclamation safe under concurrent downloads.
+
+- Add an internal lifecycle state and download/read pin for committed streaming
+  artifacts. A range read or metadata lookup that will lead to a read must pin
+  the exact registry generation before opening the file and release the pin
+  exactly once after the read finishes, fails, or is cancelled.
+- Add bounded, configurable retention for successful streaming artifacts and
+  manifests. Keep the setting internal/server-side and preserve current public
+  tool schemas. Choose and document conservative defaults and strict bounds;
+  invalid values must fall back deterministically.
+- Expiration must be based on a monotonic/testable committed-at timestamp, with
+  deterministic oldest-first ordering and artifact ID as a stable tie-breaker.
+  Do not evict an unexpired artifact merely to satisfy a waiting reservation.
+- An expired pinned artifact must enter a non-readable pending-delete state but
+  remain physically present and fully reserved until the final pin is released.
+  New reads must fail consistently once deletion begins; existing pinned reads
+  must complete safely.
+- Delete the artifact, manifest, manifest partial, and any replacement/cleanup
+  sidecars before unregistering or releasing their exact server-wide leases.
+  A physical deletion failure must retain registry ownership and reservations
+  and be retried by a later bounded sweep without busy looping.
+- A successful reclamation must wake FIFO disk-reservation waiters through the
+  existing coordinator. It must not bypass transaction ownership, deadline, or
+  cancellation checks and must never release another artifact's lease.
+- Integrate the sweeper with graceful server shutdown and process-session
+  cleanup. Stop scheduling sweeps, prevent new pins, drain active pins and
+  deletion work within a bounded shutdown deadline, then use the existing
+  conservative cleanup/reconciliation rules. Forced termination remains the
+  next process's abandoned-session responsibility.
+- Keep abandoned-session scavenging PID-safe and conservative when process
+  inspection fails. Never delete a directory owned by a live process.
+- Preserve `STREAMING_PARTITION_CONCURRENCY`, its default of four, and its 1-16
+  bound. Preserve per-request quotas, per-transaction accounting, the
+  final-artifact projected-space rule, and strict FIFO reservation fairness.
+
+Add deterministic test-only clocks, sweep triggers, pin guards, and deletion
+fault seams. Add focused tests for:
+
+- expired versus unexpired successful Splunk, Loki, and CircleCI artifacts;
+- concurrent full and range downloads while expiration becomes eligible;
+- an expired pinned artifact deferring physical deletion and lease release;
+- rejection of new reads after the pending-delete transition;
+- exact artifact-plus-manifest reservation release after the final pin;
+- deterministic oldest-first and artifact-ID tie ordering;
+- a FIFO reservation waiter waking only after successful physical reclamation;
+- deletion failure retaining files, registry state, and exact reservations;
+- retry success reconciling filesystem, registry, pins, and reservations;
+- manifest replacement and manifest-partial cleanup during expiration;
+- cancellation and shutdown while reads, sweeps, and reservation waits overlap;
+- session cleanup with live, failed, expired, and pending-delete artifacts;
+- abandoned-session reconciliation without deleting live-process artifacts;
+- peak server-wide reserved bytes never exceeding the ceiling;
+- no artifact, partial, sidecar, manifest partial, stale pin, or registry entry
+  remaining after completed deletion and transactional failure cleanup;
+- unchanged public tool schemas and unchanged single-request and multipart
+  Splunk/Loki behavior.
+
+Re-run non-empty Splunk and Grafana/Loki multipart tests in both ordering
+directions, CircleCI manifest tests, raw-artifact and range-download tests,
+tool-schema tests, HTTP artifact-download tests, and streaming-transport tests.
+
+Run:
+
+- `cargo fmt --all`
+- focused ingestion, reservation-coordinator, Splunk controller, Grafana
+  controller, CircleCI controller, raw-artifact, HTTP artifact-download,
+  tool-schema, and streaming-transport tests
+- `cargo check --all-features`
+- `cargo clippy --all-features --all-targets -- -D warnings`
+- `cargo test --all-features -j 1`
+- `git diff --check`
+
+Preserve and report the exact documented five-warning pre-existing Clippy
+baseline: `cast_possible_truncation` and `cast_possible_wrap` in
+`src/transport/response_cache.rs`, `too_many_lines` and `map_unwrap_or` in the
+generic transport, and `map_unwrap_or` in `src/vendor/ninjaone/mod.rs`. Update
+this document with a dated checkpoint only after implementation and the full
+verification pass. Commit the completed slice on `main`, but do not push.
+
+## Download-safe artifact retention and reclamation checkpoint (2026-08-22)
+
+### Completed
+
+- Added private registry generations, readable/pending-delete lifecycle state,
+  and checked read-pin counts. `artifact_read` and HTTP full/range downloads
+  pin the exact generation before opening the file and retain the guard until
+  the read completes, fails, or its response/future is dropped.
+- Expiration atomically makes an artifact non-readable. Existing pinned reads
+  may finish, new reads receive the existing not-found/expired response, and
+  files plus reservations remain live until the last exact-generation pin is
+  released. Final-pin release schedules reclamation exactly once; stale or
+  duplicate releases cannot affect another generation.
+- Added internal `STREAMING_ARTIFACT_RETENTION_SECONDS` configuration with a
+  conservative one-hour default and strict five-minute through seven-day
+  bounds. Added `STREAMING_ARTIFACT_SWEEP_INTERVAL_SECONDS` with a one-minute
+  default and strict five-second through one-hour bounds. Invalid, missing, or
+  out-of-range values fall back deterministically to their defaults. Public
+  tool schemas are unchanged.
+- Retention age uses a monotonic process clock and begins only after the final
+  manifest reservation successfully attaches. Provisional transport inputs,
+  canonical parts, and final artifacts still owned by a live transaction are
+  not retention-eligible.
+- Each pass considers at most 64 artifacts in deterministic oldest-first order
+  with artifact ID as the stable tie-breaker. Pinned pending entries do not
+  consume future sweep slots, so they cannot starve later expired artifacts.
+  Unexpired artifacts are never evicted to satisfy reservation waiters.
+- Reclamation removes the artifact, artifact partial, manifest, manifest
+  partial, and manifest replacement/cleanup sidecars before unregistering the
+  exact registry generation and releasing its artifact/manifest leases. A
+  physical deletion failure retains pending registry ownership and the exact
+  reservations for a later bounded retry.
+- Successful physical reclamation releases through the existing server-wide
+  coordinator, preserving transaction ownership, checked arithmetic, strict
+  FIFO waiter ordering, cancellation, deadlines, per-request quotas,
+  per-transaction accounting, and the projected-final-artifact rule.
+- HTTP and stdio transports start the retention worker and perform bounded
+  graceful shutdown. Shutdown stops new pins and sweeps, waits up to five
+  seconds for active reads, aborts a stuck sweep, drains eligible deletion
+  work, and then applies the existing conservative session cleanup and
+  reconciliation. A session with active pins remains for abandoned-session
+  recovery rather than being deleted underneath a live read.
+- Missing-file reconciliation now recognizes manifest replacement sidecars.
+  Abandoned-session scavenging remains PID-safe and treats process-inspection
+  failure conservatively, so it does not delete another live process's
+  artifact directory.
+- Preserved Splunk and Loki partition eligibility and exact bound handling,
+  every normalization/transport/merge/manifest/cancellation invariant,
+  `STREAMING_PARTITION_CONCURRENCY`, its default of four and 1-16 bound, and
+  all single-request behavior.
+
+### Focused coverage
+
+- Added deterministic committed-time and targeted sweep seams, exact pin
+  guards, deletion-failure injection, and deletion-order observation.
+- Covered expired Splunk versus unexpired Loki artifacts, pinned CircleCI
+  artifacts, full/range HTTP downloads during expiration, response-drop
+  cancellation, failed file opens, pending-delete read rejection, exact
+  artifact-plus-manifest release, deterministic ordering, bounded passes,
+  pinned-entry non-starvation, FIFO waiter wake-up, deletion failure/retry,
+  manifest partial/replacement cleanup, live transaction exclusion, session
+  cleanup with active pins, missing-file reconciliation, and PID-safe
+  abandoned-session cleanup.
+- Existing transaction rollback, manifest transition, reservation overflow,
+  owner isolation, double-release, peak-bound, cleanup, and controller tests
+  continue to cover failure isolation and absence of transactional orphans.
+
+### Verification
+
+- `cargo fmt --all`
+- Focused ingestion, reservation-coordinator, Splunk normalization/controller,
+  Grafana/Loki normalization/controller, CircleCI controller, raw-artifact,
+  HTTP artifact-download, binary shutdown, tool-schema, and
+  streaming-transport tests, including non-empty multipart ordering in both
+  directions
 - `cargo check --all-features`
 - `cargo test --all-features -j 1` (full suite passed)
 - `git diff --check`

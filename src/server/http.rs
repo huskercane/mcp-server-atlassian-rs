@@ -24,6 +24,7 @@ use axum::http::{HeaderValue, Method, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{any_service, get};
+use futures::StreamExt as _;
 use rmcp::transport::streamable_http_server::{StreamableHttpServerConfig, StreamableHttpService};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
@@ -45,6 +46,7 @@ const DEFAULT_PORT: u16 = 3000;
 ///
 /// Matches TS `startServer('http')`.
 pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::transport::raw_response::start_retention_sweeper();
     let port = std::env::var("PORT")
         .ok()
         .and_then(|v| v.parse::<u16>().ok())
@@ -61,13 +63,15 @@ pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
 
     info!(%bound, "Atlassian MCP server listening on streamable-HTTP transport");
     let shutdown_cancel = cancel;
-    axum::serve(listener, app)
+    let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             shutdown::wait().await;
             info!("shutdown signal received; draining HTTP sessions");
             shutdown_cancel.cancel();
         })
-        .await?;
+        .await;
+    crate::transport::raw_response::shutdown_and_cleanup().await;
+    result?;
     Ok(())
 }
 
@@ -131,9 +135,10 @@ pub fn build_app_with_cancel(
 }
 
 async fn download_artifact(AxumPath(id): AxumPath<String>, request: Request) -> Response {
-    let Some(artifact) = crate::transport::raw_response::artifact(&id) else {
+    let Some(pin) = crate::transport::raw_response::pin_artifact(&id) else {
         return (StatusCode::NOT_FOUND, "Artifact not found or expired").into_response();
     };
+    let artifact = pin.metadata().clone();
     let requested_range = request
         .headers()
         .get(header::RANGE)
@@ -168,7 +173,10 @@ async fn download_artifact(AxumPath(id): AxumPath<String>, request: Request) -> 
     if file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let stream = ReaderStream::new(file.take(length));
+    let stream = ReaderStream::new(file.take(length)).map(move |result| {
+        let _keep_generation_pinned = &pin;
+        result
+    });
     let status = if effective_range.is_some() {
         StatusCode::PARTIAL_CONTENT
     } else {
@@ -290,7 +298,13 @@ fn is_allowed_origin(origin: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_allowed_origin;
+    use std::time::Duration;
+
+    use axum::body::{Body, to_bytes};
+    use axum::extract::Path as AxumPath;
+    use axum::http::{Request, StatusCode, header};
+
+    use super::{download_artifact, is_allowed_origin};
 
     #[test]
     fn loopback_origins_allowed() {
@@ -316,5 +330,69 @@ mod tests {
         ] {
             assert!(!is_allowed_origin(origin), "should reject {origin}");
         }
+    }
+
+    #[tokio::test]
+    async fn full_and_range_downloads_hold_generation_pins_through_expiration() {
+        let path = crate::transport::raw_response::save_artifact(
+            "pinned-http-download",
+            "0123456789abcdef",
+        )
+        .await
+        .unwrap();
+        let artifact = crate::transport::raw_response::artifact_for_path(&path).unwrap();
+        crate::transport::raw_response::set_committed_at(&artifact.id, Duration::ZERO);
+
+        let full = download_artifact(
+            AxumPath(artifact.id.clone()),
+            Request::builder().body(Body::empty()).unwrap(),
+        )
+        .await;
+        let range = download_artifact(
+            AxumPath(artifact.id.clone()),
+            Request::builder()
+                .header(header::RANGE, "bytes=4-9")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        let cancelled = download_artifact(
+            AxumPath(artifact.id.clone()),
+            Request::builder().body(Body::empty()).unwrap(),
+        )
+        .await;
+        let ids = vec![artifact.id.clone()];
+        crate::transport::raw_response::sweep_artifacts_at(
+            &ids,
+            Duration::from_secs(2),
+            Duration::from_secs(1),
+        )
+        .await;
+
+        let rejected = download_artifact(
+            AxumPath(artifact.id.clone()),
+            Request::builder().body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(rejected.status(), StatusCode::NOT_FOUND);
+        assert!(path.exists());
+        drop(cancelled);
+        assert!(path.exists(), "other active responses retain their pins");
+        assert_eq!(
+            to_bytes(range.into_body(), 16).await.unwrap().as_ref(),
+            b"456789"
+        );
+        assert!(path.exists(), "full response still owns its read pin");
+        assert_eq!(
+            to_bytes(full.into_body(), 16).await.unwrap().as_ref(),
+            b"0123456789abcdef"
+        );
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while path.exists() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 }

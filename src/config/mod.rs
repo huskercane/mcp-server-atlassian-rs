@@ -183,6 +183,24 @@ impl Config {
             .unwrap_or(crate::constants::data_limits::DEFAULT_PARALLEL_TIME_PARTITIONS)
     }
 
+    pub(crate) fn streaming_artifact_retention(&self) -> std::time::Duration {
+        bounded_duration_seconds(
+            self.get("STREAMING_ARTIFACT_RETENTION_SECONDS"),
+            crate::constants::data_limits::DEFAULT_STREAMING_ARTIFACT_RETENTION,
+            crate::constants::data_limits::MIN_STREAMING_ARTIFACT_RETENTION,
+            crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RETENTION,
+        )
+    }
+
+    pub(crate) fn streaming_artifact_sweep_interval(&self) -> std::time::Duration {
+        bounded_duration_seconds(
+            self.get("STREAMING_ARTIFACT_SWEEP_INTERVAL_SECONDS"),
+            crate::constants::data_limits::DEFAULT_STREAMING_ARTIFACT_SWEEP_INTERVAL,
+            crate::constants::data_limits::MIN_STREAMING_ARTIFACT_SWEEP_INTERVAL,
+            crate::constants::data_limits::MAX_STREAMING_ARTIFACT_SWEEP_INTERVAL,
+        )
+    }
+
     /// Pure builder used by tests and by [`load`]. Priority is applied as
     /// follows:
     ///
@@ -362,6 +380,19 @@ impl Config {
     pub fn is_empty(&self) -> bool {
         self.shared.is_empty() && self.by_vendor.values().all(HashMap::is_empty)
     }
+}
+
+fn bounded_duration_seconds(
+    configured: Option<&str>,
+    default: std::time::Duration,
+    minimum: std::time::Duration,
+    maximum: std::time::Duration,
+) -> std::time::Duration {
+    configured
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .filter(|value| (*value >= minimum) && (*value <= maximum))
+        .unwrap_or(default)
 }
 
 fn env_map_from_process() -> HashMap<String, String> {
@@ -578,6 +609,55 @@ mod streaming_config_tests {
                 invalid.to_owned(),
             )]));
             assert_eq!(config.streaming_partition_concurrency(), 4);
+        }
+    }
+
+    #[test]
+    fn artifact_retention_and_sweep_settings_are_bounded() {
+        assert_eq!(
+            Config::default().streaming_artifact_retention(),
+            std::time::Duration::from_hours(1)
+        );
+        assert_eq!(
+            Config::default().streaming_artifact_sweep_interval(),
+            std::time::Duration::from_mins(1)
+        );
+        for (key, valid, invalid, expected) in [
+            (
+                "STREAMING_ARTIFACT_RETENTION_SECONDS",
+                "600",
+                "299",
+                std::time::Duration::from_mins(10),
+            ),
+            (
+                "STREAMING_ARTIFACT_SWEEP_INTERVAL_SECONDS",
+                "30",
+                "3601",
+                std::time::Duration::from_secs(30),
+            ),
+        ] {
+            let configured = Config::from_map(HashMap::from([(key.to_owned(), valid.to_owned())]));
+            let actual = if key.contains("RETENTION") {
+                configured.streaming_artifact_retention()
+            } else {
+                configured.streaming_artifact_sweep_interval()
+            };
+            assert_eq!(actual, expected);
+
+            let invalid = Config::from_map(HashMap::from([(key.to_owned(), invalid.to_owned())]));
+            let actual = if key.contains("RETENTION") {
+                invalid.streaming_artifact_retention()
+            } else {
+                invalid.streaming_artifact_sweep_interval()
+            };
+            assert_eq!(
+                actual,
+                if key.contains("RETENTION") {
+                    std::time::Duration::from_hours(1)
+                } else {
+                    std::time::Duration::from_mins(1)
+                }
+            );
         }
     }
 }

@@ -38,6 +38,6 @@ async fn main() -> ExitCode {
             }
         }
     };
-    raw_response::cleanup_current_session();
+    raw_response::shutdown_and_cleanup().await;
     exit
 }

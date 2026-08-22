@@ -13,8 +13,9 @@ use std::collections::HashMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{OnceLock, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use serde_json::Value;
@@ -29,6 +30,16 @@ static SESSION_DIR: OnceLock<PathBuf> = OnceLock::new();
 static ARTIFACTS: OnceLock<RwLock<HashMap<String, RegisteredArtifact>>> = OnceLock::new();
 static ORPHANED_RESERVATIONS: OnceLock<std::sync::Mutex<Vec<OrphanedReservation>>> =
     OnceLock::new();
+static NEXT_ARTIFACT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static MONOTONIC_ORIGIN: OnceLock<Instant> = OnceLock::new();
+static SHUTTING_DOWN: AtomicBool = AtomicBool::new(false);
+static PIN_RELEASED: OnceLock<tokio::sync::Notify> = OnceLock::new();
+static RECLAMATION_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+static RETENTION_SWEEPER: OnceLock<std::sync::Mutex<Option<RetentionSweeper>>> = OnceLock::new();
+#[cfg(test)]
+static DELETE_FAILURES: OnceLock<std::sync::Mutex<HashMap<PathBuf, u64>>> = OnceLock::new();
+#[cfg(test)]
+static DELETE_ATTEMPTS: OnceLock<std::sync::Mutex<Vec<PathBuf>>> = OnceLock::new();
 
 #[derive(Debug)]
 struct OrphanedReservation {
@@ -40,12 +51,61 @@ struct OrphanedReservation {
 struct RegisteredArtifact {
     metadata: ArtifactMetadata,
     disk: Option<DiskReservation>,
+    generation: u64,
+    committed_at: Duration,
+    lifecycle: ArtifactLifecycle,
+    pins: u64,
+    retention_eligible: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArtifactLifecycle {
+    Readable,
+    PendingDelete,
+}
+
+#[derive(Debug)]
+struct RetentionSweeper {
+    cancellation: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Debug)]
 struct DiskReservation {
     artifact: super::StreamingDiskLease,
     sidecar: Option<super::StreamingDiskLease>,
+}
+
+/// Exact registry-generation pin held from lookup through the final read.
+/// Dropping it releases one pin and schedules pending reclamation exactly once.
+#[derive(Debug)]
+pub struct ArtifactReadPin {
+    metadata: ArtifactMetadata,
+    generation: u64,
+    released: bool,
+}
+
+impl ArtifactReadPin {
+    pub fn metadata(&self) -> &ArtifactMetadata {
+        &self.metadata
+    }
+}
+
+impl Drop for ArtifactReadPin {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+        let should_reclaim = release_pin(&self.metadata.id, self.generation);
+        if should_reclaim && let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let id = self.metadata.id.clone();
+            let generation = self.generation;
+            runtime.spawn(async move {
+                let _ = reclaim_pending_artifact(&id, generation).await;
+            });
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -166,6 +226,7 @@ impl ArtifactWriter {
         if self.fault == Some(ArtifactWriterFault::Commit) {
             return Err(std::io::Error::other("injected artifact commit failure"));
         }
+        let generation = next_artifact_generation()?;
         fs::rename(&self.partial_path, &self.path).await?;
         let metadata = ArtifactMetadata {
             id: self.id.clone(),
@@ -189,6 +250,11 @@ impl ArtifactWriter {
                             artifact,
                             sidecar: None,
                         }),
+                    generation,
+                    committed_at: monotonic_now(),
+                    lifecycle: ArtifactLifecycle::Readable,
+                    pins: 0,
+                    retention_eligible: false,
                 },
             );
         self.committed = true;
@@ -272,21 +338,92 @@ fn artifacts() -> &'static RwLock<HashMap<String, RegisteredArtifact>> {
     ARTIFACTS.get_or_init(|| RwLock::new(HashMap::new()))
 }
 
+fn next_artifact_generation() -> std::io::Result<u64> {
+    NEXT_ARTIFACT_GENERATION
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(1)
+        })
+        .map_err(|_| std::io::Error::other("artifact generation identifier overflow"))
+}
+
+fn monotonic_now() -> Duration {
+    MONOTONIC_ORIGIN.get_or_init(Instant::now).elapsed()
+}
+
+fn pin_released() -> &'static tokio::sync::Notify {
+    PIN_RELEASED.get_or_init(tokio::sync::Notify::new)
+}
+
+fn reclamation_lock() -> &'static tokio::sync::Mutex<()> {
+    RECLAMATION_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn retention_sweeper() -> &'static std::sync::Mutex<Option<RetentionSweeper>> {
+    RETENTION_SWEEPER.get_or_init(|| std::sync::Mutex::new(None))
+}
+
 pub fn artifact(id: &str) -> Option<ArtifactMetadata> {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
     artifacts()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .get(id)
+        .filter(|registered| registered.lifecycle == ArtifactLifecycle::Readable)
         .map(|registered| registered.metadata.clone())
 }
 
 pub fn artifact_for_path(path: &Path) -> Option<ArtifactMetadata> {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
     artifacts()
         .read()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
         .values()
-        .find(|artifact| artifact.metadata.path == path)
+        .find(|artifact| {
+            artifact.lifecycle == ArtifactLifecycle::Readable && artifact.metadata.path == path
+        })
         .map(|registered| registered.metadata.clone())
+}
+
+/// Pin the current readable generation before a caller opens its file.
+pub fn pin_artifact(id: &str) -> Option<ArtifactReadPin> {
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut entries = artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if SHUTTING_DOWN.load(Ordering::Acquire) {
+        return None;
+    }
+    let registered = entries.get_mut(id)?;
+    if registered.lifecycle != ArtifactLifecycle::Readable {
+        return None;
+    }
+    registered.pins = registered.pins.checked_add(1)?;
+    Some(ArtifactReadPin {
+        metadata: registered.metadata.clone(),
+        generation: registered.generation,
+        released: false,
+    })
+}
+
+fn release_pin(id: &str, generation: u64) -> bool {
+    let mut entries = artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(registered) = entries.get_mut(id) else {
+        return false;
+    };
+    if registered.generation != generation || registered.pins == 0 {
+        return false;
+    }
+    registered.pins -= 1;
+    pin_released().notify_waiters();
+    registered.pins == 0 && registered.lifecycle == ArtifactLifecycle::PendingDelete
 }
 
 /// Reconcile externally removed artifacts with the in-memory registry. This
@@ -302,13 +439,17 @@ pub(crate) fn reconcile_missing_artifacts() {
         if path.exists() {
             if !manifest.exists()
                 && !manifest_part.exists()
+                && !manifest_auxiliary_exists(path)
                 && let Some(disk) = &mut registered.disk
             {
                 disk.sidecar.take();
             }
             return true;
         }
-        for sidecar in [&manifest, &manifest_part] {
+        let Ok(associated) = associated_paths(path) else {
+            return true;
+        };
+        for sidecar in associated.into_iter().filter(|candidate| candidate != path) {
             match std::fs::remove_file(sidecar) {
                 Ok(()) => {}
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
@@ -319,6 +460,49 @@ pub(crate) fn reconcile_missing_artifacts() {
     });
     drop(entries);
     reconcile_orphaned_reservations();
+}
+
+fn manifest_auxiliary_exists(path: &Path) -> bool {
+    let manifest = path.with_extension("manifest.json");
+    let (Some(parent), Some(manifest_name)) = (manifest.parent(), manifest.file_name()) else {
+        return false;
+    };
+    let prefix = format!("{}.", manifest_name.to_string_lossy());
+    std::fs::read_dir(parent).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|entry| entry.file_name().to_string_lossy().starts_with(&prefix))
+    })
+}
+
+fn associated_paths(path: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut paths = vec![
+        path.to_path_buf(),
+        path.with_extension("manifest.json"),
+        path.with_extension("manifest.json.part"),
+    ];
+    if let (Some(parent), Some(filename)) = (path.parent(), path.file_name()) {
+        paths.push(parent.join(format!(".{}.part", filename.to_string_lossy())));
+    }
+    let manifest = path.with_extension("manifest.json");
+    if let (Some(parent), Some(manifest_name)) = (manifest.parent(), manifest.file_name()) {
+        let prefix = format!("{}.", manifest_name.to_string_lossy());
+        match std::fs::read_dir(parent) {
+            Ok(entries) => {
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.file_name().to_string_lossy().starts_with(&prefix) {
+                        paths.push(entry.path());
+                    }
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
 }
 
 fn orphaned_reservations() -> &'static std::sync::Mutex<Vec<OrphanedReservation>> {
@@ -344,32 +528,211 @@ fn reconcile_orphaned_reservations() {
         .retain(|orphan| orphan.path.exists());
 }
 
-/// Remove a committed artifact and forget its download metadata.
-///
-/// A missing file is treated as an already-completed removal so stale
-/// registry entries cannot outlive controller cleanup or an external unlink.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ReclamationReport {
+    pub attempted: usize,
+    pub removed: usize,
+    pub failed: usize,
+}
+
+/// Remove a committed artifact without racing an existing full or range read.
+/// New reads stop immediately; physical deletion waits for the last exact
+/// generation pin and registry reservations remain live on any deletion error.
 pub async fn remove_artifact(path: &Path) -> std::io::Result<()> {
-    match fs::remove_file(path).await {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => return Err(error),
+    let pending = {
+        let mut entries = artifacts()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        entries
+            .iter_mut()
+            .find(|(_, artifact)| artifact.metadata.path == path)
+            .map(|(id, artifact)| {
+                artifact.lifecycle = ArtifactLifecycle::PendingDelete;
+                (id.clone(), artifact.generation, artifact.pins)
+            })
+    };
+    if let Some((id, generation, pins)) = pending {
+        if pins == 0 {
+            reclaim_pending_artifact(&id, generation).await?;
+        }
+        return Ok(());
     }
-    for sidecar in [
-        path.with_extension("manifest.json"),
-        path.with_extension("manifest.json.part"),
-    ] {
-        match fs::remove_file(sidecar).await {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(error),
+
+    remove_associated_files(path).await?;
+    reconcile_orphaned_reservations();
+    Ok(())
+}
+
+async fn reclaim_pending_artifact(id: &str, generation: u64) -> std::io::Result<bool> {
+    let _reclamation = reclamation_lock().lock().await;
+    let path = {
+        let entries = artifacts()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(registered) = entries.get(id) else {
+            return Ok(false);
+        };
+        if registered.generation != generation
+            || registered.lifecycle != ArtifactLifecycle::PendingDelete
+            || registered.pins != 0
+        {
+            return Ok(false);
+        }
+        registered.metadata.path.clone()
+    };
+
+    remove_associated_files(&path).await?;
+    let mut entries = artifacts()
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let removed = match entries.get(id) {
+        None => true,
+        Some(registered) if registered.generation == generation => {
+            entries.remove(id);
+            true
+        }
+        Some(_) => false,
+    };
+    drop(entries);
+    if !removed {
+        return Err(std::io::Error::other(
+            "artifact registry generation changed during reclamation",
+        ));
+    }
+    reconcile_orphaned_reservations();
+    Ok(true)
+}
+
+async fn remove_associated_files(path: &Path) -> std::io::Result<()> {
+    for candidate in associated_paths(path)? {
+        remove_reclamation_file(&candidate).await?;
+    }
+    Ok(())
+}
+
+async fn remove_reclamation_file(path: &Path) -> std::io::Result<()> {
+    #[cfg(test)]
+    {
+        DELETE_ATTEMPTS
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(path.to_path_buf());
+        let mut failures = DELETE_FAILURES
+            .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(remaining) = failures.get_mut(path)
+            && *remaining != 0
+        {
+            *remaining -= 1;
+            return Err(std::io::Error::other("injected artifact deletion failure"));
         }
     }
+    match fs::remove_file(path).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn set_committed_at(id: &str, committed_at: Duration) {
     artifacts()
         .write()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .retain(|_, artifact| artifact.metadata.path != path);
-    reconcile_orphaned_reservations();
-    Ok(())
+        .get_mut(id)
+        .expect("test artifact is registered")
+        .committed_at = committed_at;
+}
+
+#[cfg(test)]
+fn inject_delete_failures(path: PathBuf, count: u64) {
+    DELETE_FAILURES
+        .get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(path, count);
+}
+
+#[cfg(test)]
+fn take_delete_attempts() -> Vec<PathBuf> {
+    std::mem::take(
+        &mut *DELETE_ATTEMPTS
+            .get_or_init(|| std::sync::Mutex::new(Vec::new()))
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    )
+}
+
+pub(crate) async fn sweep_expired_at(now: Duration, retention: Duration) -> ReclamationReport {
+    sweep_expired_at_filtered(now, retention, None).await
+}
+
+async fn sweep_expired_at_filtered(
+    now: Duration,
+    retention: Duration,
+    only_ids: Option<&[String]>,
+) -> ReclamationReport {
+    let candidates = {
+        let mut entries = artifacts()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut ordered: Vec<_> = entries
+            .iter()
+            .filter(|(_, artifact)| {
+                only_ids.is_none_or(|ids| ids.contains(&artifact.metadata.id))
+                    && ((artifact.lifecycle == ArtifactLifecycle::PendingDelete
+                        && artifact.pins == 0)
+                        || (artifact.retention_eligible
+                            && artifact.lifecycle == ArtifactLifecycle::Readable
+                            && artifact
+                                .committed_at
+                                .checked_add(retention)
+                                .is_some_and(|expires| expires <= now)))
+            })
+            .map(|(id, artifact)| (artifact.committed_at, id.clone(), artifact.generation))
+            .collect();
+        ordered.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+        ordered.truncate(crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP);
+        for (_, id, _) in &ordered {
+            if let Some(artifact) = entries.get_mut(id) {
+                artifact.lifecycle = ArtifactLifecycle::PendingDelete;
+            }
+        }
+        ordered
+    };
+
+    let mut report = ReclamationReport::default();
+    for (_, id, generation) in candidates {
+        let pinned = artifacts()
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(&id)
+            .is_some_and(|artifact| artifact.pins != 0);
+        if pinned {
+            continue;
+        }
+        report.attempted += 1;
+        match reclaim_pending_artifact(&id, generation).await {
+            Ok(true) => report.removed += 1,
+            Ok(false) => {}
+            Err(error) => {
+                report.failed += 1;
+                debug!(%error, artifact_id = %id, "artifact reclamation deferred after deletion failure");
+            }
+        }
+    }
+    report
+}
+
+#[cfg(test)]
+pub(crate) async fn sweep_artifacts_at(
+    ids: &[String],
+    now: Duration,
+    retention: Duration,
+) -> ReclamationReport {
+    sweep_expired_at_filtered(now, retention, Some(ids)).await
 }
 
 /// Transfer a successfully committed sidecar reservation to its artifact.
@@ -385,6 +748,9 @@ pub(crate) fn attach_sidecar_reservation(
         .values_mut()
         .find(|entry| entry.metadata.path == artifact_path)
         .ok_or_else(|| std::io::Error::other("artifact is not registered"))?;
+    if registered.lifecycle != ArtifactLifecycle::Readable {
+        return Err(std::io::Error::other("artifact deletion is pending"));
+    }
     let disk = registered
         .disk
         .as_mut()
@@ -396,7 +762,103 @@ pub(crate) fn attach_sidecar_reservation(
         return Err(std::io::Error::other("sidecar uses a different disk quota"));
     }
     disk.sidecar = reservation.take();
+    registered.committed_at = monotonic_now();
+    registered.retention_eligible = true;
     Ok(())
+}
+
+/// Start the bounded periodic retention pass for the process session.
+pub fn start_retention_sweeper() {
+    let mut active = retention_sweeper()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if active.is_some() {
+        return;
+    }
+    SHUTTING_DOWN.store(false, Ordering::Release);
+    let config = crate::config::load();
+    let retention = config.streaming_artifact_retention();
+    let interval = config.streaming_artifact_sweep_interval();
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(interval);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        ticker.tick().await;
+        loop {
+            tokio::select! {
+                () = task_cancellation.cancelled() => break,
+                _ = ticker.tick() => {
+                    let report = sweep_expired_at(monotonic_now(), retention).await;
+                    if report.removed != 0 || report.failed != 0 {
+                        debug!(removed = report.removed, failed = report.failed, "completed artifact retention sweep");
+                    }
+                }
+            }
+        }
+    });
+    *active = Some(RetentionSweeper { cancellation, task });
+}
+
+/// Stop new pins and sweeps, wait a bounded time for active reads, drain
+/// eligible deletion work, then reconcile the process-owned session.
+pub async fn shutdown_and_cleanup() {
+    SHUTTING_DOWN.store(true, Ordering::Release);
+    let sweeper = retention_sweeper()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(sweeper) = sweeper {
+        sweeper.cancellation.cancel();
+        let mut task = sweeper.task;
+        if tokio::time::timeout(
+            crate::constants::data_limits::STREAMING_ARTIFACT_SHUTDOWN_TIMEOUT,
+            &mut task,
+        )
+        .await
+        .is_err()
+        {
+            task.abort();
+            let _ = task.await;
+        }
+    }
+
+    {
+        let mut entries = artifacts()
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for artifact in entries.values_mut() {
+            artifact.lifecycle = ArtifactLifecycle::PendingDelete;
+        }
+    }
+    let deadline = tokio::time::Instant::now()
+        + crate::constants::data_limits::STREAMING_ARTIFACT_SHUTDOWN_TIMEOUT;
+    loop {
+        let pins = active_pin_count();
+        if pins == 0 {
+            break;
+        }
+        if tokio::time::timeout_at(deadline, pin_released().notified())
+            .await
+            .is_err()
+        {
+            debug!(pins, "artifact shutdown deadline elapsed with active reads");
+            break;
+        }
+    }
+    if active_pin_count() == 0 {
+        let _ = sweep_expired_at(Duration::MAX, Duration::ZERO).await;
+    }
+    cleanup_current_session();
+}
+
+fn active_pin_count() -> u64 {
+    artifacts()
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .values()
+        .try_fold(0_u64, |total, artifact| total.checked_add(artifact.pins))
+        .unwrap_or(u64::MAX)
 }
 
 fn base_dir() -> PathBuf {
@@ -425,6 +887,12 @@ pub fn init() -> PathBuf {
 /// Remove artifacts owned by this process. Forced termination cannot run this
 /// hook; the next process startup removes the abandoned session directory.
 pub fn cleanup_current_session() {
+    let pins = active_pin_count();
+    if pins != 0 {
+        debug!(pins, "retaining artifact session with active reads");
+        reconcile_missing_artifacts();
+        return;
+    }
     let mut cleaned = false;
     if let Some(dir) = SESSION_DIR.get() {
         match std::fs::remove_dir_all(dir) {
@@ -573,6 +1041,13 @@ pub async fn save_artifact(filename_prefix: &str, content: &str) -> Option<PathB
     let filename = format!("{safe_prefix}-{id}.log");
     let path = dir.join(&filename);
     let partial_path = dir.join(format!(".{filename}.part"));
+    let generation = match next_artifact_generation() {
+        Ok(generation) => generation,
+        Err(error) => {
+            debug!(%error, "failed to allocate artifact generation");
+            return None;
+        }
+    };
     let write_result = async {
         let mut file = fs::File::create(&partial_path).await?;
         file.write_all(content.as_bytes()).await?;
@@ -600,6 +1075,11 @@ pub async fn save_artifact(filename_prefix: &str, content: &str) -> Option<PathB
                     RegisteredArtifact {
                         metadata,
                         disk: None,
+                        generation,
+                        committed_at: monotonic_now(),
+                        lifecycle: ArtifactLifecycle::Readable,
+                        pins: 0,
+                        retention_eligible: true,
                     },
                 );
             debug!(path = %path.display(), bytes = content.len(), "saved tool artifact");
@@ -620,9 +1100,10 @@ pub async fn read_artifact_chunk(
 ) -> std::io::Result<Option<(ArtifactMetadata, Vec<u8>, u64, bool)>> {
     use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-    let Some(metadata) = artifact(id) else {
+    let Some(pin) = pin_artifact(id) else {
         return Ok(None);
     };
+    let metadata = pin.metadata().clone();
     let offset = offset.min(metadata.size);
     let mut file = fs::File::open(&metadata.path).await?;
     file.seek(std::io::SeekFrom::Start(offset)).await?;
@@ -734,6 +1215,25 @@ fn iso_full() -> String {
 #[cfg(test)]
 mod artifact_writer_fault_tests {
     use super::*;
+
+    async fn reserved_success(
+        prefix: &str,
+        quota: &std::sync::Arc<super::super::StreamingDiskQuota>,
+    ) -> StreamedArtifact {
+        let mut writer = begin_artifact(prefix, "ndjson", "application/x-ndjson", 16)
+            .await
+            .unwrap();
+        writer.set_disk_quota(quota);
+        writer.write_chunk(b"abc").await.unwrap();
+        let artifact = writer.commit().await.unwrap();
+        let manifest = artifact.artifact.path.with_extension("manifest.json");
+        let sidecar = quota.lease().unwrap();
+        sidecar.grow(1).await.unwrap();
+        fs::write(&manifest, b"m").await.unwrap();
+        let mut sidecar = Some(sidecar);
+        attach_sidecar_reservation(&artifact.artifact.path, quota, &mut sidecar).unwrap();
+        artifact
+    }
 
     #[tokio::test]
     async fn injected_write_failure_leaves_no_partial_or_registry_entry() {
@@ -861,6 +1361,292 @@ mod artifact_writer_fault_tests {
         assert!(!sidecar.exists());
         assert!(artifact(&committed.artifact.id).is_none());
         assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn successful_splunk_expires_while_unexpired_loki_remains_reserved() {
+        let expired_quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let live_quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let expired = reserved_success("splunk-retention-expired", &expired_quota).await;
+        let live = reserved_success("loki-retention-live", &live_quota).await;
+        set_committed_at(&expired.artifact.id, Duration::from_secs(10));
+        set_committed_at(&live.artifact.id, Duration::from_secs(19));
+
+        let ids = vec![expired.artifact.id.clone(), live.artifact.id.clone()];
+        let report =
+            sweep_artifacts_at(&ids, Duration::from_secs(20), Duration::from_secs(5)).await;
+        assert!(report.removed >= 1);
+        assert!(artifact(&expired.artifact.id).is_none());
+        assert!(!expired.artifact.path.exists());
+        assert_eq!(expired_quota.reserved_bytes(), 0);
+        assert!(artifact(&live.artifact.id).is_some());
+        assert_eq!(live_quota.reserved_bytes(), 4);
+
+        remove_artifact(&live.artifact.path).await.unwrap();
+        assert_eq!(live_quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn live_transaction_artifacts_are_not_retention_eligible_before_manifest_transition() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let mut writer = begin_artifact(
+            "retention-live-transaction",
+            "ndjson",
+            "application/x-ndjson",
+            16,
+        )
+        .await
+        .unwrap();
+        writer.set_disk_quota(&quota);
+        writer.write_chunk(b"abc").await.unwrap();
+        let provisional = writer.commit().await.unwrap();
+        set_committed_at(&provisional.artifact.id, Duration::ZERO);
+        let ids = vec![provisional.artifact.id.clone()];
+
+        let report =
+            sweep_artifacts_at(&ids, Duration::from_secs(100), Duration::from_secs(1)).await;
+        assert_eq!(report, ReclamationReport::default());
+        assert!(artifact(&provisional.artifact.id).is_some());
+        assert_eq!(quota.reserved_bytes(), 3);
+
+        remove_artifact(&provisional.artifact.path).await.unwrap();
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_file_open_releases_its_exact_read_pin() {
+        let path = save_artifact("retention-open-failure", "data")
+            .await
+            .unwrap();
+        let registered = artifact_for_path(&path).unwrap();
+        fs::remove_file(&path).await.unwrap();
+
+        assert!(read_artifact_chunk(&registered.id, 0, 4).await.is_err());
+        assert_eq!(
+            artifacts()
+                .read()
+                .unwrap()
+                .get(&registered.id)
+                .unwrap()
+                .pins,
+            0
+        );
+        reconcile_missing_artifacts();
+        assert!(!artifacts().read().unwrap().contains_key(&registered.id));
+    }
+
+    #[tokio::test]
+    async fn expired_pin_blocks_new_reads_and_defers_deletion_until_release() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let committed = reserved_success("circleci-retention-pinned", &quota).await;
+        set_committed_at(&committed.artifact.id, Duration::ZERO);
+        let pin = pin_artifact(&committed.artifact.id).unwrap();
+
+        let ids = vec![committed.artifact.id.clone()];
+        let report = sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert_eq!(report.attempted, 0);
+        assert!(artifact(&committed.artifact.id).is_none());
+        assert!(pin_artifact(&committed.artifact.id).is_none());
+        assert!(committed.artifact.path.exists());
+        assert_eq!(quota.reserved_bytes(), 4);
+        cleanup_current_session();
+        assert!(
+            committed.artifact.path.exists(),
+            "session cleanup must retain a pending artifact with an active pin"
+        );
+
+        drop(pin);
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while committed.artifact.path.exists() || quota.reserved_bytes() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(quota.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn deletion_failure_retains_registry_files_and_reservations_for_retry() {
+        let quota = std::sync::Arc::new(super::super::StreamingDiskQuota::new(16));
+        let committed = reserved_success("retention-retry", &quota).await;
+        let manifest_part = committed.artifact.path.with_extension("manifest.json.part");
+        let replacement = committed
+            .artifact
+            .path
+            .with_extension("manifest.json.replaced-test");
+        fs::write(&manifest_part, b"partial").await.unwrap();
+        fs::write(&replacement, b"replacement").await.unwrap();
+        set_committed_at(&committed.artifact.id, Duration::ZERO);
+        inject_delete_failures(committed.artifact.path.clone(), 1);
+
+        let ids = vec![committed.artifact.id.clone()];
+        let failed = sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert_eq!(failed.failed, 1);
+        assert!(committed.artifact.path.exists());
+        assert_eq!(quota.reserved_bytes(), 4);
+        assert!(pin_artifact(&committed.artifact.id).is_none());
+        assert!(
+            artifacts()
+                .read()
+                .unwrap()
+                .contains_key(&committed.artifact.id),
+            "failed deletion retains the pending registry generation"
+        );
+
+        let retried =
+            sweep_artifacts_at(&ids, Duration::from_secs(3), Duration::from_secs(1)).await;
+        assert_eq!(retried.removed, 1);
+        assert!(!committed.artifact.path.exists());
+        assert!(!manifest_part.exists());
+        assert!(!replacement.exists());
+        assert_eq!(quota.reserved_bytes(), 0);
+        assert!(
+            !artifacts()
+                .read()
+                .unwrap()
+                .contains_key(&committed.artifact.id)
+        );
+    }
+
+    #[tokio::test]
+    async fn expiration_is_oldest_first_with_artifact_id_as_tie_breaker() {
+        let first_path = save_artifact("retention-order-a", "a").await.unwrap();
+        let second_path = save_artifact("retention-order-b", "b").await.unwrap();
+        let newest_path = save_artifact("retention-order-c", "c").await.unwrap();
+        let first = artifact_for_path(&first_path).unwrap();
+        let second = artifact_for_path(&second_path).unwrap();
+        let newest = artifact_for_path(&newest_path).unwrap();
+        set_committed_at(&first.id, Duration::ZERO);
+        set_committed_at(&second.id, Duration::ZERO);
+        set_committed_at(&newest.id, Duration::from_secs(1));
+        inject_delete_failures(first_path.clone(), 1);
+        inject_delete_failures(second_path.clone(), 1);
+        inject_delete_failures(newest_path.clone(), 1);
+        take_delete_attempts();
+
+        let ids = vec![first.id.clone(), second.id.clone(), newest.id.clone()];
+        let report = sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert_eq!(report.failed, 3);
+        let attempts = take_delete_attempts();
+        let artifact_attempts: Vec<_> = attempts
+            .into_iter()
+            .filter(|path| path == &first_path || path == &second_path || path == &newest_path)
+            .collect();
+        let mut expected = if first.id < second.id {
+            vec![first_path.clone(), second_path.clone()]
+        } else {
+            vec![second_path.clone(), first_path.clone()]
+        };
+        expected.push(newest_path.clone());
+        assert_eq!(artifact_attempts, expected);
+
+        sweep_artifacts_at(&ids, Duration::from_secs(3), Duration::from_secs(1)).await;
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
+        assert!(!newest_path.exists());
+    }
+
+    #[tokio::test]
+    async fn fifo_waiter_wakes_only_after_pinned_reclamation_physically_succeeds() {
+        let coordinator = std::sync::Arc::new(super::super::StreamingDiskCoordinator::new(4));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let holder = super::super::StreamingDiskQuota::with_coordinator(
+            coordinator.clone(),
+            4,
+            tokio_util::sync::CancellationToken::new(),
+            deadline,
+        );
+        let waiter = super::super::StreamingDiskQuota::with_coordinator(
+            coordinator,
+            4,
+            tokio_util::sync::CancellationToken::new(),
+            deadline,
+        );
+        let committed = reserved_success("retention-wake", &holder).await;
+        set_committed_at(&committed.artifact.id, Duration::ZERO);
+        let pin = pin_artifact(&committed.artifact.id).unwrap();
+        let waiting_lease = waiter.lease().unwrap();
+        let waiting = tokio::spawn(async move {
+            waiting_lease.grow(4).await.unwrap();
+            waiting_lease
+        });
+        tokio::task::yield_now().await;
+
+        let ids = vec![committed.artifact.id.clone()];
+        sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert!(!waiting.is_finished());
+        assert_eq!(holder.reserved_bytes(), 4);
+        drop(pin);
+        let waiting_lease = tokio::time::timeout(Duration::from_secs(10), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(holder.reserved_bytes(), 0);
+        assert_eq!(waiter.reserved_bytes(), 4);
+        drop(waiting_lease);
+        assert_eq!(waiter.reserved_bytes(), 0);
+    }
+
+    #[tokio::test]
+    async fn each_retention_pass_has_a_strict_reclamation_bound() {
+        let mut paths = Vec::new();
+        let mut ids = Vec::new();
+        for index in 0..=crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP {
+            let path = save_artifact(&format!("retention-bound-{index}"), "x")
+                .await
+                .unwrap();
+            let artifact = artifact_for_path(&path).unwrap();
+            set_committed_at(&artifact.id, Duration::ZERO);
+            paths.push(path);
+            ids.push(artifact.id);
+        }
+
+        let first = sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert_eq!(
+            first.attempted,
+            crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP
+        );
+        assert_eq!(first.removed, first.attempted);
+        assert_eq!(paths.iter().filter(|path| path.exists()).count(), 1);
+        let second = sweep_artifacts_at(&ids, Duration::from_secs(3), Duration::from_secs(1)).await;
+        assert_eq!(second.removed, 1);
+        assert!(paths.iter().all(|path| !path.exists()));
+    }
+
+    #[tokio::test]
+    async fn pinned_pending_entries_do_not_starve_later_expired_artifacts() {
+        let mut registered = Vec::new();
+        for index in 0..=crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP {
+            let path = save_artifact(&format!("retention-pinned-bound-{index}"), "x")
+                .await
+                .unwrap();
+            let artifact = artifact_for_path(&path).unwrap();
+            set_committed_at(&artifact.id, Duration::ZERO);
+            registered.push((artifact.id, path));
+        }
+        registered.sort_by(|left, right| left.0.cmp(&right.0));
+        let pins: Vec<_> = registered
+            .iter()
+            .take(crate::constants::data_limits::MAX_STREAMING_ARTIFACT_RECLAIMS_PER_SWEEP)
+            .map(|(id, _)| pin_artifact(id).unwrap())
+            .collect();
+        let ids: Vec<_> = registered.iter().map(|(id, _)| id.clone()).collect();
+
+        let first = sweep_artifacts_at(&ids, Duration::from_secs(2), Duration::from_secs(1)).await;
+        assert_eq!(first.attempted, 0);
+        let second = sweep_artifacts_at(&ids, Duration::from_secs(3), Duration::from_secs(1)).await;
+        assert_eq!(second.removed, 1);
+        assert!(!registered.last().unwrap().1.exists());
+
+        drop(pins);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while registered.iter().any(|(_, path)| path.exists()) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
     }
 
     #[test]

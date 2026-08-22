@@ -13,6 +13,7 @@ use crate::tools::AtlassianServer;
 /// `startServer('stdio')` + the SIGINT/SIGTERM handlers in
 /// `setupGracefulShutdown` (`src/index.ts:411-478`).
 pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    crate::transport::raw_response::start_retention_sweeper();
     let handler = AtlassianServer::new().map_err(boxed_err)?;
     let transport = stdio();
     let service = handler.serve(transport).await?;
@@ -30,6 +31,7 @@ pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     // Natural exit (peer closed stdio): abort the signal task so it doesn't
     // linger for a signal that will never come.
     shutdown_task.abort();
+    crate::transport::raw_response::shutdown_and_cleanup().await;
     waited?;
     Ok(())
 }
