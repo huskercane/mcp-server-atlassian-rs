@@ -12,37 +12,94 @@
 //! - `LOG_STDERR` gates console logging without touching the log file.
 
 use std::io::{BufRead, BufReader, Write};
-use std::net::TcpStream;
 use std::process::{Command as StdCommand, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use assert_cmd::cargo::cargo_bin;
 use tokio::process::Command as TokioCommand;
 
 const BIN: &str = "mcp-atlassian";
 
-/// Probe `127.0.0.1:0` to get a port the OS considers free, then drop the
-/// listener so the binary-under-test can bind it. There is a small race with
-/// any other process that grabs the port in between, but in practice this is
-/// the standard approach for ad-hoc port selection in tests.
-fn random_port() -> u16 {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind 0");
-    let port = listener.local_addr().expect("local_addr").port();
-    drop(listener);
-    port
+/// The line `run_http` writes once its listener is bound, carrying the address
+/// the OS actually gave it.
+const STARTUP_MARKER: &str = "listening on streamable-HTTP transport";
+
+/// Spawn the HTTP transport on an OS-assigned port, with stderr piped.
+///
+/// `PORT=0` on purpose: the kernel picks a port at bind time, so there is no
+/// interval in which the port is reserved for this child but not yet held by
+/// it, and therefore no way for a sibling test to be handed the same number.
+/// The child reports what it got on its startup line.
+///
+/// `RUST_LOG` is cleared so an ambient value in the developer's or CI's
+/// environment cannot decide the outcome.
+fn spawn_http(log_stderr: Option<&str>) -> tokio::process::Child {
+    let mut command = TokioCommand::new(cargo_bin(BIN));
+    command
+        .env("TRANSPORT_MODE", "http")
+        .env("PORT", "0")
+        .env_remove("RUST_LOG")
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    match log_stderr {
+        Some(value) => {
+            command.env("LOG_STDERR", value);
+        }
+        None => {
+            command.env_remove("LOG_STDERR");
+        }
+    }
+    command.spawn().expect("spawn binary")
 }
 
-/// Poll-connect the given port until something accepts or the deadline expires.
-fn wait_for_listen(port: u16, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if TcpStream::connect(("127.0.0.1", port)).is_ok() {
-            return true;
+/// Read the child's stderr until `marker` appears, returning everything read.
+///
+/// This is the readiness signal a port probe cannot be: it comes from the
+/// child itself, so no other process can satisfy it.
+async fn read_stderr_until(
+    stderr: &mut tokio::process::ChildStderr,
+    marker: &str,
+    timeout: Duration,
+) -> String {
+    use tokio::io::AsyncReadExt as _;
+
+    let deadline = tokio::time::Instant::now() + timeout;
+    let mut collected = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        if String::from_utf8_lossy(&collected).contains(marker) {
+            return String::from_utf8_lossy(&collected).into_owned();
         }
-        thread::sleep(Duration::from_millis(25));
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for {marker:?} on stderr; got:\n{}",
+            String::from_utf8_lossy(&collected)
+        );
+        match tokio::time::timeout(remaining, stderr.read(&mut buf)).await {
+            Ok(Ok(0)) => panic!(
+                "binary exited before writing {marker:?}; stderr:\n{}",
+                String::from_utf8_lossy(&collected)
+            ),
+            Ok(Ok(read)) => collected.extend_from_slice(&buf[..read]),
+            Ok(Err(error)) => panic!("reading stderr failed: {error}"),
+            // Deadline hit mid-read; the assertion above reports it next lap.
+            Err(_) => {}
+        }
     }
-    false
+}
+
+/// Pull the bound port out of the startup line's `bound=127.0.0.1:<port>`.
+fn bound_port(startup_output: &str) -> u16 {
+    let (_, rest) = startup_output
+        .split_once("127.0.0.1:")
+        .expect("startup line carries the bound address");
+    rest.chars()
+        .take_while(char::is_ascii_digit)
+        .collect::<String>()
+        .parse()
+        .expect("bound port is numeric")
 }
 
 #[test]
@@ -195,20 +252,10 @@ fn stdio_transport_answers_modern_discover_without_initialize() {
 
 #[tokio::test]
 async fn http_transport_binds_and_serves_health() {
-    let port = random_port();
-    let mut child = TokioCommand::new(cargo_bin(BIN))
-        .env("TRANSPORT_MODE", "http")
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn binary");
-
-    assert!(
-        wait_for_listen(port, Duration::from_secs(5)),
-        "binary did not bind to 127.0.0.1:{port}",
-    );
+    let mut child = spawn_http(None);
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let startup = read_stderr_until(&mut stderr, STARTUP_MARKER, Duration::from_secs(10)).await;
+    let port = bound_port(&startup);
 
     let body = reqwest::get(format!("http://127.0.0.1:{port}/"))
         .await
@@ -229,20 +276,14 @@ async fn http_transport_binds_and_serves_health() {
 #[cfg(unix)]
 #[tokio::test]
 async fn sigterm_triggers_graceful_exit() {
-    let port = random_port();
-    let mut child = TokioCommand::new(cargo_bin(BIN))
-        .env("TRANSPORT_MODE", "http")
-        .env("PORT", port.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .expect("spawn binary");
-
-    assert!(
-        wait_for_listen(port, Duration::from_secs(5)),
-        "binary did not bind to 127.0.0.1:{port}",
-    );
+    let mut child = spawn_http(None);
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    // Readiness has to come from this child, not from the port. `run_http`
+    // installs the signal handler before it binds, so a child that has written
+    // its startup line is ready to shut down gracefully — whereas an open port
+    // could belong to a sibling test's server, leaving this child to take the
+    // signal while still starting up and die on SIGTERM's default disposition.
+    read_stderr_until(&mut stderr, STARTUP_MARKER, Duration::from_secs(10)).await;
 
     let pid = child.id().expect("child pid");
     // Using /bin/kill avoids pulling `nix` in as a dev-dep for one test.
@@ -263,51 +304,53 @@ async fn sigterm_triggers_graceful_exit() {
 }
 
 /// Spawn the HTTP transport with `LOG_STDERR` set as given (or removed for
-/// `None`), wait until it binds, then kill it and return everything it wrote
-/// to stderr. `RUST_LOG` is cleared so an ambient value in the developer's or
-/// CI's environment cannot decide the outcome.
-async fn stderr_from_http_run(log_stderr: Option<&str>) -> String {
-    let port = random_port();
-    let mut command = TokioCommand::new(cargo_bin(BIN));
-    command
-        .env("TRANSPORT_MODE", "http")
-        .env("PORT", port.to_string())
-        .env_remove("RUST_LOG")
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .kill_on_drop(true);
-    match log_stderr {
-        Some(value) => {
-            command.env("LOG_STDERR", value);
-        }
-        None => {
-            command.env_remove("LOG_STDERR");
-        }
-    }
-
-    let mut child = command.spawn().expect("spawn binary");
-    assert!(
-        wait_for_listen(port, Duration::from_secs(5)),
-        "binary did not bind to 127.0.0.1:{port}",
-    );
-
+/// `None`), wait for its startup line, then kill it and return everything it
+/// wrote to stderr.
+///
+/// Only usable when logging is expected to be *on*: the startup line is both
+/// the readiness signal and the thing under test. A run that never writes it
+/// fails inside [`read_stderr_until`], naming the marker it waited for.
+async fn stderr_from_logging_http_run(log_stderr: Option<&str>) -> String {
+    let mut child = spawn_http(log_stderr);
+    let mut stderr = child.stderr.take().expect("stderr piped");
+    let collected = read_stderr_until(&mut stderr, STARTUP_MARKER, Duration::from_secs(10)).await;
     child.start_kill().ok();
-    let output = child.wait_with_output().await.expect("collect output");
-    String::from_utf8_lossy(&output.stderr).into_owned()
+    let _ = child.wait().await;
+    collected
 }
 
 #[tokio::test]
 async fn stderr_logging_is_enabled_by_default() {
-    let stderr = stderr_from_http_run(None).await;
+    let stderr = stderr_from_logging_http_run(None).await;
     assert!(
-        stderr.contains("listening on streamable-HTTP transport"),
+        stderr.contains(STARTUP_MARKER),
         "expected startup log on stderr by default, got:\n{stderr}"
     );
 }
 
 #[tokio::test]
 async fn log_stderr_off_silences_console() {
-    let stderr = stderr_from_http_run(Some("off")).await;
+    // Switching logging off removes the very line the other runs use as a
+    // readiness signal, and `PORT=0` means there is no known port to probe
+    // either. What is left is a settle window: let the child run far longer
+    // than a logging-enabled start takes, confirm it is still up (with
+    // `PORT=0` it cannot have died of a port clash), then assert it stayed
+    // silent. `stderr_logging_is_enabled_by_default` is the control — it waits
+    // for that same line and shows it lands promptly under identical
+    // conditions — so a quiet second here means silenced, not merely early.
+    //
+    // The asymmetry is deliberate: an overloaded machine can only make this
+    // window *less* conclusive, never make the assertion fail spuriously.
+    let mut child = spawn_http(Some("off"));
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert!(
+        child.try_wait().expect("poll child").is_none(),
+        "binary exited during the settle window instead of serving"
+    );
+
+    child.start_kill().ok();
+    let output = child.wait_with_output().await.expect("collect output");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.trim().is_empty(),
         "LOG_STDERR=off should leave stderr empty, got:\n{stderr}"
@@ -318,9 +361,9 @@ async fn log_stderr_off_silences_console() {
 async fn log_stderr_unrecognised_value_keeps_console_logging() {
     // Only the documented off-switches disable output; anything else must be
     // treated as "leave logging on" rather than silently swallowing logs.
-    let stderr = stderr_from_http_run(Some("yes")).await;
+    let stderr = stderr_from_logging_http_run(Some("yes")).await;
     assert!(
-        stderr.contains("listening on streamable-HTTP transport"),
+        stderr.contains(STARTUP_MARKER),
         "unrecognised LOG_STDERR value should keep stderr logging, got:\n{stderr}"
     );
 }

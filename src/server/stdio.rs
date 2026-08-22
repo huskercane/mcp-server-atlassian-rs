@@ -14,6 +14,9 @@ use crate::tools::AtlassianServer;
 /// `setupGracefulShutdown` (`src/index.ts:411-478`).
 pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     crate::transport::raw_response::start_retention_sweeper();
+    // Registered before the transport is serving, for the same reason as the
+    // HTTP transport: see `shutdown::install`.
+    let shutdown_signal = shutdown::install();
     let handler = AtlassianServer::new().map_err(boxed_err)?;
     let transport = stdio();
     let service = handler.serve(transport).await?;
@@ -22,7 +25,7 @@ pub async fn run_stdio() -> Result<(), Box<dyn std::error::Error + Send + Sync>>
     // turn makes `service.waiting()` resolve.
     let cancel = service.cancellation_token();
     let shutdown_task = tokio::spawn(async move {
-        shutdown::wait().await;
+        shutdown_signal.wait().await;
         info!("shutdown signal received; closing stdio transport");
         cancel.cancel();
     });

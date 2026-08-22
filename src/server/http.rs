@@ -52,6 +52,11 @@ pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
         .and_then(|v| v.parse::<u16>().ok())
         .unwrap_or(DEFAULT_PORT);
 
+    // Registered before the listener binds: once the port is open the process
+    // is reachable, and a SIGTERM landing before the handler exists would kill
+    // it outright instead of draining. See `shutdown::install`.
+    let shutdown_signal = shutdown::install();
+
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let listener = TcpListener::bind(addr).await?;
     let bound = listener.local_addr()?;
@@ -65,7 +70,7 @@ pub async fn run_http() -> Result<(), Box<dyn std::error::Error + Send + Sync>> 
     let shutdown_cancel = cancel;
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
-            shutdown::wait().await;
+            shutdown_signal.wait().await;
             info!("shutdown signal received; draining HTTP sessions");
             shutdown_cancel.cancel();
         })
