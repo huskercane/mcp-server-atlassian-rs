@@ -1225,6 +1225,67 @@ impl ResponseBody {
     }
 }
 
+fn log_ninjaone_request(vendor_name: &str, url: &str, method: HttpMethod, body: Option<&Value>) {
+    if vendor_name != "ninjaone" {
+        return;
+    }
+
+    let body = body.map_or(Value::Null, crate::vendor::ninjaone::sanitized_http_json);
+    debug!(
+        target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+        %url,
+        method = method.as_str(),
+        body = %body,
+        "ninjaone HTTP request"
+    );
+}
+
+fn log_ninjaone_error_response(
+    vendor_name: &str,
+    url: &str,
+    method: HttpMethod,
+    status: StatusCode,
+    body_text: &str,
+) {
+    if vendor_name != "ninjaone" {
+        return;
+    }
+
+    debug!(
+        target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+        %url,
+        method = method.as_str(),
+        status = status.as_u16(),
+        body = %crate::vendor::ninjaone::sanitized_http_text(body_text),
+        "ninjaone HTTP response"
+    );
+}
+
+fn log_ninjaone_response(
+    vendor_name: &str,
+    url: &str,
+    method: HttpMethod,
+    status: StatusCode,
+    body: &ResponseBody,
+) {
+    if vendor_name != "ninjaone" {
+        return;
+    }
+
+    let body = match body {
+        ResponseBody::Json(value) => crate::vendor::ninjaone::sanitized_http_json(value),
+        _ => serde_json::json!({ "nonJsonBody": "<omitted>" }),
+    };
+    debug!(
+        target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
+        %url,
+        method = method.as_str(),
+        status = status.as_u16(),
+        body = %body,
+        "ninjaone HTTP response"
+    );
+}
+
 /// Vendor-neutral entry point. Resolves the vendor's base URL, builds the
 /// auth header, sends the request, and classifies the response. Non-2xx
 /// responses go through [`Vendor::classify_error`] for vendor-specific
@@ -1292,19 +1353,7 @@ pub async fn fetch(
         vendor = vendor.name(),
         "dispatching API request"
     );
-    if vendor.name() == "ninjaone" {
-        let logged_body = request_body_for_log
-            .as_ref()
-            .map(crate::vendor::ninjaone::sanitized_http_json)
-            .unwrap_or(Value::Null);
-        debug!(
-            target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
-            %url,
-            method = method.as_str(),
-            body = %logged_body,
-            "ninjaone HTTP request"
-        );
-    }
+    log_ninjaone_request(vendor.name(), &url, method, request_body_for_log.as_ref());
 
     let start = std::time::Instant::now();
     let response = req.send().await.map_err(|e| map_reqwest_error(&e, &url))?;
@@ -1316,35 +1365,12 @@ pub async fn fetch(
     let response_headers = response.headers().clone();
     if !status.is_success() {
         let body_text = response.text().await.unwrap_or_default();
-        if vendor.name() == "ninjaone" {
-            debug!(
-                target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
-                %url,
-                method = method.as_str(),
-                status = status.as_u16(),
-                body = %crate::vendor::ninjaone::sanitized_http_text(&body_text),
-                "ninjaone HTTP response"
-            );
-        }
+        log_ninjaone_error_response(vendor.name(), &url, method, status, &body_text);
         return Err(vendor.classify_error(status, &body_text));
     }
 
     let body = classify_body(response).await?;
-
-    if vendor.name() == "ninjaone" {
-        let logged_body = match &body {
-            ResponseBody::Json(value) => crate::vendor::ninjaone::sanitized_http_json(value),
-            _ => serde_json::json!({ "nonJsonBody": "<omitted>" }),
-        };
-        debug!(
-            target: crate::vendor::ninjaone::HTTP_LOG_TARGET,
-            %url,
-            method = method.as_str(),
-            status = status.as_u16(),
-            body = %logged_body,
-            "ninjaone HTTP response"
-        );
-    }
+    log_ninjaone_response(vendor.name(), &url, method, status, &body);
 
     // Some APIs (notably Slack's Web API) return `200 OK` with an
     // application-level error envelope in the body (`{"ok": false, ...}`). Give

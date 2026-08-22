@@ -1550,7 +1550,10 @@ mod artifact_writer_fault_tests {
     #[tokio::test]
     async fn fifo_waiter_wakes_only_after_pinned_reclamation_physically_succeeds() {
         let coordinator = std::sync::Arc::new(super::super::StreamingDiskCoordinator::new(4));
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        // Keep the production deadline comfortably beyond scheduler delays from
+        // the rest of the parallel unit suite; the explicit timeout below still
+        // bounds the wake-up assertion itself.
+        let deadline = tokio::time::Instant::now() + Duration::from_mins(1);
         let holder = super::super::StreamingDiskQuota::with_coordinator(
             coordinator.clone(),
             4,

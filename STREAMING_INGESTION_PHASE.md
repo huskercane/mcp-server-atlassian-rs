@@ -818,3 +818,20 @@ and reports exactly the documented five pre-existing warnings and no warning
 from this slice: `cast_possible_truncation` and `cast_possible_wrap` in
 `src/transport/response_cache.rs`, `too_many_lines` and `map_unwrap_or` in the
 generic transport, and `map_unwrap_or` in `src/vendor/ninjaone/mod.rs`.
+
+## Clippy baseline cleanup and v0.14.0 release checkpoint (2026-08-22)
+
+- Removed the five previously documented Clippy warnings with checked cache
+  configuration conversions, direct `map_or`/`map_or_else` handling, and
+  focused NinjaOne request/response logging helpers that keep the generic
+  transport function bounded.
+- Corrected the subsequently unmasked test-only case-sensitive extension
+  comparison and made the retention waiter test deadline independent of
+  parallel test-scheduler delays.
+- Bumped the crate and lockfile package version from `0.13.0` to `0.14.0` for
+  the completed streaming-ingestion release. Public tool schemas and runtime
+  ingestion behavior are unchanged by this cleanup.
+- `cargo fmt --all`, `cargo check --all-features`,
+  `cargo clippy --all-features --all-targets -- -D warnings`,
+  `cargo test --all-features -j 1`, and `git diff --check` pass. Clippy now
+  completes with zero warnings across all features and targets.

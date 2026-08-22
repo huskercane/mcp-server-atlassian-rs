@@ -409,7 +409,11 @@ async fn partition_failure_cancels_drains_and_schedules_nothing_later() {
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .collect::<Vec<_>>();
     assert!(!names.iter().any(|name| {
-        name.contains("splunk-search") || name.contains("canonical-logs") || name.ends_with(".part")
+        name.contains("splunk-search")
+            || name.contains("canonical-logs")
+            || std::path::Path::new(name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("part"))
     }));
 }
 

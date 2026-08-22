@@ -51,11 +51,17 @@ impl CacheConfig {
 }
 
 fn seconds(config: &Config, key: &str, default: u64) -> Duration {
-    Duration::from_secs(positive(config, key, default as usize) as u64)
+    let configured_default = i64::try_from(default).unwrap_or(i64::MAX);
+    let seconds = u64::try_from(config.get_int(key, configured_default))
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(default);
+    Duration::from_secs(seconds)
 }
 
 fn positive(config: &Config, key: &str, default: usize) -> usize {
-    usize::try_from(config.get_int(key, default as i64))
+    let configured_default = i64::try_from(default).unwrap_or(i64::MAX);
+    usize::try_from(config.get_int(key, configured_default))
         .ok()
         .filter(|value| *value > 0)
         .unwrap_or(default)

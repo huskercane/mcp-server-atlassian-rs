@@ -90,9 +90,10 @@ pub(crate) fn sanitized_http_json(value: &Value) -> Value {
 }
 
 pub(crate) fn sanitized_http_text(text: &str) -> Value {
-    serde_json::from_str(text)
-        .map(|value| sanitized_http_json(&value))
-        .unwrap_or_else(|_| serde_json::json!({ "nonJsonBody": "<omitted>", "bytes": text.len() }))
+    serde_json::from_str(text).map_or_else(
+        |_| serde_json::json!({ "nonJsonBody": "<omitted>", "bytes": text.len() }),
+        |value| sanitized_http_json(&value),
+    )
 }
 
 #[cfg(test)]
